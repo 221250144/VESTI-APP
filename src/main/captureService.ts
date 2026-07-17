@@ -4,10 +4,13 @@ import {
   SyncEngine,
   VaultManager,
   VestiConfig,
+  sessionMessagesToVestiMessages,
+  workSessionToVestiConversation,
   type SyncResult,
 } from '@vesti/capture-core';
 import type {
   CapturePlatform,
+  ConversationExportBundle,
   Overview,
   SessionDetail,
   SessionSummary,
@@ -99,6 +102,24 @@ export class CaptureService {
     };
   }
 
+  /**
+   * Full snapshot of every captured conversation in VESTI-dashboard format.
+   * The renderer mirrors this into its Dexie store; upserts are idempotent
+   * because numeric IDs are stable hashes of the CLI session/message IDs.
+   */
+  exportConversations(): ConversationExportBundle[] {
+    const sessions = this.db.listWorkSessions({ sessionType: 'conversation', limit: 10000 });
+    return sessions.map(session => {
+      const messages = this.db.getSessionMessages(session.id);
+      const firstUserMessage = messages.find(message => message.source === 'user_input');
+      const conversation = workSessionToVestiConversation(session, firstUserMessage?.contentText?.slice(0, 200));
+      return {
+        conversation,
+        messages: sessionMessagesToVestiMessages(messages, conversation.id),
+      };
+    });
+  }
+
   async syncAll(): Promise<SyncSummary> {
     if (this.syncing) return { sessions: 0, messages: 0, tools: 0, errors: [] };
     this.syncing = true;
@@ -157,6 +178,15 @@ export class CaptureService {
   setEnabledPlatforms(platforms: CapturePlatform[]): void {
     this.enabledPlatforms = new Set(platforms.filter(platform => PRIMARY_PLATFORMS.includes(platform)));
     this.notify?.();
+  }
+
+  /** Cheap synchronous state for the floating capsule's status display. */
+  getCaptureState(): { watching: boolean; syncing: boolean; conversationCount: number } {
+    return {
+      watching: this.watching,
+      syncing: this.syncing,
+      conversationCount: this.db.getStats().totalConversations,
+    };
   }
 
   async close(): Promise<void> {

@@ -11,7 +11,9 @@ import {
 import path from 'node:path';
 import { AgentService } from './main/agentService';
 import { CaptureService } from './main/captureService';
+import { CapsuleWindowService } from './main/capsuleWindowService';
 import { SettingsService } from './main/settingsService';
+import { UiPrefsService } from './main/uiPrefsService';
 import { IPC, type AgentRunRequest, type AppSettingsUpdate, type CapturePlatform } from './shared/contracts';
 
 const PRIMARY_PLATFORMS: CapturePlatform[] = ['codex', 'cursor', 'kimi-code'];
@@ -21,6 +23,8 @@ let isQuitting = false;
 const capture = new CaptureService();
 let settings: SettingsService;
 let agent: AgentService;
+const uiPrefs = new UiPrefsService();
+let capsule: CapsuleWindowService;
 
 function assetPath(fileName: string): string {
   return app.isPackaged
@@ -30,6 +34,7 @@ function assetPath(fileName: string): string {
 
 function broadcastChange(): void {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC.changed);
+  capsule?.pushState();
   updateTrayMenu();
 }
 
@@ -55,6 +60,12 @@ function updateTrayMenu(): void {
       type: 'checkbox',
       checked: capture.isWatching,
       click: item => void capture.setWatching(item.checked).then(broadcastChange).catch(console.error),
+    },
+    {
+      label: '显示悬浮球',
+      type: 'checkbox',
+      checked: capsule ? capsule.isEnabled() : false,
+      click: item => void capsule.setEnabled(item.checked).catch(console.error),
     },
     { type: 'separator' },
     { label: '退出 Vesti', click: () => { isQuitting = true; app.quit(); } },
@@ -186,6 +197,43 @@ function registerIpc(): void {
     return agent.run(request);
   });
   ipcMain.handle(IPC.agentResults, () => agent.listResults());
+  ipcMain.handle(IPC.exportConversations, () => capture.exportConversations());
+  ipcMain.handle(IPC.uiPrefGet, (_event, key: unknown) => {
+    if (typeof key !== 'string') throw new Error('Invalid preference key');
+    return uiPrefs.get(key) ?? null;
+  });
+  ipcMain.handle(IPC.uiPrefSet, async (_event, key: unknown, value: unknown) => {
+    if (typeof key !== 'string') throw new Error('Invalid preference key');
+    await uiPrefs.set(key, value);
+  });
+  ipcMain.handle(IPC.capsuleState, () => capsule.getState());
+  ipcMain.handle(IPC.capsuleSync, async () => {
+    await capture.syncAll();
+    broadcastChange();
+  });
+  ipcMain.handle(IPC.capsuleToggleWatch, async () => {
+    const watching = await capture.setWatching(!capture.isWatching);
+    broadcastChange();
+    return watching;
+  });
+  ipcMain.handle(IPC.capsuleOpenMain, () => showMainWindow());
+  ipcMain.handle(IPC.capsuleHide, () => capsule.setEnabled(false));
+  ipcMain.handle(IPC.capsuleSetExpanded, (_event, expanded: unknown) =>
+    capsule.setExpanded(expanded === true));
+  ipcMain.on(IPC.capsuleDragMove, (_event, x: unknown, y: unknown) => {
+    if (typeof x === 'number' && typeof y === 'number') capsule.handleDragMove(x, y);
+  });
+  ipcMain.handle(IPC.capsuleDragEnd, async (_event, x: unknown, y: unknown) => {
+    if (typeof x === 'number' && typeof y === 'number') await capsule.handleDragEnd(x, y);
+  });
+  ipcMain.on(IPC.capsuleContextMenu, () => {
+    capsule.showContextMenu({
+      open: '打开 Vesti',
+      sync: '立即同步',
+      watching: '实时采集',
+      hide: '隐藏悬浮球',
+    });
+  });
 }
 
 async function createWindow(): Promise<void> {
@@ -216,7 +264,15 @@ async function createWindow(): Promise<void> {
   });
   mainWindow.on('show', updateTrayMenu);
   mainWindow.on('hide', updateTrayMenu);
-  mainWindow.on('closed', () => { mainWindow = null; });
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+    // The capsule window keeps the process alive; without close-to-tray the
+    // main window closing is the user's quit signal.
+    if (!isQuitting && settings && !settings.general.closeToTray) {
+      isQuitting = true;
+      app.quit();
+    }
+  });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('https://')) void shell.openExternal(url);
     return { action: 'deny' };
@@ -237,12 +293,32 @@ app.whenReady().then(async () => {
   app.setAppUserModelId('com.vesti.desktop');
   settings = new SettingsService(app.getPath('userData'), app.getVersion());
   await settings.initialize();
+  await uiPrefs.initialize(app.getPath('userData'), (key, value) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send(IPC.uiPrefChanged, key, value);
+    }
+    if (key === 'capsule.enabled' && capsule) {
+      if (value === false) void capsule.hide();
+      else void capsule.show();
+    }
+    updateTrayMenu();
+  });
+  capsule = new CapsuleWindowService({
+    getState: () => capture.getCaptureState(),
+    sync: () => capture.syncAll(),
+    toggleWatch: () => capture.setWatching(!capture.isWatching),
+    openMainWindow: () => showMainWindow(),
+    loadPreference: key => uiPrefs.get(key),
+    savePreference: (key, value) => uiPrefs.set(key, value),
+    iconPath: () => assetPath(process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
+  });
   await applyProxySettings();
   applyGeneralSettings();
   await capture.initialize(broadcastChange, settings.dataDirectory, settings.capture.enabledPlatforms);
   agent = new AgentService(capture, settings);
   registerIpc();
   await createWindow();
+  if (capsule.isEnabled()) void capsule.show().catch(console.error);
   createTray();
   void capture.syncAll().then(broadcastChange).catch(console.error);
   if (settings.capture.watchOnStartup) void capture.setWatching(true).then(updateTrayMenu).catch(console.error);

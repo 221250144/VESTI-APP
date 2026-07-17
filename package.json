@@ -1,7 +1,7 @@
 {
   "name": "vesti-app",
   "productName": "Vesti",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Local-first desktop hub for AI conversation capture and reflection",
   "author": "VESTI Team",
   "private": true,
@@ -16,13 +16,24 @@
     "make": "pnpm package && electron-builder --prepackaged out/Vesti-win32-x64 --win nsis --config electron-builder.yml"
   },
   "dependencies": {
+    "@fontsource/inter": "^5.2.8",
+    "@fontsource/lora": "^5.2.8",
+    "@fontsource/newsreader": "^5.2.10",
+    "@fontsource/nunito-sans": "^5.2.7",
     "@vesti/capture-core": "workspace:*",
+    "@vesti/ui": "workspace:*",
     "better-sqlite3": "12.10.0",
     "chokidar": "^4.0.3",
+    "dexie": "^4.3.0",
+    "fflate": "^0.8.2",
     "fs-extra": "^11.3.2",
     "glob": "^11.0.3",
+    "katex": "^0.16.38",
+    "lucide-react": "0.564.0",
     "react": "19.2.7",
-    "react-dom": "19.2.7"
+    "react-dom": "19.2.7",
+    "yaml": "^2.8.3",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@electron-forge/cli": "7.11.2",
@@ -30,12 +41,18 @@
     "@electron-forge/plugin-auto-unpack-natives": "7.11.2",
     "@electron-forge/plugin-vite": "7.11.2",
     "@electron-forge/shared-types": "7.11.2",
+    "@tailwindcss/typography": "^0.5.19",
+    "@types/chrome": "0.0.258",
     "@types/node": "^22.15.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@vitejs/plugin-react": "^5.1.1",
+    "autoprefixer": "^10.4.20",
     "electron": "41.10.1",
     "electron-builder": "26.15.6",
+    "postcss": "^8.5.0",
+    "tailwindcss": "^3.4.17",
+    "tailwindcss-animate": "^1.0.7",
     "tslib": "2.8.1",
     "typescript": "^5.9.3",
     "vite": "8.1.4"
@@ -45,7 +62,10 @@
   },
   "pnpm": {
     "overrides": {
-      "@vesti/capture-core>better-sqlite3": "12.10.0"
+      "@vesti/capture-core>better-sqlite3": "12.10.0",
+      "react": "19.2.7",
+      "react-dom": "19.2.7",
+      "lucide-react": "0.564.0"
     },
     "onlyBuiltDependencies": [
       "better-sqlite3",

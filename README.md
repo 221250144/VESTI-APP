@@ -2,7 +2,7 @@
 
 Vesti 的本地优先桌面端：自动发现并归档本机 AI 编程工具的会话，把不同平台的数据标准化到同一个本地数据库，再通过 Summary / Explore 进行消费。
 
-> 当前版本：`0.2.1`。Windows x64 已验证；macOS 和 Linux 尚未完成发布验证。
+> 当前版本：`0.3.0`。Windows x64 已验证；macOS 和 Linux 尚未完成发布验证。
 
 ## 当前能力
 
@@ -38,7 +38,7 @@ pnpm make
 生成文件：
 
 ```text
-out/installer/Vesti-0.2.1-Setup.exe
+out/installer/Vesti-0.3.0-Setup.exe
 ```
 
 安装器采用 NSIS 向导，可选择程序安装目录；完成页可选择创建桌面快捷方式和立即启动。当前开发构建未进行商业代码签名，Windows 可能显示“未知发布者”。
@@ -108,7 +108,7 @@ App 只依赖 `@vesti/capture-core` 的包接口，不直接引用 CLI 命令。
 
 ### 托盘中看不到 Vesti
 
-确认运行的是 `0.2.1` 或更新版本。Windows 可能把新图标放进任务栏右侧的“隐藏的图标”区域；可在 Windows 任务栏设置中将 Vesti 固定显示。右键托盘图标可以打开/隐藏窗口、立即同步、暂停采集或退出。
+确认运行的是 `0.3.0` 或更新版本。Windows 可能把新图标放进任务栏右侧的“隐藏的图标”区域；可在 Windows 任务栏设置中将 Vesti 固定显示。右键托盘图标可以打开/隐藏窗口、立即同步、暂停采集或退出。
 
 ### Summary / Explore 提示网络错误
 

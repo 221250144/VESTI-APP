@@ -15,7 +15,12 @@
     "isolatedModules": true,
     "noEmit": true,
     "jsx": "react-jsx",
-    "types": ["node", "vite/client"]
+    "types": ["node", "vite/client", "chrome"],
+    "baseUrl": ".",
+    "paths": {
+      "@vesti/ui": ["packages/vesti-ui/src/index.ts"],
+      "@vesti/content-package": ["packages/vesti-content-package/src/index.ts"]
+    }
   },
-  "include": ["src", "*.ts"]
+  "include": ["src", "packages/vesti-ui/src", "packages/vesti-content-package/src", "*.ts"]
 }

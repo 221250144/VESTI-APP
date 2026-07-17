@@ -18,6 +18,9 @@ const config: ForgeConfig = {
       /^\/\.build-cache(?:\/|$)/,
       /^\/node_modules\/(?!better-sqlite3(?:\/|$)|bindings(?:\/|$)|file-uri-to-path(?:\/|$))/,
       /^\/node_modules\/\.pnpm(?:\/|$)/,
+      // Workspace packages are bundled by Vite from source; their local
+      // node_modules are pnpm symlinks Windows cannot copy without admin.
+      /^\/packages\/[^/]+\/node_modules(?:\/|$)/,
     ],
   },
   // scripts/prepare-native.mjs installs the matching official prebuild first.
