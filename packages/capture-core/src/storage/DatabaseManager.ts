@@ -1,0 +1,1474 @@
+/**
+ * Database Manager v2
+ * SQLite with WAL mode, FTS5
+ * New schema: work_sessions, turns, messages, tool_executions, subagent_links,
+ * context_compactions, system_events
+ */
+
+import fs from 'fs-extra';
+import path from 'path';
+import type {
+  VestiConversation,
+  VestiMessage,
+  ToolExecution,
+  Subagent,
+  SearchResult,
+  VestiStats,
+} from '../types/index.js';
+import type {
+  WorkSession,
+  Turn,
+  SessionMessage,
+  UnifiedToolExecution,
+  SubagentLink,
+  ContextCompaction,
+  SystemEvent,
+  MessageSource,
+} from '../types/unified.js';
+
+type Database = import('better-sqlite3').Database;
+
+export class DatabaseManager {
+  private dbPath: string;
+  private db: Database | null = null;
+
+  constructor(dbPath: string) {
+    this.dbPath = dbPath;
+  }
+
+  async initialize(): Promise<void> {
+    if (this.db) return;
+    await fs.ensureDir(path.dirname(this.dbPath));
+
+    const BetterSqlite3 = (await import('better-sqlite3')).default;
+    this.db = new BetterSqlite3(this.dbPath) as Database;
+    this.db.pragma('journal_mode = WAL');
+    this.db.pragma('foreign_keys = ON');
+
+    this.createTables();
+    this.migrateAddColumns();
+    this.createIndexes();
+    this.createFTS();
+  }
+
+  private getDb(): Database {
+    if (!this.db) throw new Error('Database not initialized');
+    return this.db;
+  }
+
+  // ==================== Schema ====================
+
+  private createTables(): void {
+    const db = this.getDb();
+
+    // v2: work_sessions (replaces conversations)
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS work_sessions (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        platform_version TEXT,
+        project_path TEXT NOT NULL DEFAULT '',
+        git_branch TEXT,
+        git_remote TEXT,
+        model TEXT,
+        models TEXT,
+        title TEXT NOT NULL DEFAULT 'Untitled',
+        summary TEXT,
+        tags TEXT DEFAULT '[]',
+        status TEXT DEFAULT 'active',
+        started_at INTEGER NOT NULL,
+        ended_at INTEGER,
+        last_activity_at INTEGER NOT NULL,
+        duration_ms INTEGER DEFAULT 0,
+        message_count INTEGER DEFAULT 0,
+        user_input_count INTEGER DEFAULT 0,
+        assistant_message_count INTEGER DEFAULT 0,
+        thinking_count INTEGER DEFAULT 0,
+        tool_call_count INTEGER DEFAULT 0,
+        code_block_count INTEGER DEFAULT 0,
+        turn_count INTEGER DEFAULT 0,
+        total_input_tokens INTEGER DEFAULT 0,
+        total_output_tokens INTEGER DEFAULT 0,
+        total_cache_creation_tokens INTEGER DEFAULT 0,
+        total_cache_read_tokens INTEGER DEFAULT 0,
+        has_subagents INTEGER DEFAULT 0,
+        has_context_compaction INTEGER DEFAULT 0,
+        agent_meta TEXT,
+        claude_code_version TEXT,
+        session_type TEXT DEFAULT 'conversation',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `);
+
+    // v2: turns
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS turns (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        user_input TEXT,
+        user_input_message_id TEXT,
+        assistant_response TEXT,
+        assistant_response_message_id TEXT,
+        message_count INTEGER DEFAULT 0,
+        tool_execution_count INTEGER DEFAULT 0,
+        thinking_tokens INTEGER DEFAULT 0,
+        input_tokens INTEGER DEFAULT 0,
+        output_tokens INTEGER DEFAULT 0,
+        started_at INTEGER NOT NULL,
+        ended_at INTEGER,
+        duration_ms INTEGER DEFAULT 0,
+        FOREIGN KEY (session_id) REFERENCES work_sessions(id) ON DELETE CASCADE
+      )
+    `);
+
+    // v2: messages (enhanced with source, turn_id, sequence)
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS messages (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        turn_id TEXT,
+        source TEXT NOT NULL DEFAULT 'assistant_text',
+        sequence INTEGER DEFAULT 0,
+        role TEXT NOT NULL,
+        content_text TEXT,
+        content_thinking TEXT,
+        content_tool_name TEXT,
+        content_tool_input TEXT,
+        content_tool_output TEXT,
+        content_tool_error TEXT,
+        cwd TEXT,
+        git_branch TEXT,
+        token_input INTEGER,
+        token_output INTEGER,
+        token_cache_creation INTEGER,
+        token_cache_read INTEGER,
+        token_reasoning INTEGER,
+        model TEXT,
+        stop_reason TEXT,
+        parent_id TEXT,
+        depth INTEGER DEFAULT 0,
+        is_sidechain INTEGER DEFAULT 0,
+        agent_id TEXT,
+        timestamp INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES work_sessions(id) ON DELETE CASCADE
+      )
+    `);
+
+    // v2: tool_executions (enhanced with turn_id, tool_category, outcome)
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS tool_executions (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        turn_id TEXT,
+        sequence INTEGER DEFAULT 0,
+        tool_use_message_id TEXT NOT NULL,
+        tool_result_message_id TEXT,
+        tool_use_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        tool_category TEXT DEFAULT 'other',
+        outcome TEXT DEFAULT 'pending',
+        input_summary TEXT,
+        output_summary TEXT,
+        is_error INTEGER DEFAULT 0,
+        exit_code INTEGER,
+        duration_ms INTEGER,
+        timestamp INTEGER NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES work_sessions(id) ON DELETE CASCADE
+      )
+    `);
+
+    // v2: subagent_links (replaces subagents)
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS subagent_links (
+        id TEXT PRIMARY KEY,
+        parent_session_id TEXT NOT NULL,
+        child_session_id TEXT,
+        agent_id TEXT NOT NULL,
+        agent_role TEXT,
+        slug TEXT,
+        file_path TEXT NOT NULL,
+        message_count INTEGER DEFAULT 0,
+        spawned_at INTEGER,
+        FOREIGN KEY (parent_session_id) REFERENCES work_sessions(id) ON DELETE CASCADE
+      )
+    `);
+
+    // v2: context_compactions
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS context_compactions (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        compacted_at INTEGER NOT NULL,
+        messages_before INTEGER,
+        messages_after INTEGER,
+        summary TEXT,
+        FOREIGN KEY (session_id) REFERENCES work_sessions(id) ON DELETE CASCADE
+      )
+    `);
+
+    // v2: system_events
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS system_events (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        turn_id TEXT,
+        event_type TEXT NOT NULL,
+        message TEXT,
+        metadata TEXT,
+        timestamp INTEGER NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES work_sessions(id) ON DELETE CASCADE
+      )
+    `);
+
+    // Keep sync_state
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS sync_state (
+        file_path TEXT PRIMARY KEY,
+        platform TEXT NOT NULL,
+        last_position INTEGER DEFAULT 0,
+        last_modified INTEGER DEFAULT 0,
+        session_id TEXT,
+        conversation_id TEXT
+      )
+    `);
+
+    // Migrate old data if needed
+    this.migrateFromV1();
+  }
+
+  private createIndexes(): void {
+    const db = this.getDb();
+    const indexes = [
+      // work_sessions
+      'CREATE INDEX IF NOT EXISTS idx_ws_platform ON work_sessions(platform)',
+      'CREATE INDEX IF NOT EXISTS idx_ws_started ON work_sessions(started_at DESC)',
+      'CREATE INDEX IF NOT EXISTS idx_ws_project ON work_sessions(project_path)',
+      'CREATE INDEX IF NOT EXISTS idx_ws_session ON work_sessions(session_id)',
+      // turns
+      'CREATE INDEX IF NOT EXISTS idx_turn_session ON turns(session_id)',
+      'CREATE INDEX IF NOT EXISTS idx_turn_seq ON turns(session_id, sequence)',
+      // messages
+      'CREATE INDEX IF NOT EXISTS idx_msg_session ON messages(session_id)',
+      'CREATE INDEX IF NOT EXISTS idx_msg_turn ON messages(turn_id)',
+      'CREATE INDEX IF NOT EXISTS idx_msg_source ON messages(source)',
+      'CREATE INDEX IF NOT EXISTS idx_msg_timestamp ON messages(timestamp)',
+      'CREATE INDEX IF NOT EXISTS idx_msg_parent ON messages(parent_id)',
+      // tool_executions
+      'CREATE INDEX IF NOT EXISTS idx_tool_session ON tool_executions(session_id)',
+      'CREATE INDEX IF NOT EXISTS idx_tool_turn ON tool_executions(turn_id)',
+      'CREATE INDEX IF NOT EXISTS idx_tool_use_id ON tool_executions(tool_use_id)',
+      'CREATE INDEX IF NOT EXISTS idx_tool_category ON tool_executions(tool_category)',
+      // subagent_links
+      'CREATE INDEX IF NOT EXISTS idx_sub_parent ON subagent_links(parent_session_id)',
+      // system_events
+      'CREATE INDEX IF NOT EXISTS idx_evt_session ON system_events(session_id)',
+      'CREATE INDEX IF NOT EXISTS idx_evt_type ON system_events(event_type)',
+    ];
+    for (const sql of indexes) {
+      db.exec(sql);
+    }
+  }
+
+  private createFTS(): void {
+    const db = this.getDb();
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+        content_text, content_thinking, content_tool_name, content_tool_input, content_tool_output,
+        content='messages',
+        content_rowid='rowid'
+      )
+    `);
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
+        title, summary,
+        content='work_sessions',
+        content_rowid='rowid'
+      )
+    `);
+
+    // Triggers to keep FTS in sync
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS msg_fts_insert AFTER INSERT ON messages BEGIN
+        INSERT INTO messages_fts(rowid, content_text, content_thinking, content_tool_name, content_tool_input, content_tool_output)
+        VALUES (new.rowid, new.content_text, new.content_thinking, new.content_tool_name, new.content_tool_input, new.content_tool_output);
+      END
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS msg_fts_delete AFTER DELETE ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content_text, content_thinking, content_tool_name, content_tool_input, content_tool_output)
+        VALUES ('delete', old.rowid, old.content_text, old.content_thinking, old.content_tool_name, old.content_tool_input, old.content_tool_output);
+      END
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS msg_fts_update AFTER UPDATE ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content_text, content_thinking, content_tool_name, content_tool_input, content_tool_output)
+        VALUES ('delete', old.rowid, old.content_text, old.content_thinking, old.content_tool_name, old.content_tool_input, old.content_tool_output);
+        INSERT INTO messages_fts(rowid, content_text, content_thinking, content_tool_name, content_tool_input, content_tool_output)
+        VALUES (new.rowid, new.content_text, new.content_thinking, new.content_tool_name, new.content_tool_input, new.content_tool_output);
+      END
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS ws_fts_insert AFTER INSERT ON work_sessions BEGIN
+        INSERT INTO sessions_fts(rowid, title, summary)
+        VALUES (new.rowid, new.title, new.summary);
+      END
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS ws_fts_delete AFTER DELETE ON work_sessions BEGIN
+        INSERT INTO sessions_fts(sessions_fts, rowid, title, summary)
+        VALUES ('delete', old.rowid, old.title, old.summary);
+      END
+    `);
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS ws_fts_update AFTER UPDATE ON work_sessions BEGIN
+        INSERT INTO sessions_fts(sessions_fts, rowid, title, summary)
+        VALUES ('delete', old.rowid, old.title, old.summary);
+        INSERT INTO sessions_fts(rowid, title, summary)
+        VALUES (new.rowid, new.title, new.summary);
+      END
+    `);
+  }
+
+  // ==================== Migration ====================
+
+  private migrateFromV1(): void {
+    const db = this.getDb();
+    // Check if old conversations table exists
+    const hasOld = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='conversations'"
+    ).get();
+    if (!hasOld) return;
+
+    // Migrate conversations → work_sessions
+    const oldConvs = db.prepare('SELECT * FROM conversations').all() as any[];
+    if (oldConvs.length > 0) {
+      const stmt = db.prepare(`
+        INSERT OR IGNORE INTO work_sessions (
+          id, session_id, platform, platform_version, project_path, git_branch, git_remote, model,
+          title, summary, tags, status,
+          started_at, ended_at, last_activity_at, duration_ms,
+          message_count, user_input_count, assistant_message_count,
+          thinking_count, tool_call_count, code_block_count, turn_count,
+          total_input_tokens, total_output_tokens, total_cache_creation_tokens, total_cache_read_tokens,
+          has_subagents, has_context_compaction, claude_code_version, created_at, updated_at
+        ) VALUES (
+          @id, @session_id, @platform, @platform_version, @project_path, @git_branch, @git_remote, @model,
+          @title, @summary, @tags, @status,
+          @started_at, @ended_at, @last_activity_at, @duration_ms,
+          @message_count, @user_input_count, @assistant_message_count,
+          @thinking_count, @tool_call_count, @code_block_count, 0,
+          @total_input_tokens, @total_output_tokens, @total_cache_creation_tokens, @total_cache_read_tokens,
+          @has_subagents, 0, @claude_code_version, @created_at, @updated_at
+        )
+      `);
+      const migrate = db.transaction(() => {
+        for (const r of oldConvs) {
+          stmt.run({
+            id: r.id,
+            session_id: r.session_id,
+            platform: r.platform,
+            platform_version: r.platform_version ?? null,
+            project_path: r.project_path ?? '',
+            git_branch: r.git_branch ?? null,
+            git_remote: r.git_remote ?? null,
+            model: r.model ?? null,
+            title: r.title ?? 'Untitled',
+            summary: r.summary ?? null,
+            tags: r.tags ?? '[]',
+            status: r.status ?? 'active',
+            started_at: r.started_at,
+            ended_at: r.ended_at ?? null,
+            last_activity_at: r.last_activity_at,
+            duration_ms: r.duration_ms ?? 0,
+            message_count: r.message_count ?? 0,
+            user_input_count: r.user_message_count ?? 0,
+            assistant_message_count: r.assistant_message_count ?? 0,
+            thinking_count: r.thinking_count ?? 0,
+            tool_call_count: r.tool_call_count ?? 0,
+            code_block_count: r.code_block_count ?? 0,
+            total_input_tokens: r.total_input_tokens ?? 0,
+            total_output_tokens: r.total_output_tokens ?? 0,
+            total_cache_creation_tokens: r.total_cache_creation_tokens ?? 0,
+            total_cache_read_tokens: r.total_cache_read_tokens ?? 0,
+            has_subagents: r.has_subagents ?? 0,
+            claude_code_version: r.claude_code_version ?? null,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+          });
+        }
+      });
+      migrate();
+    }
+
+    // Migrate old messages (add session_id alias, source default)
+    const hasOldMsgs = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='messages' AND sql LIKE '%conversation_id%'"
+    ).get();
+    if (hasOldMsgs) {
+      // Old messages table has conversation_id, new one has session_id
+      // We need to drop old and re-sync, since schema changed significantly
+      // Clear sync_state to force re-sync
+      db.exec('DELETE FROM sync_state');
+    }
+
+    // Drop old tables after migration
+    db.exec('DROP TABLE IF EXISTS subagents');
+    db.exec('DROP TABLE IF EXISTS conversations_fts');
+    // Drop old conversations table (data migrated to work_sessions)
+    db.exec('DROP TABLE IF EXISTS conversations');
+  }
+
+  /**
+   * Add new columns to existing tables (safe for already-migrated DBs)
+   */
+  private migrateAddColumns(): void {
+    const db = this.getDb();
+    const addColumnSafe = (table: string, column: string, def: string) => {
+      try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`); } catch { /* already exists */ }
+    };
+    addColumnSafe('work_sessions', 'session_type', "TEXT DEFAULT 'conversation'");
+  }
+
+  // ==================== WorkSession CRUD ====================
+
+  upsertWorkSession(s: WorkSession): void {
+    const db = this.getDb();
+    db.prepare(`
+      INSERT INTO work_sessions (
+        id, session_id, platform, platform_version, project_path, git_branch, git_remote, model, models,
+        title, summary, tags, status,
+        started_at, ended_at, last_activity_at, duration_ms,
+        message_count, user_input_count, assistant_message_count,
+        thinking_count, tool_call_count, code_block_count, turn_count,
+        total_input_tokens, total_output_tokens, total_cache_creation_tokens, total_cache_read_tokens,
+        has_subagents, has_context_compaction, agent_meta, claude_code_version, session_type, created_at, updated_at
+      ) VALUES (
+        @id, @sessionId, @platform, @platformVersion, @projectPath, @gitBranch, @gitRemote, @model, @models,
+        @title, @summary, @tags, @status,
+        @startedAt, @endedAt, @lastActivityAt, @durationMs,
+        @messageCount, @userInputCount, @assistantMessageCount,
+        @thinkingCount, @toolCallCount, @codeBlockCount, @turnCount,
+        @totalInputTokens, @totalOutputTokens, @totalCacheCreationTokens, @totalCacheReadTokens,
+        @hasSubagents, @hasContextCompaction, @agentMeta, @claudeCodeVersion, @sessionType, @createdAt, @updatedAt
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        platform_version = excluded.platform_version,
+        project_path = excluded.project_path,
+        git_branch = excluded.git_branch,
+        git_remote = excluded.git_remote,
+        model = excluded.model,
+        title = excluded.title,
+        summary = COALESCE(work_sessions.summary, excluded.summary),
+        status = excluded.status,
+        ended_at = excluded.ended_at,
+        last_activity_at = excluded.last_activity_at,
+        duration_ms = excluded.duration_ms,
+        message_count = excluded.message_count,
+        user_input_count = excluded.user_input_count,
+        assistant_message_count = excluded.assistant_message_count,
+        thinking_count = excluded.thinking_count,
+        tool_call_count = excluded.tool_call_count,
+        code_block_count = excluded.code_block_count,
+        turn_count = excluded.turn_count,
+        total_input_tokens = excluded.total_input_tokens,
+        total_output_tokens = excluded.total_output_tokens,
+        total_cache_creation_tokens = excluded.total_cache_creation_tokens,
+        total_cache_read_tokens = excluded.total_cache_read_tokens,
+        has_subagents = excluded.has_subagents,
+        has_context_compaction = excluded.has_context_compaction,
+        agent_meta = excluded.agent_meta,
+        session_type = excluded.session_type,
+        models = excluded.models,
+        updated_at = excluded.updated_at
+    `).run({
+      id: s.id,
+      sessionId: s.sessionId,
+      platform: s.platform,
+      platformVersion: s.platformVersion ?? null,
+      projectPath: s.projectPath ?? '',
+      gitBranch: s.gitBranch ?? null,
+      gitRemote: s.gitRemote ?? null,
+      model: s.model ?? null,
+      models: s.models ?? null,
+      title: s.title,
+      summary: s.summary ?? null,
+      tags: JSON.stringify(s.tags ?? []),
+      status: s.status ?? 'active',
+      startedAt: s.startedAt,
+      endedAt: s.endedAt ?? null,
+      lastActivityAt: s.lastActivityAt,
+      durationMs: s.durationMs ?? 0,
+      messageCount: s.messageCount ?? 0,
+      userInputCount: s.userInputCount ?? 0,
+      assistantMessageCount: s.assistantMessageCount ?? 0,
+      thinkingCount: s.thinkingCount ?? 0,
+      toolCallCount: s.toolCallCount ?? 0,
+      codeBlockCount: s.codeBlockCount ?? 0,
+      turnCount: s.turnCount ?? 0,
+      totalInputTokens: s.totalInputTokens ?? 0,
+      totalOutputTokens: s.totalOutputTokens ?? 0,
+      totalCacheCreationTokens: s.totalCacheCreationTokens ?? 0,
+      totalCacheReadTokens: s.totalCacheReadTokens ?? 0,
+      hasSubagents: s.hasSubagents ? 1 : 0,
+      hasContextCompaction: s.hasContextCompaction ? 1 : 0,
+      agentMeta: s.agentMeta ?? null,
+      claudeCodeVersion: s.claudeCodeVersion ?? null,
+      sessionType: s.sessionType ?? 'conversation',
+      createdAt: s.createdAt,
+      updatedAt: s.updatedAt,
+    });
+  }
+
+  getWorkSession(id: string): WorkSession | null {
+    const row = this.getDb().prepare('SELECT * FROM work_sessions WHERE id = ?').get(id) as any;
+    return row ? this.rowToWorkSession(row) : null;
+  }
+
+  getWorkSessionBySessionId(sessionId: string): WorkSession | null {
+    const row = this.getDb().prepare('SELECT * FROM work_sessions WHERE session_id = ?').get(sessionId) as any;
+    return row ? this.rowToWorkSession(row) : null;
+  }
+
+  listWorkSessions(opts?: { platform?: string; sessionType?: string; limit?: number; offset?: number }): WorkSession[] {
+    let sql = 'SELECT * FROM work_sessions WHERE 1=1';
+    const params: any[] = [];
+
+    if (opts?.platform) {
+      sql += ' AND platform = ?';
+      params.push(opts.platform);
+    }
+    if (opts?.sessionType) {
+      sql += ' AND session_type = ?';
+      params.push(opts.sessionType);
+    }
+    sql += ' ORDER BY started_at DESC';
+    if (opts?.limit) {
+      sql += ' LIMIT ?';
+      params.push(opts.limit);
+    }
+    if (opts?.offset) {
+      sql += ' OFFSET ?';
+      params.push(opts.offset);
+    }
+
+    return (this.getDb().prepare(sql).all(...params) as any[]).map(r => this.rowToWorkSession(r));
+  }
+
+  // ==================== Turns CRUD ====================
+
+  insertTurns(turns: Turn[]): void {
+    if (turns.length === 0) return;
+    const db = this.getDb();
+
+    const stmt = db.prepare(`
+      INSERT INTO turns (
+        id, session_id, sequence, user_input, user_input_message_id,
+        assistant_response, assistant_response_message_id,
+        message_count, tool_execution_count, thinking_tokens,
+        input_tokens, output_tokens,
+        started_at, ended_at, duration_ms
+      ) VALUES (
+        @id, @sessionId, @sequence, @userInput, @userInputMessageId,
+        @assistantResponse, @assistantResponseMessageId,
+        @messageCount, @toolExecutionCount, @thinkingTokens,
+        @inputTokens, @outputTokens,
+        @startedAt, @endedAt, @durationMs
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        user_input = excluded.user_input,
+        user_input_message_id = excluded.user_input_message_id,
+        assistant_response = excluded.assistant_response,
+        assistant_response_message_id = excluded.assistant_response_message_id,
+        message_count = excluded.message_count,
+        tool_execution_count = excluded.tool_execution_count,
+        thinking_tokens = excluded.thinking_tokens,
+        input_tokens = excluded.input_tokens,
+        output_tokens = excluded.output_tokens,
+        started_at = excluded.started_at,
+        ended_at = excluded.ended_at,
+        duration_ms = excluded.duration_ms
+    `);
+
+    const insertMany = db.transaction((items: Turn[]) => {
+      for (const t of items) {
+        stmt.run({
+          id: t.id,
+          sessionId: t.sessionId,
+          sequence: t.sequence,
+          userInput: t.userInput ?? null,
+          userInputMessageId: t.userInputMessageId ?? null,
+          assistantResponse: t.assistantResponse ?? null,
+          assistantResponseMessageId: t.assistantResponseMessageId ?? null,
+          messageCount: t.messageCount ?? 0,
+          toolExecutionCount: t.toolExecutionCount ?? 0,
+          thinkingTokens: t.thinkingTokens ?? 0,
+          inputTokens: t.inputTokens ?? 0,
+          outputTokens: t.outputTokens ?? 0,
+          startedAt: t.startedAt,
+          endedAt: t.endedAt ?? null,
+          durationMs: t.durationMs ?? 0,
+        });
+      }
+    });
+
+    insertMany(turns);
+  }
+
+  getTurns(sessionId: string): Turn[] {
+    return (this.getDb().prepare(
+      'SELECT * FROM turns WHERE session_id = ? ORDER BY sequence'
+    ).all(sessionId) as any[]).map(r => ({
+      id: r.id,
+      sessionId: r.session_id,
+      sequence: r.sequence,
+      userInput: r.user_input,
+      userInputMessageId: r.user_input_message_id,
+      assistantResponse: r.assistant_response,
+      assistantResponseMessageId: r.assistant_response_message_id,
+      messageCount: r.message_count,
+      toolExecutionCount: r.tool_execution_count,
+      thinkingTokens: r.thinking_tokens,
+      inputTokens: r.input_tokens,
+      outputTokens: r.output_tokens,
+      startedAt: r.started_at,
+      endedAt: r.ended_at,
+      durationMs: r.duration_ms,
+    }));
+  }
+
+  // ==================== v1 Compat: Conversations ====================
+
+  upsertConversation(conv: VestiConversation): void {
+    // v1 compat: convert to WorkSession and store
+    this.upsertWorkSession({
+      id: conv.id,
+      sessionId: conv.sessionId,
+      platform: conv.platform,
+      platformVersion: conv.platformVersion,
+      projectPath: conv.projectPath,
+      gitBranch: conv.gitBranch,
+      gitRemote: conv.gitRemote,
+      model: conv.model,
+      title: conv.title,
+      summary: conv.summary,
+      tags: conv.tags,
+      status: conv.status,
+      startedAt: conv.startedAt,
+      endedAt: conv.endedAt,
+      lastActivityAt: conv.lastActivityAt,
+      durationMs: conv.durationMs,
+      messageCount: conv.messageCount,
+      userInputCount: conv.userMessageCount,
+      assistantMessageCount: conv.assistantMessageCount,
+      thinkingCount: conv.thinkingCount,
+      toolCallCount: conv.toolCallCount,
+      codeBlockCount: conv.codeBlockCount,
+      turnCount: 0,
+      totalInputTokens: conv.totalInputTokens,
+      totalOutputTokens: conv.totalOutputTokens,
+      totalCacheCreationTokens: conv.totalCacheCreationTokens,
+      totalCacheReadTokens: conv.totalCacheReadTokens,
+      hasSubagents: conv.hasSubagents,
+      hasContextCompaction: false,
+      sessionType: 'conversation',
+      claudeCodeVersion: conv.claudeCodeVersion,
+      createdAt: conv.createdAt,
+      updatedAt: conv.updatedAt,
+    });
+  }
+
+  getConversation(id: string): VestiConversation | null {
+    const ws = this.getWorkSession(id);
+    return ws ? this.workSessionToConversation(ws) : null;
+  }
+
+  getConversationBySessionId(sessionId: string): VestiConversation | null {
+    const ws = this.getWorkSessionBySessionId(sessionId);
+    return ws ? this.workSessionToConversation(ws) : null;
+  }
+
+  listConversations(opts?: { platform?: string; sessionType?: string; limit?: number; offset?: number }): VestiConversation[] {
+    return this.listWorkSessions(opts).map(ws => this.workSessionToConversation(ws));
+  }
+
+  // ==================== Messages CRUD ====================
+
+  insertSessionMessages(messages: SessionMessage[]): void {
+    if (messages.length === 0) return;
+    const db = this.getDb();
+
+    const stmt = db.prepare(`
+      INSERT INTO messages (
+        id, session_id, turn_id, source, sequence, role,
+        content_text, content_thinking, content_tool_name, content_tool_input,
+        content_tool_output, content_tool_error,
+        cwd, git_branch,
+        token_input, token_output, token_cache_creation, token_cache_read, token_reasoning,
+        model, stop_reason, parent_id, depth, is_sidechain, agent_id,
+        timestamp, created_at
+      ) VALUES (
+        @id, @sessionId, @turnId, @source, @sequence, @role,
+        @contentText, @contentThinking, @contentToolName, @contentToolInput,
+        @contentToolOutput, @contentToolError,
+        @cwd, @gitBranch,
+        @tokenInput, @tokenOutput, @tokenCacheCreation, @tokenCacheRead, @tokenReasoning,
+        @model, @stopReason, @parentId, @depth, @isSidechain, @agentId,
+        @timestamp, @createdAt
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        turn_id = excluded.turn_id,
+        source = excluded.source,
+        sequence = excluded.sequence,
+        role = excluded.role,
+        content_text = excluded.content_text,
+        content_thinking = excluded.content_thinking,
+        content_tool_name = excluded.content_tool_name,
+        content_tool_input = excluded.content_tool_input,
+        content_tool_output = excluded.content_tool_output,
+        content_tool_error = excluded.content_tool_error,
+        cwd = excluded.cwd,
+        git_branch = excluded.git_branch,
+        token_input = excluded.token_input,
+        token_output = excluded.token_output,
+        token_cache_creation = excluded.token_cache_creation,
+        token_cache_read = excluded.token_cache_read,
+        token_reasoning = excluded.token_reasoning,
+        model = excluded.model,
+        stop_reason = excluded.stop_reason,
+        parent_id = excluded.parent_id,
+        depth = excluded.depth,
+        is_sidechain = excluded.is_sidechain,
+        agent_id = excluded.agent_id,
+        timestamp = excluded.timestamp
+    `);
+
+    const insertMany = db.transaction((msgs: SessionMessage[]) => {
+      for (const m of msgs) {
+        stmt.run({
+          id: m.id,
+          sessionId: m.sessionId,
+          turnId: m.turnId ?? null,
+          source: m.source,
+          sequence: m.sequence ?? 0,
+          role: m.role,
+          contentText: m.contentText ?? null,
+          contentThinking: m.contentThinking ?? null,
+          contentToolName: m.contentToolName ?? null,
+          contentToolInput: m.contentToolInput ?? null,
+          contentToolOutput: m.contentToolOutput ?? null,
+          contentToolError: m.contentToolError ?? null,
+          cwd: m.cwd ?? null,
+          gitBranch: m.gitBranch ?? null,
+          tokenInput: m.tokenInput ?? null,
+          tokenOutput: m.tokenOutput ?? null,
+          tokenCacheCreation: m.tokenCacheCreation ?? null,
+          tokenCacheRead: m.tokenCacheRead ?? null,
+          tokenReasoning: m.tokenReasoning ?? null,
+          model: m.model ?? null,
+          stopReason: m.stopReason ?? null,
+          parentId: m.parentId ?? null,
+          depth: m.depth ?? 0,
+          isSidechain: m.isSidechain ? 1 : 0,
+          agentId: m.agentId ?? null,
+          timestamp: m.timestamp,
+          createdAt: m.createdAt,
+        });
+      }
+    });
+
+    insertMany(messages);
+  }
+
+  getSessionMessages(sessionId: string, opts?: { source?: string }): SessionMessage[] {
+    let sql = 'SELECT * FROM messages WHERE session_id = ?';
+    const params: any[] = [sessionId];
+    if (opts?.source) {
+      sql += ' AND source = ?';
+      params.push(opts.source);
+    }
+    sql += ' ORDER BY sequence, timestamp';
+    return (this.getDb().prepare(sql).all(...params) as any[]).map(r => this.rowToSessionMessage(r));
+  }
+
+  getSessionMessageCount(sessionId: string): number {
+    const row = this.getDb().prepare(
+      'SELECT COUNT(*) as cnt FROM messages WHERE session_id = ?'
+    ).get(sessionId) as any;
+    return row?.cnt ?? 0;
+  }
+
+  // v1 compat wrappers
+  insertMessages(messages: VestiMessage[]): void {
+    if (messages.length === 0) return;
+    // Convert VestiMessage to SessionMessage format
+    const sessionMsgs: SessionMessage[] = messages.map((m, i) => ({
+      id: m.id,
+      sessionId: m.conversationId,
+      source: this.inferSource(m),
+      sequence: i,
+      role: m.role,
+      contentText: m.contentText,
+      contentThinking: m.contentThinking,
+      contentToolName: m.contentToolName,
+      contentToolInput: m.contentToolInput,
+      contentToolOutput: m.contentToolOutput,
+      contentToolError: m.contentToolError,
+      cwd: m.cwd,
+      gitBranch: m.gitBranch,
+      tokenInput: m.tokenInput,
+      tokenOutput: m.tokenOutput,
+      tokenCacheCreation: m.tokenCacheCreation,
+      tokenCacheRead: m.tokenCacheRead,
+      model: m.model,
+      stopReason: m.stopReason,
+      parentId: m.parentId,
+      depth: m.depth,
+      isSidechain: m.isSidechain,
+      agentId: m.agentId,
+      timestamp: m.timestamp,
+      createdAt: m.createdAt,
+    }));
+    this.insertSessionMessages(sessionMsgs);
+  }
+
+  private inferSource(m: VestiMessage): MessageSource {
+    if (m.role === 'user') {
+      if (m.type === 'tool_result' || m.contentToolOutput) return 'tool_result';
+      return 'user_input';
+    }
+    if (m.contentThinking && !m.contentText) return 'assistant_think';
+    if (m.contentToolName) return 'tool_request';
+    return 'assistant_text';
+  }
+
+  getMessages(conversationId: string): VestiMessage[] {
+    return (this.getDb().prepare(
+      'SELECT * FROM messages WHERE session_id = ? ORDER BY sequence, timestamp'
+    ).all(conversationId) as any[]).map(r => this.rowToMessage(r));
+  }
+
+  getMessageCount(conversationId: string): number {
+    return this.getSessionMessageCount(conversationId);
+  }
+
+  // ==================== Tool Executions ====================
+
+  insertUnifiedToolExecutions(executions: UnifiedToolExecution[]): void {
+    if (executions.length === 0) return;
+    const db = this.getDb();
+
+    const stmt = db.prepare(`
+      INSERT INTO tool_executions (
+        id, session_id, turn_id, sequence,
+        tool_use_message_id, tool_result_message_id,
+        tool_use_id, tool_name, tool_category, outcome,
+        input_summary, output_summary,
+        is_error, exit_code, duration_ms, timestamp
+      ) VALUES (
+        @id, @sessionId, @turnId, @sequence,
+        @toolUseMessageId, @toolResultMessageId,
+        @toolUseId, @toolName, @toolCategory, @outcome,
+        @inputSummary, @outputSummary,
+        @isError, @exitCode, @durationMs, @timestamp
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        turn_id = excluded.turn_id,
+        sequence = excluded.sequence,
+        tool_result_message_id = excluded.tool_result_message_id,
+        tool_name = excluded.tool_name,
+        tool_category = excluded.tool_category,
+        outcome = excluded.outcome,
+        input_summary = excluded.input_summary,
+        output_summary = excluded.output_summary,
+        is_error = excluded.is_error,
+        exit_code = excluded.exit_code,
+        duration_ms = excluded.duration_ms,
+        timestamp = excluded.timestamp
+    `);
+
+    const insertMany = db.transaction((execs: UnifiedToolExecution[]) => {
+      for (const e of execs) {
+        stmt.run({
+          id: e.id,
+          sessionId: e.sessionId,
+          turnId: e.turnId ?? null,
+          sequence: e.sequence ?? 0,
+          toolUseMessageId: e.toolUseMessageId,
+          toolResultMessageId: e.toolResultMessageId ?? null,
+          toolUseId: e.toolUseId,
+          toolName: e.toolName,
+          toolCategory: e.toolCategory ?? 'other',
+          outcome: e.outcome ?? 'pending',
+          inputSummary: e.inputSummary ?? null,
+          outputSummary: e.outputSummary ?? null,
+          isError: e.isError ? 1 : 0,
+          exitCode: e.exitCode ?? null,
+          durationMs: e.durationMs ?? null,
+          timestamp: e.timestamp,
+        });
+      }
+    });
+
+    insertMany(executions);
+  }
+
+  getUnifiedToolExecutions(sessionId: string): UnifiedToolExecution[] {
+    return (this.getDb().prepare(
+      'SELECT * FROM tool_executions WHERE session_id = ? ORDER BY sequence, timestamp'
+    ).all(sessionId) as any[]).map(r => ({
+      id: r.id,
+      sessionId: r.session_id,
+      turnId: r.turn_id,
+      sequence: r.sequence,
+      toolUseMessageId: r.tool_use_message_id,
+      toolResultMessageId: r.tool_result_message_id,
+      toolUseId: r.tool_use_id,
+      toolName: r.tool_name,
+      toolCategory: r.tool_category,
+      outcome: r.outcome,
+      inputSummary: r.input_summary,
+      outputSummary: r.output_summary,
+      isError: r.is_error === 1,
+      exitCode: r.exit_code,
+      durationMs: r.duration_ms,
+      timestamp: r.timestamp,
+    }));
+  }
+
+  // v1 compat
+  insertToolExecutions(executions: ToolExecution[]): void {
+    if (executions.length === 0) return;
+    const unified: UnifiedToolExecution[] = executions.map((e, i) => {
+      const outcome: 'success' | 'error' = e.isError ? 'error' : 'success';
+      return {
+        id: e.id,
+        sessionId: e.conversationId,
+        sequence: i,
+        toolUseMessageId: e.toolUseMessageId,
+        toolResultMessageId: e.toolResultMessageId,
+        toolUseId: e.toolUseId,
+        toolName: e.toolName,
+        toolCategory: 'other' as const,
+        outcome,
+        inputSummary: e.inputSummary,
+        outputSummary: e.outputSummary,
+        isError: e.isError,
+        durationMs: e.durationMs,
+        timestamp: e.timestamp,
+      };
+    });
+    this.insertUnifiedToolExecutions(unified);
+  }
+
+  getToolExecutions(conversationId: string): ToolExecution[] {
+    return (this.getDb().prepare(
+      'SELECT * FROM tool_executions WHERE session_id = ? ORDER BY sequence, timestamp'
+    ).all(conversationId) as any[]).map(r => ({
+      id: r.id,
+      conversationId: r.session_id,
+      toolUseMessageId: r.tool_use_message_id,
+      toolResultMessageId: r.tool_result_message_id,
+      toolUseId: r.tool_use_id,
+      toolName: r.tool_name,
+      inputSummary: r.input_summary,
+      outputSummary: r.output_summary,
+      isError: r.is_error === 1,
+      durationMs: r.duration_ms,
+      timestamp: r.timestamp,
+    }));
+  }
+
+  // ==================== Subagent Links ====================
+
+  insertSubagentLink(link: SubagentLink): void {
+    this.getDb().prepare(`
+      INSERT OR IGNORE INTO subagent_links (
+        id, parent_session_id, child_session_id, agent_id, agent_role, slug, file_path, message_count, spawned_at
+      ) VALUES (
+        @id, @parentSessionId, @childSessionId, @agentId, @agentRole, @slug, @filePath, @messageCount, @spawnedAt
+      )
+    `).run({
+      id: link.id,
+      parentSessionId: link.parentSessionId,
+      childSessionId: link.childSessionId ?? null,
+      agentId: link.agentId,
+      agentRole: link.agentRole ?? null,
+      slug: link.slug ?? null,
+      filePath: link.filePath,
+      messageCount: link.messageCount ?? 0,
+      spawnedAt: link.spawnedAt ?? null,
+    });
+  }
+
+  getSubagentLinks(sessionId: string): SubagentLink[] {
+    return (this.getDb().prepare(
+      'SELECT * FROM subagent_links WHERE parent_session_id = ?'
+    ).all(sessionId) as any[]).map(r => ({
+      id: r.id,
+      parentSessionId: r.parent_session_id,
+      childSessionId: r.child_session_id,
+      agentId: r.agent_id,
+      agentRole: r.agent_role,
+      slug: r.slug,
+      filePath: r.file_path,
+      messageCount: r.message_count,
+      spawnedAt: r.spawned_at,
+    }));
+  }
+
+  getUnresolvedSubagentLinks(): Array<SubagentLink & { id: string }> {
+    return (this.getDb().prepare(
+      'SELECT * FROM subagent_links WHERE child_session_id IS NULL'
+    ).all() as any[]).map(r => ({
+      id: r.id,
+      parentSessionId: r.parent_session_id,
+      childSessionId: r.child_session_id,
+      agentId: r.agent_id,
+      agentRole: r.agent_role,
+      slug: r.slug,
+      filePath: r.file_path,
+      messageCount: r.message_count,
+      spawnedAt: r.spawned_at,
+    }));
+  }
+
+  updateSubagentLinkChild(linkId: string, childSessionId: string): void {
+    this.getDb().prepare(
+      'UPDATE subagent_links SET child_session_id = ? WHERE id = ?'
+    ).run(childSessionId, linkId);
+  }
+
+  // v1 compat
+  insertSubagent(sub: Subagent): void {
+    this.insertSubagentLink({
+      id: sub.id,
+      parentSessionId: sub.parentConversationId,
+      agentId: sub.agentId,
+      slug: sub.slug,
+      filePath: sub.filePath,
+      messageCount: sub.messageCount,
+    });
+  }
+
+  getSubagents(conversationId: string): Subagent[] {
+    return this.getSubagentLinks(conversationId).map(l => ({
+      id: l.id,
+      parentConversationId: l.parentSessionId,
+      agentId: l.agentId,
+      slug: l.slug,
+      filePath: l.filePath,
+      messageCount: l.messageCount,
+    }));
+  }
+
+  // ==================== Context Compactions ====================
+
+  insertContextCompactions(compactions: ContextCompaction[]): void {
+    if (compactions.length === 0) return;
+    const db = this.getDb();
+    const stmt = db.prepare(`
+      INSERT OR IGNORE INTO context_compactions (
+        id, session_id, sequence, compacted_at, messages_before, messages_after, summary
+      ) VALUES (@id, @sessionId, @sequence, @compactedAt, @messagesBefore, @messagesAfter, @summary)
+    `);
+    const insertMany = db.transaction((items: ContextCompaction[]) => {
+      for (const c of items) {
+        stmt.run({
+          id: c.id,
+          sessionId: c.sessionId,
+          sequence: c.sequence,
+          compactedAt: c.compactedAt,
+          messagesBefore: c.messagesBefore ?? null,
+          messagesAfter: c.messagesAfter ?? null,
+          summary: c.summary ?? null,
+        });
+      }
+    });
+    insertMany(compactions);
+  }
+
+  getContextCompactions(sessionId: string): ContextCompaction[] {
+    return (this.getDb().prepare(
+      'SELECT * FROM context_compactions WHERE session_id = ? ORDER BY sequence'
+    ).all(sessionId) as any[]).map(r => ({
+      id: r.id,
+      sessionId: r.session_id,
+      sequence: r.sequence,
+      compactedAt: r.compacted_at,
+      messagesBefore: r.messages_before,
+      messagesAfter: r.messages_after,
+      summary: r.summary,
+    }));
+  }
+
+  // ==================== System Events ====================
+
+  insertSystemEvents(events: SystemEvent[]): void {
+    if (events.length === 0) return;
+    const db = this.getDb();
+    const stmt = db.prepare(`
+      INSERT OR IGNORE INTO system_events (
+        id, session_id, turn_id, event_type, message, metadata, timestamp
+      ) VALUES (@id, @sessionId, @turnId, @eventType, @message, @metadata, @timestamp)
+    `);
+    const insertMany = db.transaction((items: SystemEvent[]) => {
+      for (const e of items) {
+        stmt.run({
+          id: e.id,
+          sessionId: e.sessionId,
+          turnId: e.turnId ?? null,
+          eventType: e.eventType,
+          message: e.message ?? null,
+          metadata: e.metadata ?? null,
+          timestamp: e.timestamp,
+        });
+      }
+    });
+    insertMany(events);
+  }
+
+  getSystemEvents(sessionId: string): SystemEvent[] {
+    return (this.getDb().prepare(
+      'SELECT * FROM system_events WHERE session_id = ? ORDER BY timestamp'
+    ).all(sessionId) as any[]).map(r => ({
+      id: r.id,
+      sessionId: r.session_id,
+      turnId: r.turn_id,
+      eventType: r.event_type,
+      message: r.message,
+      metadata: r.metadata,
+      timestamp: r.timestamp,
+    }));
+  }
+
+  // ==================== Sync State ====================
+
+  getSyncState(filePath: string): { lastPosition: number; lastModified: number; conversationId?: string } | null {
+    const row = this.getDb().prepare('SELECT * FROM sync_state WHERE file_path = ?').get(filePath) as any;
+    if (!row) return null;
+    return { lastPosition: row.last_position, lastModified: row.last_modified, conversationId: row.conversation_id };
+  }
+
+  setSyncState(filePath: string, platform: string, position: number, modified: number, sessionId?: string, conversationId?: string): void {
+    this.getDb().prepare(`
+      INSERT INTO sync_state (file_path, platform, last_position, last_modified, session_id, conversation_id)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(file_path) DO UPDATE SET
+        last_position = excluded.last_position,
+        last_modified = excluded.last_modified,
+        conversation_id = COALESCE(excluded.conversation_id, conversation_id)
+    `).run(filePath, platform, position, modified, sessionId ?? null, conversationId ?? null);
+  }
+
+  // ==================== Search (FTS5) ====================
+
+  searchMessages(query: string, limit = 20): SearchResult[] {
+    const db = this.getDb();
+    try {
+      const rows = db.prepare(`
+        SELECT m.*, ws.title as conv_title, ws.platform,
+               rank
+        FROM messages_fts fts
+        JOIN messages m ON m.rowid = fts.rowid
+        JOIN work_sessions ws ON m.session_id = ws.id
+        WHERE messages_fts MATCH ?
+        ORDER BY rank
+        LIMIT ?
+      `).all(query, limit) as any[];
+
+      return rows.map(r => ({
+        type: 'message' as const,
+        id: r.id,
+        conversationId: r.session_id,
+        score: -r.rank,
+        title: r.conv_title || 'Untitled',
+        preview: (r.content_text || '').slice(0, 200),
+        platform: r.platform,
+        timestamp: r.timestamp,
+      }));
+    } catch {
+      // Fallback to LIKE
+      const pattern = `%${query}%`;
+      const rows = db.prepare(`
+        SELECT m.*, ws.title as conv_title, ws.platform
+        FROM messages m
+        JOIN work_sessions ws ON m.session_id = ws.id
+        WHERE m.content_text LIKE ? OR m.content_thinking LIKE ?
+        ORDER BY m.timestamp DESC
+        LIMIT ?
+      `).all(pattern, pattern, limit) as any[];
+
+      return rows.map(r => ({
+        type: 'message' as const,
+        id: r.id,
+        conversationId: r.session_id,
+        score: 1,
+        title: r.conv_title || 'Untitled',
+        preview: (r.content_text || '').slice(0, 200),
+        platform: r.platform,
+        timestamp: r.timestamp,
+      }));
+    }
+  }
+
+  searchConversations(query: string, limit = 20): SearchResult[] {
+    const db = this.getDb();
+    try {
+      const rows = db.prepare(`
+        SELECT ws.*, rank
+        FROM sessions_fts fts
+        JOIN work_sessions ws ON ws.rowid = fts.rowid
+        WHERE sessions_fts MATCH ?
+        ORDER BY rank
+        LIMIT ?
+      `).all(query, limit) as any[];
+
+      return rows.map(r => ({
+        type: 'conversation' as const,
+        id: r.id,
+        score: -r.rank,
+        title: r.title || 'Untitled',
+        preview: r.summary || '',
+        platform: r.platform,
+        timestamp: r.started_at,
+      }));
+    } catch {
+      const pattern = `%${query}%`;
+      const rows = db.prepare(`
+        SELECT * FROM work_sessions WHERE title LIKE ? OR summary LIKE ?
+        ORDER BY started_at DESC LIMIT ?
+      `).all(pattern, pattern, limit) as any[];
+
+      return rows.map(r => ({
+        type: 'conversation' as const,
+        id: r.id,
+        score: 1,
+        title: r.title || 'Untitled',
+        preview: r.summary || '',
+        platform: r.platform,
+        timestamp: r.started_at,
+      }));
+    }
+  }
+
+  // ==================== Stats ====================
+
+  getStats(): VestiStats {
+    const db = this.getDb();
+
+    const convCount = (db.prepare('SELECT COUNT(*) as c FROM work_sessions').get() as any).c;
+    const msgCount = (db.prepare('SELECT COUNT(*) as c FROM messages').get() as any).c;
+
+    const tokenRow = db.prepare(`
+      SELECT
+        COALESCE(SUM(total_input_tokens), 0) as ti,
+        COALESCE(SUM(total_output_tokens), 0) as to2,
+        COALESCE(SUM(total_cache_creation_tokens + total_cache_read_tokens), 0) as tc
+      FROM work_sessions
+    `).get() as any;
+
+    const platformRows = db.prepare(
+      'SELECT platform, COUNT(*) as c FROM work_sessions GROUP BY platform'
+    ).all() as any[];
+    const platformBreakdown: Record<string, number> = {};
+    for (const r of platformRows) platformBreakdown[r.platform] = r.c;
+
+    const modelRows = db.prepare(
+      "SELECT model, COUNT(*) as c FROM work_sessions WHERE model IS NOT NULL AND model != '' GROUP BY model"
+    ).all() as any[];
+    const modelBreakdown: Record<string, number> = {};
+    for (const r of modelRows) modelBreakdown[r.model] = r.c;
+
+    const dailyRows = db.prepare(`
+      SELECT date(started_at / 1000, 'unixepoch') as d,
+             COUNT(*) as convs,
+             SUM(message_count) as msgs
+      FROM work_sessions
+      GROUP BY d ORDER BY d DESC LIMIT 30
+    `).all() as any[];
+    const dailyActivity = dailyRows.map(r => ({
+      date: r.d,
+      conversations: r.convs,
+      messages: r.msgs || 0,
+    }));
+
+    const projectRows = db.prepare(`
+      SELECT project_path, COUNT(*) as c FROM work_sessions
+      WHERE project_path != '' GROUP BY project_path ORDER BY c DESC LIMIT 10
+    `).all() as any[];
+    const topProjects = projectRows.map(r => ({ path: r.project_path, conversations: r.c }));
+
+    // v2: tool category breakdown
+    const toolCatRows = db.prepare(
+      'SELECT tool_category, COUNT(*) as c FROM tool_executions GROUP BY tool_category ORDER BY c DESC'
+    ).all() as any[];
+    const toolCategoryBreakdown: Record<string, number> = {};
+    for (const r of toolCatRows) toolCategoryBreakdown[r.tool_category] = r.c;
+
+    return {
+      totalConversations: convCount,
+      totalMessages: msgCount,
+      totalInputTokens: tokenRow.ti,
+      totalOutputTokens: tokenRow.to2,
+      totalCacheTokens: tokenRow.tc,
+      platformBreakdown,
+      modelBreakdown,
+      dailyActivity,
+      topProjects,
+      toolCategoryBreakdown,
+      storageSize: 0,
+    };
+  }
+
+  // ==================== Helpers ====================
+
+  private rowToWorkSession(r: any): WorkSession {
+    return {
+      id: r.id,
+      sessionId: r.session_id,
+      platform: r.platform,
+      platformVersion: r.platform_version,
+      projectPath: r.project_path,
+      gitBranch: r.git_branch,
+      gitRemote: r.git_remote,
+      model: r.model,
+      models: r.models,
+      title: r.title,
+      summary: r.summary,
+      tags: JSON.parse(r.tags || '[]'),
+      status: r.status,
+      startedAt: r.started_at,
+      endedAt: r.ended_at,
+      lastActivityAt: r.last_activity_at,
+      durationMs: r.duration_ms,
+      messageCount: r.message_count,
+      userInputCount: r.user_input_count,
+      assistantMessageCount: r.assistant_message_count,
+      thinkingCount: r.thinking_count,
+      toolCallCount: r.tool_call_count,
+      codeBlockCount: r.code_block_count,
+      turnCount: r.turn_count,
+      totalInputTokens: r.total_input_tokens,
+      totalOutputTokens: r.total_output_tokens,
+      totalCacheCreationTokens: r.total_cache_creation_tokens,
+      totalCacheReadTokens: r.total_cache_read_tokens,
+      hasSubagents: r.has_subagents === 1,
+      hasContextCompaction: r.has_context_compaction === 1,
+      agentMeta: r.agent_meta,
+      claudeCodeVersion: r.claude_code_version,
+      sessionType: r.session_type || 'conversation',
+      createdAt: r.created_at,
+      updatedAt: r.updated_at,
+    };
+  }
+
+  private workSessionToConversation(ws: WorkSession): VestiConversation {
+    return {
+      id: ws.id,
+      sessionId: ws.sessionId,
+      platform: ws.platform,
+      platformVersion: ws.platformVersion,
+      projectPath: ws.projectPath,
+      gitBranch: ws.gitBranch,
+      gitRemote: ws.gitRemote,
+      model: ws.model,
+      title: ws.title,
+      summary: ws.summary,
+      tags: ws.tags,
+      status: ws.status,
+      startedAt: ws.startedAt,
+      endedAt: ws.endedAt,
+      lastActivityAt: ws.lastActivityAt,
+      durationMs: ws.durationMs,
+      messageCount: ws.messageCount,
+      userMessageCount: ws.userInputCount,
+      assistantMessageCount: ws.assistantMessageCount,
+      thinkingCount: ws.thinkingCount,
+      toolCallCount: ws.toolCallCount,
+      codeBlockCount: ws.codeBlockCount,
+      totalInputTokens: ws.totalInputTokens,
+      totalOutputTokens: ws.totalOutputTokens,
+      totalCacheCreationTokens: ws.totalCacheCreationTokens,
+      totalCacheReadTokens: ws.totalCacheReadTokens,
+      hasSubagents: ws.hasSubagents,
+      claudeCodeVersion: ws.claudeCodeVersion,
+      createdAt: ws.createdAt,
+      updatedAt: ws.updatedAt,
+    };
+  }
+
+  private rowToSessionMessage(r: any): SessionMessage {
+    return {
+      id: r.id,
+      sessionId: r.session_id,
+      turnId: r.turn_id,
+      source: r.source,
+      sequence: r.sequence,
+      role: r.role,
+      contentText: r.content_text,
+      contentThinking: r.content_thinking,
+      contentToolName: r.content_tool_name,
+      contentToolInput: r.content_tool_input,
+      contentToolOutput: r.content_tool_output,
+      contentToolError: r.content_tool_error,
+      cwd: r.cwd,
+      gitBranch: r.git_branch,
+      tokenInput: r.token_input,
+      tokenOutput: r.token_output,
+      tokenCacheCreation: r.token_cache_creation,
+      tokenCacheRead: r.token_cache_read,
+      tokenReasoning: r.token_reasoning,
+      model: r.model,
+      stopReason: r.stop_reason,
+      parentId: r.parent_id,
+      depth: r.depth,
+      isSidechain: r.is_sidechain === 1,
+      agentId: r.agent_id,
+      timestamp: r.timestamp,
+      createdAt: r.created_at,
+    };
+  }
+
+  private rowToMessage(r: any): VestiMessage {
+    return {
+      id: r.id,
+      conversationId: r.session_id,
+      parentId: r.parent_id,
+      depth: r.depth,
+      role: r.role,
+      type: r.source === 'tool_result' ? 'tool_result'
+        : r.source === 'tool_request' ? 'tool_use'
+        : r.source === 'assistant_think' ? 'thinking'
+        : r.source === 'progress' ? 'progress'
+        : 'message',
+      contentText: r.content_text,
+      contentThinking: r.content_thinking,
+      contentToolName: r.content_tool_name,
+      contentToolInput: r.content_tool_input,
+      contentToolOutput: r.content_tool_output,
+      contentToolError: r.content_tool_error,
+      cwd: r.cwd,
+      gitBranch: r.git_branch,
+      tokenInput: r.token_input,
+      tokenOutput: r.token_output,
+      tokenCacheCreation: r.token_cache_creation,
+      tokenCacheRead: r.token_cache_read,
+      model: r.model,
+      stopReason: r.stop_reason,
+      isSidechain: r.is_sidechain === 1,
+      agentId: r.agent_id,
+      timestamp: r.timestamp,
+      createdAt: r.created_at,
+    };
+  }
+
+  async close(): Promise<void> {
+    this.db?.close();
+    this.db = null;
+  }
+}

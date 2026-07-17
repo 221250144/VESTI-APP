@@ -1,0 +1,57 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Electron / Vite build output
+.vite/
+.build-cache/
+out/
+dist/
+release/
+*.blockmap
+
+# Native build artifacts
+build/Release/
+*.node
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Vesti user data and local databases
+.vesti/
+vesti-data/
+agent-results/
+*.db
+*.db-shm
+*.db-wal
+settings.json
+
+# Logs, coverage, and temporary files
+*.log
+logs/
+coverage/
+.cache/
+tmp/
+temp/
+*.tmp
+
+# Editors and operating systems
+.idea/
+.vscode/
+!.vscode/extensions.json
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local AI/tooling metadata
+.codex/
+.claude/
+.cursor/

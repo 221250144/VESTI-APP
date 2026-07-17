@@ -1,0 +1,38 @@
+appId: com.vesti.desktop
+productName: Vesti
+copyright: Copyright © 2026 VESTI Team
+
+directories:
+  output: out/installer
+  buildResources: assets
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: assets/icon.ico
+  executableName: vesti
+
+nsis:
+  oneClick: false
+  perMachine: false
+  selectPerMachineByDefault: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: false
+  createStartMenuShortcut: true
+  shortcutName: Vesti
+  runAfterFinish: true
+  deleteAppDataOnUninstall: false
+  multiLanguageInstaller: true
+  installerLanguages:
+    - zh_CN
+    - en_US
+  installerIcon: assets/icon.ico
+  uninstallerIcon: assets/icon.ico
+  installerHeaderIcon: assets/icon.ico
+  include: build/installer.nsh
+  artifactName: Vesti-${version}-Setup.${ext}
+
+publish: null
