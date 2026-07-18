@@ -20,14 +20,21 @@ import type { WorkSession, SessionMessage } from '../types/unified.js';
  * Uses FNV-1a hash with offset to avoid collision with Dexie auto-increment IDs.
  */
 const CLI_ID_OFFSET = 10_000_000;
+// Hash space: (10M, 2^53-1). The previous 90M range hit ~50% collision
+// probability at ~10k hashed IDs (birthday bound); 2^53 pushes that
+// out past any realistic local session/message count.
+const ID_SPACE = BigInt(Number.MAX_SAFE_INTEGER - CLI_ID_OFFSET);
 
 export function cliIdToNumeric(cliId: string): number {
-  let hash = 2166136261; // FNV offset basis
+  // 64-bit FNV-1a folded into the safe-integer range above the offset.
+  let hash = 0xcbf29ce484222325n;
+  const prime = 0x100000001b3n;
+  const mask = 0xffffffffffffffffn;
   for (let i = 0; i < cliId.length; i++) {
-    hash ^= cliId.charCodeAt(i);
-    hash = (hash * 16777619) >>> 0; // FNV prime, keep as uint32
+    hash ^= BigInt(cliId.charCodeAt(i));
+    hash = (hash * prime) & mask;
   }
-  return CLI_ID_OFFSET + (hash % 90_000_000); // Range: 10M–100M
+  return CLI_ID_OFFSET + Number(hash % ID_SPACE);
 }
 
 // Reverse lookup: numeric → CLI ID
