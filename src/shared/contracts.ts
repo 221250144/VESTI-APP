@@ -67,6 +67,23 @@ export interface SyncSummary {
   errors: string[];
 }
 
+// ---- WSL capture sources ----
+
+export interface WslPlatformInstall {
+  platform: CapturePlatform;
+  installed: boolean;
+}
+
+export interface WslStatusView {
+  /** WSL detection only runs on Windows */
+  supported: boolean;
+  distros: string[];
+  /** Per-platform install status inside WSL (native status is in SourceStatus) */
+  platforms: WslPlatformInstall[];
+  /** Epoch ms of the last detection pass; null until the first one finishes */
+  detectedAt: number | null;
+}
+
 export type LlmAccessMode = 'demo_proxy' | 'custom_byok';
 export type ProxyMode = 'system' | 'direct' | 'custom';
 export type AgentOutputLanguage = 'zh-CN' | 'en-US';
@@ -103,6 +120,24 @@ export interface LlmSettingsView {
   apiKeyConfigured: boolean;
 }
 
+// ---- P3 upstream export (Obsidian vault / Notion) ----
+
+export type NotionParentType = 'page' | 'database';
+
+export interface UpstreamSettingsView {
+  /** Absolute path of the Obsidian vault root chosen by the user; '' = unset. */
+  obsidianVaultPath: string;
+  /** Auto-export newly synced conversations into the vault after each sync. */
+  obsidianAutoExport: boolean;
+  /** Notion parent page_id or database_id (dashes optional). */
+  notionParentId: string;
+  /** Resolved at verify time so exports know which parent shape to send. */
+  notionParentType: NotionParentType;
+  /** Title property name of the target database ('' unless type = database). */
+  notionTitleProperty: string;
+  notionTokenConfigured: boolean;
+}
+
 export interface AppSettingsView {
   appVersion: string;
   settingsDirectory: string;
@@ -114,6 +149,7 @@ export interface AppSettingsView {
   network: NetworkSettings;
   agent: AgentSettings;
   llm: LlmSettingsView;
+  upstream: UpstreamSettingsView;
 }
 
 export interface AppSettingsUpdate {
@@ -131,6 +167,15 @@ export interface AppSettingsUpdate {
     apiKey?: string;
     clearApiKey?: boolean;
   };
+  upstream: {
+    obsidianVaultPath: string;
+    obsidianAutoExport: boolean;
+    notionParentId: string;
+    notionParentType: NotionParentType;
+    notionTitleProperty: string;
+    notionToken?: string;
+    clearNotionToken?: boolean;
+  };
 }
 
 export interface SettingsSaveResult {
@@ -138,12 +183,74 @@ export interface SettingsSaveResult {
   restartRequired: boolean;
 }
 
-export type AgentKind = 'summary' | 'explore';
+// ---- P3 upstream export IPC payloads ----
+
+/**
+ * Restricted vault/directory write. Both paths must stay inside rootPath;
+ * previousRelativePath points at the file written by the previous export of
+ * the same conversation (idempotent update), and expectedUuid must match the
+ * frontmatter uuid before any existing file is overwritten.
+ */
+export interface UpstreamWriteFileRequest {
+  rootPath: string;
+  relativePath: string;
+  content: string;
+  previousRelativePath?: string;
+  expectedUuid?: string;
+}
+
+export interface UpstreamWriteFileResult {
+  relativePath: string;
+}
+
+export interface NotionTestResult {
+  ok: boolean;
+  message: string;
+}
+
+/**
+ * Renderer-built Notion page payload. Blocks are opaque to the main process
+ * (validated only for shape); the renderer also splits >100-block batches and
+ * >2000-char rich text before sending.
+ */
+export interface NotionExportRequest {
+  title: string;
+  iconEmoji?: string;
+  blocks: Array<Record<string, unknown>>;
+  /** Re-export: archive this page first, then recreate under the parent. */
+  existingPageId?: string | null;
+}
+
+export interface NotionExportResult {
+  pageId: string;
+  url: string;
+}
+
+export type AgentKind = 'summary' | 'explore' | 'digest' | 'classify' | 'relay' | 'extract' | 'distill' | 'daily' | 'persona';
+
+/** P4b deposit distillation templates ('custom' carries the user's own
+ * instruction in AgentRunRequest.question). */
+export type DistillTemplate = 'background_knowledge' | 'project_state' | 'writing_style' | 'custom';
 
 export interface AgentRunRequest {
   kind: AgentKind;
   sessionId: string;
   question?: string;
+  /**
+   * Pre-built transcript used instead of the session's own messages
+   * (cross-session recall context, digest pipeline). Capped in main.
+   */
+  transcriptOverride?: string;
+  /**
+   * Prompt variant selector for parameterized kinds (P4b distill). Values are
+   * kind-specific; for 'distill' it is a DistillTemplate.
+   */
+  template?: string;
+  /**
+   * Pass false to keep the result out of the user-facing agent-results log
+   * (batch jobs like digest/classify pipelines). Defaults to true.
+   */
+  persist?: boolean;
 }
 
 export interface AgentResult {
@@ -162,12 +269,66 @@ export interface LlmTestResult {
   message: string;
 }
 
+export interface EmbeddingStatus {
+  available: boolean;
+  reason?: string;
+}
+
+// ---- Conversation tree index & session recall (P1.5) ----
+// Field-for-field mirror of capture-core's TreeIndex / SessionRecall output,
+// redeclared here so the renderer never imports the Node-only capture core.
+
+export interface ConversationTreeSession {
+  id: string;
+  title: string;
+  messageCount: number;
+  lastActivityAt: number;
+  oneLiner: string | null;
+  keyTopics: string[];
+  keyFiles: string[];
+  decisions: string[];
+}
+
+export interface ConversationTreeProject {
+  projectKey: string;
+  label: string;
+  pathOrDomain: string;
+  sessions: ConversationTreeSession[];
+}
+
+export interface ConversationTreeSource {
+  platform: string;
+  host: string;
+  projects: ConversationTreeProject[];
+}
+
+export interface ConversationTree {
+  generatedAt: string;
+  sources: ConversationTreeSource[];
+}
+
+export interface SessionRecallHit {
+  sessionId: string;
+  title: string;
+  platform: string;
+  score: number;
+  snippet: string;
+  oneLiner: string | null;
+}
+
 export const IPC = {
+  windowMinimize: 'vesti:window-minimize',
+  windowToggleMaximize: 'vesti:window-toggle-maximize',
+  windowClose: 'vesti:window-close',
+  windowIsMaximized: 'vesti:window-is-maximized',
+  windowMaximizedChanged: 'vesti:window-maximized-changed',
   overview: 'vesti:overview',
   sessions: 'vesti:sessions',
   session: 'vesti:session',
   sync: 'vesti:sync',
   watch: 'vesti:watch',
+  wslStatus: 'vesti:wsl-status',
+  wslRedetect: 'vesti:wsl-redetect',
   changed: 'vesti:capture-changed',
   settings: 'vesti:settings',
   settingsSave: 'vesti:settings-save',
@@ -177,9 +338,12 @@ export const IPC = {
   clearAgentResults: 'vesti:clear-agent-results',
   restart: 'vesti:restart',
   llmTest: 'vesti:llm-test',
+  embeddingStatus: 'vesti:embedding-status',
   agentRun: 'vesti:agent-run',
   agentResults: 'vesti:agent-results',
   exportConversations: 'vesti:export-conversations',
+  conversationTree: 'vesti:conversation-tree',
+  recallSessions: 'vesti:recall-sessions',
   uiPrefGet: 'vesti:ui-pref-get',
   uiPrefSet: 'vesti:ui-pref-set',
   uiPrefChanged: 'vesti:ui-pref-changed',
@@ -193,6 +357,18 @@ export const IPC = {
   capsuleDragEnd: 'vesti:capsule-drag-end',
   capsuleContextMenu: 'vesti:capsule-context-menu',
   capsuleStateChanged: 'vesti:capsule-state-changed',
+  extensionBridgeStatus: 'vesti:extension-bridge-status',
+  extensionPairCodeCreate: 'vesti:extension-pair-code-create',
+  extensionClientDisconnect: 'vesti:extension-client-disconnect',
+  extensionBridgeChanged: 'vesti:extension-bridge-changed',
+  extensionImportRequest: 'vesti:extension-import-request',
+  extensionImportResult: 'vesti:extension-import-result',
+  chooseDirectory: 'vesti:choose-directory',
+  upstreamWriteFile: 'vesti:upstream-write-file',
+  notionTest: 'vesti:notion-test',
+  notionExport: 'vesti:notion-export',
+  relayPrepareCli: 'vesti:relay-prepare-cli',
+  relayOutboxEnqueue: 'vesti:relay-outbox-enqueue',
 } as const;
 
 // ---- Desktop floating capsule ----
@@ -278,12 +454,88 @@ export interface ConversationExportBundle {
   messages: VestiMessageRecord[];
 }
 
+// ---- Browser extension bridge (Bridge Protocol v1) ----
+
+export interface ExtensionBridgeClientView {
+  clientId: string;
+  client: string;
+  pairedAt: number;
+  lastSyncAt: number | null;
+}
+
+export interface ExtensionBridgeStatusView {
+  running: boolean;
+  port: number;
+  error: string | null;
+  clients: ExtensionBridgeClientView[];
+}
+
+export interface ExtensionPairCodeView {
+  code: string;
+  expiresAt: number;
+}
+
+/** main → renderer: run the idempotent vesti_export.v1 merge import. */
+export interface ExtensionImportRequestPayload {
+  requestId: string;
+  bundle: unknown;
+  since?: string;
+}
+
+/** renderer → main: import outcome for a pending /v1/import request. */
+export interface ExtensionImportResultPayload {
+  requestId: string;
+  conversations: number;
+  messages: number;
+  maxCapturedAt: string | null;
+  error?: string;
+}
+
+// ---- P4a AI relay (handoff packs) ----
+
+/** A copyable one-liner that starts a CLI session seeded with the pack file. */
+export interface RelayCliCommand {
+  id: string;
+  label: string;
+  command: string;
+}
+
+/**
+ * Writes the relay pack Markdown into the app's own relay directory
+ * (<dataDir>/relay, default ~/.vesti/relay — not the user-chosen vault root,
+ * so this bypasses the restricted upstream write on purpose) and returns
+ * ready-to-paste CLI launch commands.
+ */
+export interface RelayPrepareCliRequest {
+  /** Relay pack id (Dexie relay_packs row); used in the file name. */
+  id: number;
+  /** Short sanitized title fragment for a readable file name. */
+  slug: string;
+  markdown: string;
+}
+
+export interface RelayPrepareCliResult {
+  filePath: string;
+  commands: RelayCliCommand[];
+}
+
+/** Enqueue a suggested prompt into the extension bridge outbox (v1.1). */
+export interface RelayOutboxEnqueueRequest {
+  prompt: string;
+}
+
+export interface RelayOutboxEnqueueResult {
+  id: number;
+}
+
 export interface VestiDesktopApi {
   getOverview(): Promise<Overview>;
   getSessions(): Promise<SessionSummary[]>;
   getSession(id: string): Promise<SessionDetail | null>;
   sync(): Promise<SyncSummary>;
   setWatching(enabled: boolean): Promise<boolean>;
+  getWslStatus(): Promise<WslStatusView>;
+  redetectWsl(): Promise<WslStatusView>;
   getSettings(): Promise<AppSettingsView>;
   saveSettings(update: AppSettingsUpdate): Promise<SettingsSaveResult>;
   chooseDataDirectory(): Promise<string | null>;
@@ -292,10 +544,39 @@ export interface VestiDesktopApi {
   clearAgentResults(): Promise<void>;
   restartApp(): Promise<void>;
   testLlm(): Promise<LlmTestResult>;
+  embeddingStatus(): Promise<EmbeddingStatus>;
   runAgent(request: AgentRunRequest): Promise<AgentResult>;
   getAgentResults(): Promise<AgentResult[]>;
   exportConversations(): Promise<ConversationExportBundle[]>;
+  getConversationTree(): Promise<ConversationTree>;
+  recallSessions(query: string, topK?: number): Promise<SessionRecallHit[]>;
+  getExtensionBridgeStatus(): Promise<ExtensionBridgeStatusView>;
+  createExtensionPairCode(): Promise<ExtensionPairCodeView>;
+  disconnectExtensionClient(clientId: string): Promise<boolean>;
+  reportExtensionImportResult(result: ExtensionImportResultPayload): Promise<void>;
+  onExtensionImportRequest(listener: (payload: ExtensionImportRequestPayload) => void): () => void;
+  onExtensionBridgeChanged(callback: () => void): () => void;
   onCaptureChanged(callback: () => void): () => void;
+  chooseDirectory(title?: string): Promise<string | null>;
+  writeUpstreamFile(request: UpstreamWriteFileRequest): Promise<UpstreamWriteFileResult>;
+  testNotionConnection(): Promise<NotionTestResult>;
+  exportNotionPage(request: NotionExportRequest): Promise<NotionExportResult>;
+  prepareRelayCliCommands(request: RelayPrepareCliRequest): Promise<RelayPrepareCliResult>;
+  enqueueRelayOutbox(request: RelayOutboxEnqueueRequest): Promise<RelayOutboxEnqueueResult>;
+}
+
+/**
+ * Window-control bridge for the custom title bar, exposed as
+ * window.vestiWindow. `platform` lets the renderer adapt its chrome
+ * (macOS keeps native traffic lights and needs the left inset).
+ */
+export interface VestiWindowApi {
+  platform: string;
+  minimize(): void;
+  toggleMaximize(): void;
+  close(): void;
+  isMaximized(): Promise<boolean>;
+  onMaximizedChanged(listener: (maximized: boolean) => void): () => void;
 }
 
 /**

@@ -315,6 +315,12 @@ export class CursorParser {
       ? data.name.trim()
       : typeof header.name === 'string' ? header.name.trim() : '';
 
+    // Empty-window composers genuinely have no workspace on disk; tag them so
+    // consumers can distinguish "no folder was open" from "path not captured".
+    const headerWs = record(header.workspaceIdentifier);
+    const wsIdentifier = headerWs.id !== undefined ? headerWs : record(data.workspaceIdentifier);
+    const isEmptyWindow = wsIdentifier.id === 'empty-window';
+
     return {
       sessionId: composerId,
       platform: 'cursor',
@@ -331,6 +337,7 @@ export class CursorParser {
         composer_name: title || undefined,
         archived: header.isArchived === true || data.isArchived === true,
         is_subagent: header.isSubagent === true || data.isSubagent === true,
+        empty_window: isEmptyWindow || undefined,
         source_database: filePath,
         unified_mode: data.unifiedMode,
         force_mode: data.forceMode,

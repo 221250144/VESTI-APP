@@ -741,6 +741,7 @@ export const jaTranslations = {
       loadingOriginalConversation: "元の会話を読み込み中...",
       messagesAvailableButEmpty: "メッセージはありますが、プレビューのテキストが空です。",
       openOriginal: "開く",
+      sourceBrowserExtension: "ブラウザ拡張から",
       splitView: "分割表示",
       openSplitView: "分割表示を開く",
       exitSplit: "分割を終了",

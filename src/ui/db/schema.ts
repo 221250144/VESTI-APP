@@ -2,6 +2,9 @@ import Dexie from "dexie";
 import type { Table } from "dexie";
 import type {
   Conversation,
+  DailyLogStats,
+  DepositScope,
+  DepositTemplate,
   Message,
   NoteObsidianExportMeta,
   NoteImportMeta,
@@ -58,6 +61,48 @@ export interface AnnotationRecord {
   content_text: string;
   created_at: number;
   days_after: number;
+}
+
+// P4a AI relay: persisted handoff packs. conversation_ids and pack are JSON
+// strings (number[] and the normalized relay agent payload respectively) so
+// the table stays index-light; only created_at is indexed for ordering.
+export interface RelayPackRecord {
+  id?: number;
+  created_at: number;
+  title: string;
+  conversation_ids: string;
+  pack: string;
+  suggested_prompt: string;
+  source: "manual";
+}
+
+// P4b deposits: persisted knowledge deposits. scope rides along as a plain
+// JSON object (non-indexed); created_at/template are indexed for ordering
+// and per-template filtering.
+export interface DepositRecord {
+  id?: number;
+  created_at: number;
+  updated_at: number;
+  template: DepositTemplate;
+  title: string;
+  scope: DepositScope;
+  content_markdown: string;
+  version: number;
+  prev_id: number | null;
+  custom_instruction: string | null;
+}
+
+// P4c daily logs: one row per local calendar day. date is unique (upsert
+// target for the scheduler/manual regeneration); stats rides along as a
+// plain JSON object (non-indexed).
+export interface DailyLogRecord {
+  id?: number;
+  date: string;
+  created_at: number;
+  updated_at: number;
+  content_markdown: string;
+  stats: DailyLogStats;
+  source: "auto" | "manual";
 }
 
 // Explore (RAG Chat) Records
@@ -192,6 +237,9 @@ export class MemoryHubDB extends Dexie {
   explore_sessions!: Table<ExploreSessionRecord, string>;
   explore_messages!: Table<ExploreMessageRecord, string>;
   prompts!: Table<PromptRecord, number>;
+  relay_packs!: Table<RelayPackRecord, number>;
+  deposits!: Table<DepositRecord, number>;
+  daily_logs!: Table<DailyLogRecord, number>;
 
   constructor() {
     super("MemoryHubDB");
@@ -683,6 +731,122 @@ export class MemoryHubDB extends Dexie {
         explore_messages: "id, sessionId, timestamp, [sessionId+timestamp]",
         prompts:
           "++id, source, category, is_favorite, is_archived, quality_score, updated_at, last_used_at, use_count, body_hash, source_conversation_id, [source+updated_at], [is_favorite+updated_at]",
+      })
+      .upgrade(() => undefined);
+    // v18 adds non-indexed P3 upstream-export state fields on conversations
+    // (exported_obsidian_at / obsidian_export_path / obsidian_export_error /
+    // notion_page_id / exported_notion_at / notion_export_error). All optional
+    // — absent means "never exported" — so no index or data change is needed;
+    // the version bump only documents the shape change.
+    this.version(18)
+      .stores({
+        conversations:
+          "++id, platform, title, created_at, updated_at, uuid, source_created_at, turn_count, topic_id, is_starred, [platform+created_at], [platform+uuid], [topic_id+updated_at]",
+        messages:
+          "++id, conversation_id, role, created_at, [conversation_id+created_at]",
+        summaries: "++id, conversationId, createdAt",
+        weekly_reports: "++id, rangeStart, rangeEnd, createdAt",
+        topics:
+          "++id, parent_id, name, created_at, updated_at, [parent_id+name]",
+        vectors: "++id, conversation_id, text_hash",
+        notes:
+          "++id, created_at, updated_at, source_type, source_path, [source_type+updated_at], [source_type+source_path]",
+        note_sources: "id, kind, updated_at, created_at",
+        note_assets:
+          "id, vault_id, relative_path, hash, updated_at, [vault_id+relative_path]",
+        annotations:
+          "++id, conversation_id, message_id, created_at, days_after, [conversation_id+message_id], [conversation_id+created_at]",
+        explore_sessions: "id, updatedAt, createdAt",
+        explore_messages: "id, sessionId, timestamp, [sessionId+timestamp]",
+        prompts:
+          "++id, source, category, is_favorite, is_archived, quality_score, updated_at, last_used_at, use_count, body_hash, source_conversation_id, [source+updated_at], [is_favorite+updated_at]",
+      })
+      .upgrade(() => undefined);
+    // v19 introduces the P4a relay-pack store. No data migration is needed
+    // (new empty store); all prior stores are re-declared unchanged as Dexie
+    // requires the full schema per version.
+    this.version(19)
+      .stores({
+        conversations:
+          "++id, platform, title, created_at, updated_at, uuid, source_created_at, turn_count, topic_id, is_starred, [platform+created_at], [platform+uuid], [topic_id+updated_at]",
+        messages:
+          "++id, conversation_id, role, created_at, [conversation_id+created_at]",
+        summaries: "++id, conversationId, createdAt",
+        weekly_reports: "++id, rangeStart, rangeEnd, createdAt",
+        topics:
+          "++id, parent_id, name, created_at, updated_at, [parent_id+name]",
+        vectors: "++id, conversation_id, text_hash",
+        notes:
+          "++id, created_at, updated_at, source_type, source_path, [source_type+updated_at], [source_type+source_path]",
+        note_sources: "id, kind, updated_at, created_at",
+        note_assets:
+          "id, vault_id, relative_path, hash, updated_at, [vault_id+relative_path]",
+        annotations:
+          "++id, conversation_id, message_id, created_at, days_after, [conversation_id+message_id], [conversation_id+created_at]",
+        explore_sessions: "id, updatedAt, createdAt",
+        explore_messages: "id, sessionId, timestamp, [sessionId+timestamp]",
+        prompts:
+          "++id, source, category, is_favorite, is_archived, quality_score, updated_at, last_used_at, use_count, body_hash, source_conversation_id, [source+updated_at], [is_favorite+updated_at]",
+        relay_packs: "++id, created_at",
+      })
+      .upgrade(() => undefined);
+    // v20 introduces the P4b deposits store. No data migration is needed
+    // (new empty store); all prior stores are re-declared unchanged as Dexie
+    // requires the full schema per version.
+    this.version(20)
+      .stores({
+        conversations:
+          "++id, platform, title, created_at, updated_at, uuid, source_created_at, turn_count, topic_id, is_starred, [platform+created_at], [platform+uuid], [topic_id+updated_at]",
+        messages:
+          "++id, conversation_id, role, created_at, [conversation_id+created_at]",
+        summaries: "++id, conversationId, createdAt",
+        weekly_reports: "++id, rangeStart, rangeEnd, createdAt",
+        topics:
+          "++id, parent_id, name, created_at, updated_at, [parent_id+name]",
+        vectors: "++id, conversation_id, text_hash",
+        notes:
+          "++id, created_at, updated_at, source_type, source_path, [source_type+updated_at], [source_type+source_path]",
+        note_sources: "id, kind, updated_at, created_at",
+        note_assets:
+          "id, vault_id, relative_path, hash, updated_at, [vault_id+relative_path]",
+        annotations:
+          "++id, conversation_id, message_id, created_at, days_after, [conversation_id+message_id], [conversation_id+created_at]",
+        explore_sessions: "id, updatedAt, createdAt",
+        explore_messages: "id, sessionId, timestamp, [sessionId+timestamp]",
+        prompts:
+          "++id, source, category, is_favorite, is_archived, quality_score, updated_at, last_used_at, use_count, body_hash, source_conversation_id, [source+updated_at], [is_favorite+updated_at]",
+        relay_packs: "++id, created_at",
+        deposits: "++id, created_at, template",
+      })
+      .upgrade(() => undefined);
+    // v21 introduces the P4c daily-log store. No data migration is needed
+    // (new empty store); all prior stores are re-declared unchanged as Dexie
+    // requires the full schema per version.
+    this.version(21)
+      .stores({
+        conversations:
+          "++id, platform, title, created_at, updated_at, uuid, source_created_at, turn_count, topic_id, is_starred, [platform+created_at], [platform+uuid], [topic_id+updated_at]",
+        messages:
+          "++id, conversation_id, role, created_at, [conversation_id+created_at]",
+        summaries: "++id, conversationId, createdAt",
+        weekly_reports: "++id, rangeStart, rangeEnd, createdAt",
+        topics:
+          "++id, parent_id, name, created_at, updated_at, [parent_id+name]",
+        vectors: "++id, conversation_id, text_hash",
+        notes:
+          "++id, created_at, updated_at, source_type, source_path, [source_type+updated_at], [source_type+source_path]",
+        note_sources: "id, kind, updated_at, created_at",
+        note_assets:
+          "id, vault_id, relative_path, hash, updated_at, [vault_id+relative_path]",
+        annotations:
+          "++id, conversation_id, message_id, created_at, days_after, [conversation_id+message_id], [conversation_id+created_at]",
+        explore_sessions: "id, updatedAt, createdAt",
+        explore_messages: "id, sessionId, timestamp, [sessionId+timestamp]",
+        prompts:
+          "++id, source, category, is_favorite, is_archived, quality_score, updated_at, last_used_at, use_count, body_hash, source_conversation_id, [source+updated_at], [is_favorite+updated_at]",
+        relay_packs: "++id, created_at",
+        deposits: "++id, created_at, template",
+        daily_logs: "++id, &date, created_at, updated_at",
       })
       .upgrade(() => undefined);
   }

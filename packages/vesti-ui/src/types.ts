@@ -482,6 +482,70 @@ export type StorageApi = {
   ) => Promise<RoundtableResult>;
   getSummary?: (conversationId: number) => Promise<ChatSummaryData | null>;
   generateSummary?: (conversationId: number) => Promise<ChatSummaryData>;
+  /** Bulk digest fetch for the library list/detail views (P1.5). */
+  getConversationDigests?: () => Promise<ConversationDigest[]>;
+  /** Desktop conversation tree for the source-tree nav (P2b). */
+  getConversationTree?: () => Promise<ConversationTree | null>;
+  /** Soft-trash conversations in bulk (P2b organizer). Returns the number
+   * actually updated. Soft trash keeps the record (and its capture lineage)
+   * so capture re-syncs reconcile cleanly. */
+  trashConversations?: (ids: number[]) => Promise<number>;
+  /** Add one tag to many conversations at once (P2b organizer); respects the
+   * per-conversation tag cap. Returns the number actually updated. */
+  bulkAddTag?: (ids: number[], tag: string) => Promise<number>;
+  // P4a AI relay: handoff packs distilled from multi-selected conversations.
+  listRelayPacks?: () => Promise<RelayPack[]>;
+  /** Assembles context, runs the relay agent, persists and returns the pack.
+   * Rejects when the LLM is not configured or the output is malformed. */
+  generateRelayPack?: (conversationIds: number[]) => Promise<RelayPack>;
+  deleteRelayPack?: (id: number) => Promise<void>;
+  /** Serializes the pack to Markdown and writes it under a user-chosen
+   * directory; resolves null when the user cancels the picker. */
+  exportRelayPackMarkdown?: (id: number) => Promise<{ relativePath: string } | null>;
+  /** Writes the pack Markdown into the app relay directory and returns
+   * copyable CLI launch commands (kimi/claude/codex). */
+  getRelayPackCliCommands?: (id: number) => Promise<RelayCliCommandView[]>;
+  /** Pushes the pack's suggested prompt into the extension bridge outbox
+   * (Bridge Protocol v1.1); rejects when no extension is paired. */
+  deliverRelayPackToBrowser?: (id: number) => Promise<void>;
+  /** Capability probe for the relay UI: LLM configured + extension paired. */
+  getRelayAvailability?: () => Promise<RelayAvailability>;
+  // P4b knowledge extract: reusable knowledge assets from multi-selected
+  // conversations. The result is not persisted; the panel saves it into the
+  // deposits area on demand (template 'extract').
+  generateExtract?: (conversationIds: number[]) => Promise<ExtractResult>;
+  // P4b deposits area: distilled long-lived knowledge documents.
+  listDeposits?: () => Promise<Deposit[]>;
+  /** Persist a ready-made deposit (extract results, external content). */
+  createDeposit?: (input: CreateDepositInput) => Promise<Deposit>;
+  /** Resolve the scope, run the distill agent and persist the new deposit
+   * (or a version+1 regeneration when previousId is given). Rejects when the
+   * LLM is not configured or the scope matches no conversations. */
+  generateDeposit?: (input: GenerateDepositInput) => Promise<Deposit>;
+  renameDeposit?: (id: number, title: string) => Promise<Deposit>;
+  deleteDeposit?: (id: number) => Promise<void>;
+  /** Preview how many conversations a scope resolves to (scope picker). */
+  resolveDepositScope?: (scope: DepositScope) => Promise<number[]>;
+  /** Serializes the deposit Markdown and writes it under a user-chosen
+   * directory; resolves null when the user cancels the picker. */
+  exportDepositMarkdown?: (id: number) => Promise<{ relativePath: string } | null>;
+  // P4c daily log + weekly report.
+  listDailyLogs?: () => Promise<DailyLog[]>;
+  /** Generate (or regenerate) the log for a local day ("YYYY-MM-DD";
+   * defaults to today). Resolves null when the day had no activity. */
+  generateDailyLog?: (input?: { date?: string }) => Promise<DailyLog | null>;
+  /** Dates that should have a log but don't (yesterday missed + today past
+   * the scheduled time), oldest first — drives the "catch up" action. */
+  getPendingDailyDates?: () => Promise<string[]>;
+  /** Streak + week-activity header stats for the log view. */
+  getDailyLogOverview?: () => Promise<DailyLogOverview>;
+  listWeeklyReports?: () => Promise<WeeklyReport[]>;
+  /** Aggregate the last 7 local days into a weekly report (upserted by
+   * range). Rejects when the week had no activity at all. */
+  generateWeeklyReport?: () => Promise<WeeklyReport>;
+  /** Serializes the daily-log Markdown and writes it under a user-chosen
+   * directory; resolves null when the user cancels the picker. */
+  exportDailyLogMarkdown?: (id: number) => Promise<{ relativePath: string } | null>;
   getNotes?: () => Promise<Note[]>;
   saveNote?: (note: CreateNoteInput) => Promise<Note>;
   updateNote?: (id: number, changes: UpdateNoteChanges) => Promise<Note>;
@@ -490,13 +554,20 @@ export type StorageApi = {
   connectObsidianVault?: () => Promise<ObsidianVaultStatus>;
   exportNoteToObsidian?: (note: Note) => Promise<ObsidianNoteExportResult>;
   // Send a whole conversation / its summary out as ready Markdown.
+  // `conversation` + `scope` let implementations re-serialize from structured
+  // data (desktop P3 upstream export) instead of using the prebuilt markdown;
+  // payload mode (derived outputs) passes neither.
   exportConversationToNotion?: (input: {
     title: string;
     markdown: string;
+    conversation?: Conversation;
+    scope?: "conversation" | "summary";
   }) => Promise<{ pageId: string; url?: string }>;
   exportConversationToObsidian?: (input: {
     title: string;
     markdown: string;
+    conversation?: Conversation;
+    scope?: "conversation" | "summary";
   }) => Promise<{ relative_path: string; vault_name: string; exported_at: number }>;
   importObsidianDirectory?: (
     vaultName: string,
@@ -635,6 +706,211 @@ export interface ChatSummaryData {
   };
   actionable_next_steps: string[];
   plain_text?: string;
+}
+
+/**
+ * Lightweight per-conversation digest (P1.5 conversation tree index).
+ * Produced by the desktop digest pipeline; optional in the StorageApi so
+ * platforms without it (extension) simply render the plain snippet.
+ */
+export interface ConversationDigest {
+  conversationId: number;
+  oneLiner: string;
+  keyTopics: string[];
+  keyFiles: string[];
+  decisions: string[];
+}
+
+// ---- P4a AI relay (handoff packs) -----------------------------------------
+// Mirror of the desktop db relay types (src/ui/db/types.ts). The pack payload
+// keeps the relay agent's snake_case JSON contract verbatim so a stored pack
+// round-trips losslessly.
+export interface RelayPackKeyFile {
+  path: string;
+  why: string;
+  last_state: string;
+}
+
+export interface RelayPackPayload {
+  title: string;
+  goal: string;
+  current_state: string;
+  key_decisions: string[];
+  key_files: RelayPackKeyFile[];
+  open_issues: string[];
+  next_steps: string[];
+  suggested_prompt: string;
+}
+
+export interface RelayPack {
+  id: number;
+  createdAt: number;
+  title: string;
+  conversationIds: number[];
+  pack: RelayPackPayload;
+  suggestedPrompt: string;
+  source: "manual";
+}
+
+export interface RelayCliCommandView {
+  id: string;
+  label: string;
+  command: string;
+}
+
+export interface RelayAvailability {
+  llmConfigured: boolean;
+  extensionConnected: boolean;
+}
+
+// ---- P4b knowledge extract + deposits --------------------------------------
+// Mirror of the desktop db deposit types (src/ui/db/types.ts) and the extract
+// agent's normalized JSON payload (src/main/agentPrompts.ts).
+export interface ExtractCodeSnippet {
+  language: string;
+  code: string;
+  why: string;
+}
+
+export interface ExtractDecision {
+  title: string;
+  context: string;
+  decision: string;
+  consequences: string;
+}
+
+export interface ExtractPayload {
+  knowledge_points: string[];
+  code_snippets: ExtractCodeSnippet[];
+  decisions: ExtractDecision[];
+  prompts: string[];
+}
+
+/** One extract run over a multi-selection. Not persisted by itself — the
+ * panel saves it into the deposits area (template 'extract') on demand. */
+export interface ExtractResult {
+  title: string;
+  conversationIds: number[];
+  extract: ExtractPayload;
+}
+
+export type DepositTemplate =
+  | "background_knowledge"
+  | "project_state"
+  | "writing_style"
+  | "extract"
+  | "custom";
+
+export type DepositScope =
+  | { kind: "project"; projectKey: string; label: string }
+  | { kind: "topic"; topicId: number; label: string }
+  | { kind: "timerange"; start: number; end: number }
+  | { kind: "selection"; conversationIds: number[] };
+
+export interface Deposit {
+  id: number;
+  createdAt: number;
+  updatedAt: number;
+  template: DepositTemplate;
+  title: string;
+  scope: DepositScope;
+  contentMarkdown: string;
+  version: number;
+  prevId: number | null;
+  customInstruction: string | null;
+}
+
+export interface CreateDepositInput {
+  template: DepositTemplate;
+  title: string;
+  scope: DepositScope;
+  contentMarkdown: string;
+  version?: number;
+  prevId?: number | null;
+  customInstruction?: string | null;
+}
+
+/** Distill generation request: resolve the scope, run the distill agent and
+ * persist the result. previousId regenerates an existing deposit as
+ * version+1 chained onto it. */
+export interface GenerateDepositInput {
+  template: DepositTemplate;
+  scope: DepositScope;
+  customInstruction?: string;
+  previousId?: number;
+}
+
+// ---- P4c daily log + weekly report -----------------------------------------
+// Mirror of the desktop db daily types (src/ui/db/types.ts). Optional in
+// StorageApi: platforms without the desktop pipeline leave them
+// unimplemented and the tab renders the empty state.
+
+export interface DailyLogStats {
+  cliSessions: number;
+  browserConversations: number;
+  platforms: string[];
+  projects: string[];
+  messages: number;
+}
+
+export interface DailyLog {
+  id: number;
+  /** Local calendar day, "YYYY-MM-DD". Unique per row. */
+  date: string;
+  createdAt: number;
+  updatedAt: number;
+  contentMarkdown: string;
+  stats: DailyLogStats;
+  source: "auto" | "manual";
+}
+
+/** Stats header for the log view (streak + week activity). */
+export interface DailyLogOverview {
+  totalDays: number;
+  streak: number;
+  week: Array<{ date: string; messages: number; hasLog: boolean }>;
+}
+
+export interface WeeklyReport {
+  id: number;
+  rangeStart: number;
+  rangeEnd: number;
+  content: string;
+  createdAt: number;
+}
+
+// ---- Conversation tree (P2b source-tree nav) -------------------------------
+// Field-for-field mirror of the desktop conversation-tree contract
+// (src/shared/contracts.ts). Optional in StorageApi: platforms without a
+// capture pipeline (the extension) leave it unimplemented and the source-tree
+// navigation simply stays hidden.
+export interface ConversationTreeSession {
+  id: string;
+  title: string;
+  messageCount: number;
+  lastActivityAt: number;
+  oneLiner: string | null;
+  keyTopics: string[];
+  keyFiles: string[];
+  decisions: string[];
+}
+
+export interface ConversationTreeProject {
+  projectKey: string;
+  label: string;
+  pathOrDomain: string;
+  sessions: ConversationTreeSession[];
+}
+
+export interface ConversationTreeSource {
+  platform: string;
+  host: string;
+  projects: ConversationTreeProject[];
+}
+
+export interface ConversationTree {
+  generatedAt: string;
+  sources: ConversationTreeSource[];
 }
 
 export type NoteSourceType = "native" | "obsidian";
@@ -979,6 +1255,8 @@ export interface DashboardLabels {
     explore: string;
     network: string;
     prompts: string;
+    deposits: string;
+    daily: string;
   };
   nav: {
     backToExplore: string;
@@ -1180,6 +1458,8 @@ export interface DashboardLabels {
     changeFolder: string;
     removeFromFolder: string;
     delete: string;
+    moveToTopic?: string;
+    noTopic?: string;
     folderActions: string;
     createNewFolder: string;
     newFolder: string;
@@ -1231,6 +1511,50 @@ export interface DashboardLabels {
     sendToExporting?: string;
     sendToDone?: string;
     sendToFailed?: string;
+    // Source-tree navigation (P2b)
+    sourceTree?: {
+      sectionLabel: string;
+      notes: string;
+      browser: string;
+      wslBadge: string;
+    };
+    // Organizer assistant (P2b)
+    organize?: {
+      button: string;
+      title: string;
+      subtitle: string;
+      actionEmpty: string;
+      actionEmptyDesc: string;
+      actionDuplicates: string;
+      actionDuplicatesDesc: string;
+      actionTag: string;
+      actionTagDesc: string;
+      actionArchive: string;
+      actionArchiveDesc: string;
+      back: string;
+      previewAffected: string;
+      previewEmpty: string;
+      previewMore: string;
+      confirm: string;
+      executing: string;
+      done: string;
+      failed: string;
+      cancel: string;
+      close: string;
+      tagLabel: string;
+      tagPlaceholder: string;
+      archiveTarget: string;
+      archiveNoTopic: string;
+      scopeAll: string;
+      scopeSelection: string;
+      scopeOlder30: string;
+      scopeOlder90: string;
+      keepLabel: string;
+      dropLabel: string;
+      reasonSameSource: string;
+      reasonSameTitle: string;
+      unavailable: string;
+    };
   };
   explore: ExploreLabels;
   data: DataLabels;
@@ -1360,6 +1684,11 @@ export interface DashboardLabels {
     deleteSelected: string;
     clearSelection: string;
   };
+  /** P4b deposits area labels (loose record, same idiom as the library
+   * relay/organize groups: components carry English fallbacks inline). */
+  deposits?: Record<string, string>;
+  /** P4c daily log + weekly report labels (same loose-record idiom). */
+  daily?: Record<string, string>;
   aiti: {
     modeAsk: string;
     modeAiti: string;
@@ -1394,6 +1723,18 @@ export interface DashboardLabels {
     axisAffectRight: string;
     axisAffectLeftStrength: string;
     axisAffectRightStrength: string;
+    /** P5 思维意象: weak band [45,55] axis hint (distinct from no-signal). */
+    axisSignalFaint: string;
+    /** P5: overall note when any axis is weak ("意象轮廓尚浅"). */
+    imageryFaint: string;
+    /** P5: caption above the LLM persona footnote. */
+    personaNoteLabel: string;
+    /** P5: lead-in for the per-axis evidence chips. */
+    evidenceBecause: string;
+    /** P5: evidence chip fallback text, "{id}" = conversation id. */
+    evidenceConversation: string;
+    /** P5: export-share-image button. */
+    exportCard: string;
   };
   learn: {
     modeLearn: string;
@@ -1473,6 +1814,25 @@ export interface AitiProfile {
   sampleSize: number;
   axes: AitiAxisScore[];
   obsessions: AitiObsession[];
+}
+
+/**
+ * AITI 思维意象 (P5) — flat, already-localized mirror of the host's imagery
+ * table entry (src/ui/aiti/imagery.ts). The host resolves axes → imagery and
+ * hands the card render-ready strings; the package stays table-free.
+ */
+export interface AitiImagery {
+  /** letter type code, e.g. "DMFS" */
+  code: string;
+  /** emblem asset id; the host maps it to src/ui/assets/emblems/<id>.png */
+  emblemId: string;
+  name: string;
+  origin: string;
+  verdict: string;
+  /** axis keys whose signal is faint (no signal, or score inside [45, 55]) */
+  weakAxes: string[];
+  /** true when any axis is weak — the imagery outline is "尚浅" */
+  faint: boolean;
 }
 
 /** "学习 Learn" — the captured KB reframed as a personal curriculum. */

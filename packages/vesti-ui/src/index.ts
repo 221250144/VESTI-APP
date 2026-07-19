@@ -4,6 +4,8 @@ export { LibraryTab } from "./tabs/library-tab";
 export { ExploreTab } from "./tabs/explore-tab";
 export { NetworkTab } from "./tabs/network-tab";
 export { PromptsTab } from "./tabs/prompts-tab";
+export { DepositsTab } from "./tabs/deposits-tab";
+export { DailyTab } from "./tabs/daily-tab";
 export { AitiCard } from "./components/AitiCard";
 export { LearnCard } from "./components/LearnCard";
 export { RoundtablePanel } from "./components/RoundtablePanel";
@@ -31,6 +33,8 @@ export {
   buildMessagePreviewText,
   buildMessageSidecarSummaryLines,
 } from "./lib/messagePackage";
+export { serializeRelayPackMarkdown } from "./lib/relayMarkdown";
+export { sanitizeFileBaseName, serializeExtractMarkdown } from "./lib/extractMarkdown";
 export type { PipelineStageState } from "./components/SummaryPipelineProgress";
 export type {
   NotionDatabaseOption,
@@ -42,6 +46,7 @@ export type {
   AstRoot,
   AstVersion,
   ChatSummaryData,
+  ConversationDigest,
   Platform,
   UiThemeMode,
   Topic,
@@ -72,6 +77,7 @@ export type {
   AitiProfile,
   AitiAxisScore,
   AitiObsession,
+  AitiImagery,
   LearnProfile,
   LearnDomain,
   LearnGlossaryEntry,
@@ -81,5 +87,23 @@ export type {
   RoundtableSeatTurn,
   RoundtableSynthesis,
   RoundtableResult,
+  RelayPack,
+  RelayPackPayload,
+  RelayPackKeyFile,
+  RelayCliCommandView,
+  RelayAvailability,
+  ExtractCodeSnippet,
+  ExtractDecision,
+  ExtractPayload,
+  ExtractResult,
+  Deposit,
+  DepositScope,
+  DepositTemplate,
+  CreateDepositInput,
+  GenerateDepositInput,
+  DailyLog,
+  DailyLogStats,
+  DailyLogOverview,
+  WeeklyReport,
   DashboardLabels,
 } from "./types";

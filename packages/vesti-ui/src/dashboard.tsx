@@ -17,10 +17,12 @@ import { ExploreTab } from "./tabs/explore-tab";
 import { AitiCard } from "./components/AitiCard";
 import { LearnCard } from "./components/LearnCard";
 import { RoundtablePanel } from "./components/RoundtablePanel";
+import { DepositsTab } from "./tabs/deposits-tab";
+import { DailyTab } from "./tabs/daily-tab";
 import { LibraryTab } from "./tabs/library-tab";
 import { NetworkTab } from "./tabs/network-tab";
 import { PromptsTab } from "./tabs/prompts-tab";
-import type { AitiProfile, DashboardLabels, LearnProfile, PlazaData, StorageApi, UiThemeMode } from "./types";
+import type { AitiImagery, AitiProfile, DashboardLabels, LearnProfile, PlazaData, StorageApi, UiThemeMode } from "./types";
 import type { NotionDatabaseOption, NotionSettings } from "./notion-integration";
 import {
   connectToNotion,
@@ -33,7 +35,7 @@ import {
   selectNotionDatabase,
 } from "./notion-integration";
 
-export type Tab = "library" | "explore" | "network" | "prompts";
+export type Tab = "library" | "explore" | "network" | "prompts" | "deposits" | "daily";
 type DrawerView = "settings" | "data";
 type ReturnTab = Exclude<Tab, "library">;
 type DashboardNavRequest = {
@@ -45,7 +47,7 @@ type ThemeSyncStatus = "idle" | "syncing" | "error";
 const DASHBOARD_NAV_REQUEST_KEY = "vesti_dashboard_open_tab";
 
 const DEFAULT_LABELS: DashboardLabels = {
-  tabs: { library: "LIBRARY", explore: "EXPLORE", network: "KNOWLEDGE GRAPH", prompts: "PROMPTS" },
+  tabs: { library: "LIBRARY", explore: "EXPLORE", network: "KNOWLEDGE GRAPH", prompts: "PROMPTS", deposits: "DEPOSITS", daily: "DAILY" },
   nav: {
     backToExplore: "Back to Explore",
     backToNetwork: "Back to Knowledge Graph",
@@ -277,6 +279,50 @@ const DEFAULT_LABELS: DashboardLabels = {
       depth: "Depth",
       nextSteps: "Next Steps",
       fallback: "Fallback summary",
+    },
+    moveToTopic: "Move to topic",
+    noTopic: "No topic",
+    sourceTree: {
+      sectionLabel: "SOURCES",
+      notes: "My Notes",
+      browser: "Browser",
+      wslBadge: "WSL",
+    },
+    organize: {
+      button: "Organize",
+      title: "Organize library",
+      subtitle: "Local rules only — nothing leaves this device.",
+      actionEmpty: "Clean empty conversations",
+      actionEmptyDesc: "Trash conversations with no captured messages.",
+      actionDuplicates: "Merge duplicate candidates",
+      actionDuplicatesDesc: "Find cross-source duplicates; keep the most complete copy.",
+      actionTag: "Batch tag",
+      actionTagDesc: "Add a tag to every conversation in a scope.",
+      actionArchive: "Batch archive to topic",
+      actionArchiveDesc: "Move conversations in a project or time window into a topic.",
+      back: "Back",
+      previewAffected: "{count} conversations affected",
+      previewEmpty: "Nothing matches this rule right now.",
+      previewMore: "…and {count} more",
+      confirm: "Apply",
+      executing: "Applying…",
+      done: "Done — {count} conversations updated.",
+      failed: "Failed: {message}",
+      cancel: "Cancel",
+      close: "Close",
+      tagLabel: "Tag to add",
+      tagPlaceholder: "e.g. paper-reading",
+      archiveTarget: "Move into topic",
+      archiveNoTopic: "No topic",
+      scopeAll: "Scope: all conversations",
+      scopeSelection: "Scope: current selection",
+      scopeOlder30: "Inactive 30+ days",
+      scopeOlder90: "Inactive 90+ days",
+      keepLabel: "keep",
+      dropLabel: "{count} to trash",
+      reasonSameSource: "Same capture id from multiple sources",
+      reasonSameTitle: "Identical title from multiple sources",
+      unavailable: "Not available in this build.",
     },
   },
   explore: {
@@ -710,7 +756,7 @@ const DEFAULT_LABELS: DashboardLabels = {
     modeRoundtable: "Roundtable",
     title: "Your AITI — your thinking strengths",
     subtitle: "Computed locally from your own conversations. A reflection of your strengths, not a verdict.",
-    insufficient: "Not enough conversations analyzed yet — keep chatting and your portrait will take shape.",
+    insufficient: "Your imagery has not taken shape yet — a few more conversations with AI and it will emerge.",
     sample: "Drawn from {n} of your conversations",
     typeSeparator: " · ",
     strengthsTitle: "Your thinking strengths",
@@ -738,6 +784,12 @@ const DEFAULT_LABELS: DashboardLabels = {
     axisAffectRight: "Spirited",
     axisAffectLeftStrength: "You stay calm and keep clear judgment under complexity.",
     axisAffectRightStrength: "You bring strong emotional engagement to what you explore.",
+    axisSignalFaint: "Faint signal",
+    imageryFaint: "The outline is still faint — some axes are gathering signal; read it lightly.",
+    personaNoteLabel: "Recent footnote",
+    evidenceBecause: "This is so you, because…",
+    evidenceConversation: "Conversation #{id}",
+    exportCard: "Export imagery card",
   },
   learn: {
     modeLearn: "Learn",
@@ -789,6 +841,10 @@ type DashboardProps = {
   plaza?: PlazaData;
   onPlazaAdoptToggle?: (id: string, adopt: boolean) => void;
   aiti?: AitiProfile;
+  /** P5 思维意象: host-resolved imagery + emblem asset URL + persona footnote. */
+  aitiImagery?: AitiImagery | null;
+  aitiEmblemUrl?: string;
+  aitiPersonaNote?: string | null;
   learn?: LearnProfile;
   /** Controlled active tab (desktop dock rail). Uncontrolled when omitted. */
   tab?: Tab;
@@ -808,6 +864,9 @@ export function VestiDashboard({
   plaza,
   onPlazaAdoptToggle,
   aiti,
+  aitiImagery,
+  aitiEmblemUrl,
+  aitiPersonaNote,
   learn,
   tab: controlledTab,
   onTabChange,
@@ -822,7 +881,9 @@ export function VestiDashboard({
       tab === "explore" ||
       tab === "network" ||
       tab === "library" ||
-      tab === "prompts"
+      tab === "prompts" ||
+      tab === "deposits" ||
+      tab === "daily"
     )
       return tab;
     return "library";
@@ -874,6 +935,8 @@ export function VestiDashboard({
     explore: activeTab === "explore",
     network: activeTab === "network",
     prompts: activeTab === "prompts",
+    deposits: activeTab === "deposits",
+    daily: activeTab === "daily",
   }));
   const userMenuRef = useRef<HTMLDivElement | null>(null);
   const notionAvailable =
@@ -903,7 +966,9 @@ export function VestiDashboard({
         tab === "library" ||
         tab === "explore" ||
         tab === "network" ||
-        tab === "prompts"
+        tab === "prompts" ||
+        tab === "deposits" ||
+        tab === "daily"
       ) {
         setActiveTab(tab);
       }
@@ -1198,6 +1263,28 @@ export function VestiDashboard({
       >
         {labels.tabs.prompts}
       </button>
+      <button
+        type="button"
+        onClick={() => handleSelectTab("deposits")}
+        className={`inline-flex items-center px-3 py-1.5 text-[14px] leading-none font-mono font-medium uppercase tracking-[0.26em] transition-colors ${
+          activeTab === "deposits"
+            ? "text-text-primary"
+            : "text-text-tertiary hover:text-text-secondary"
+        }`}
+      >
+        {labels.tabs.deposits}
+      </button>
+      <button
+        type="button"
+        onClick={() => handleSelectTab("daily")}
+        className={`inline-flex items-center px-3 py-1.5 text-[14px] leading-none font-mono font-medium uppercase tracking-[0.26em] transition-colors ${
+          activeTab === "daily"
+            ? "text-text-primary"
+            : "text-text-tertiary hover:text-text-secondary"
+        }`}
+      >
+        {labels.tabs.daily}
+      </button>
     </nav>
   );
 
@@ -1241,20 +1328,26 @@ export function VestiDashboard({
       <div
         className={`${rootClassName ?? ""} relative flex h-screen flex-col bg-bg-primary text-text-primary`}
       >
-        <header className="bg-bg-tertiary">
-          <div className="hidden h-14 border-b border-border-subtle px-6 lg:grid lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] lg:items-center">
-            <div className="justify-self-start">{brand}</div>
-            <div className="justify-self-center self-center">{tabNav}</div>
-            <div className="justify-self-end">{userMenu}</div>
-          </div>
-          <div className="lg:hidden">
-            <div className="flex h-14 items-center justify-between border-b border-border-subtle px-4 sm:px-6">
-              {brand}
-              {userMenu}
+        {/* In controlled mode the desktop shell (title bar + dock) replaces
+            the in-page header, so the whole row is skipped — brand and tabNav
+            are already null here, and the avatar menu only duplicates the
+            shell's own settings page. */}
+        {!controlledTab && (
+          <header className="bg-bg-tertiary">
+            <div className="hidden h-14 border-b border-border-subtle px-6 lg:grid lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] lg:items-center">
+              <div className="justify-self-start">{brand}</div>
+              <div className="justify-self-center self-center">{tabNav}</div>
+              <div className="justify-self-end">{userMenu}</div>
             </div>
-            <div className="border-b border-border-subtle px-4 sm:px-6">{tabNav}</div>
-          </div>
-        </header>
+            <div className="lg:hidden">
+              <div className="flex h-14 items-center justify-between border-b border-border-subtle px-4 sm:px-6">
+                {brand}
+                {userMenu}
+              </div>
+              <div className="border-b border-border-subtle px-4 sm:px-6">{tabNav}</div>
+            </div>
+          </header>
+        )}
 
         <div className="flex-1 overflow-hidden">
           {mountedTabs.library && (
@@ -1308,6 +1401,10 @@ export function VestiDashboard({
                   <AitiCard
                     profile={aiti}
                     labels={labels.aiti}
+                    imagery={aitiImagery}
+                    emblemUrl={aitiEmblemUrl}
+                    personaNote={aitiPersonaNote}
+                    onOpenConversation={handleOpenConversation}
                     storage={storage}
                     sendToLabels={labels.library}
                   />
@@ -1357,6 +1454,24 @@ export function VestiDashboard({
                 labels={labels.prompts}
                 plaza={plaza}
                 onPlazaAdoptToggle={onPlazaAdoptToggle}
+              />
+            </div>
+          )}
+          {mountedTabs.deposits && (
+            <div className={`h-full ${activeTab === "deposits" ? "block" : "hidden"}`}>
+              <DepositsTab
+                storage={storage}
+                labels={labels.deposits}
+                sendToLabels={labels.library}
+              />
+            </div>
+          )}
+          {mountedTabs.daily && (
+            <div className={`h-full ${activeTab === "daily" ? "block" : "hidden"}`}>
+              <DailyTab
+                storage={storage}
+                labels={labels.daily}
+                sendToLabels={labels.library}
               />
             </div>
           )}

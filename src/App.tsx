@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   VestiDashboard,
+  type AitiImagery,
   type AitiProfile,
   type DashboardTab,
   type LearnProfile,
@@ -9,6 +10,7 @@ import { I18nProvider, useI18n } from "./ui/i18n";
 import type { SupportedLocale } from "./ui/i18n/locales";
 import { Dock, type ShellPage } from "./ui/shell/Dock";
 import { SettingsPage } from "./ui/shell/SettingsPage";
+import { TitleBar } from "./ui/shell/TitleBar";
 import { useUiTheme } from "./ui/shell/useUiTheme";
 import { LOGO_BASE64 } from "./ui/logo";
 import { desktopStorage } from "./ui/storage/desktopStorage";
@@ -18,8 +20,14 @@ import {
   subscribeCaptureSync,
   type CaptureSyncState,
 } from "./ui/sync/captureSync";
+import { startAutoClassifyTrigger } from "./ui/organize/autoClassify";
+import { startUpstreamAutoExport } from "./ui/upstream/autoExport";
+import { startDailyScheduler } from "./ui/daily/dailyScheduler";
 import { getAllSummaries, getTopics, listConversations } from "./ui/db/repository";
 import { computeAiti } from "./ui/aiti/computeAiti";
+import { localizeImagery, resolveImagery } from "./ui/aiti/imagery";
+import { emblemUrl } from "./ui/aiti/emblems";
+import { getPersonaNote } from "./ui/aiti/personaNote";
 import { computeLearn } from "./ui/learn/computeLearn";
 import {
   buildPlazaPrompts,
@@ -57,9 +65,14 @@ function Shell() {
   const [adoptedIds, setAdoptedIds] = useState<string[]>([]);
   const [aiti, setAiti] = useState<AitiProfile | undefined>(undefined);
   const [learn, setLearn] = useState<LearnProfile | undefined>(undefined);
+  const [aitiImagery, setAitiImagery] = useState<AitiImagery | null>(null);
+  const [aitiPersonaNote, setAitiPersonaNote] = useState<string | null>(null);
 
   useEffect(() => {
     startCaptureSync();
+    startAutoClassifyTrigger();
+    startUpstreamAutoExport();
+    startDailyScheduler();
   }, []);
 
   useEffect(() => subscribeCaptureSync(setSyncState), []);
@@ -95,6 +108,30 @@ function Shell() {
   }, []);
 
   const lang = locale === "zh" ? "zh" : "en";
+
+  // P5 思维意象: resolve the 16-imagery card from the AITI axes (localized),
+  // then fetch the LLM persona footnote — recomputed only when the profile or
+  // locale changes; the note itself is cached in ui-prefs by personaNote.ts.
+  useEffect(() => {
+    if (!aiti?.available) {
+      setAitiImagery(null);
+      setAitiPersonaNote(null);
+      return;
+    }
+    const resolved = resolveImagery(aiti.axes);
+    const localized = resolved ? localizeImagery(resolved, lang) : null;
+    setAitiImagery(localized);
+    setAitiPersonaNote(null);
+    if (!localized) return;
+    let cancelled = false;
+    const sampleLabel = t.dashboard.aiti.sample.replace("{n}", String(aiti.sampleSize));
+    void getPersonaNote(localized, aiti, sampleLabel).then((note) => {
+      if (!cancelled) setAitiPersonaNote(note);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [aiti, lang, t]);
   const plaza = useMemo(() => {
     const daily = buildPlazaPrompts(lang, Date.now()).filter((prompt) => prompt.featured);
     const resolved = resolveCuratedPrompts(lang);
@@ -110,36 +147,42 @@ function Shell() {
     syncState.conversationCount === 0 && (syncState.syncing || syncState.lastSyncAt === null);
 
   return (
-    <div className="flex h-full w-full overflow-hidden bg-bg-app text-text-primary">
-      <Dock
-        currentPage={page}
-        onNavigate={setPage}
-        themeMode={themeMode}
-        onToggleTheme={() => void toggleTheme()}
-      />
-      <main className="h-full min-w-0 flex-1">
-        {page === "settings" ? (
-          <SettingsPage themeMode={themeMode} onToggleTheme={() => void toggleTheme()} />
-        ) : showLoading ? (
-          <LoadingState copy={LOADING_COPY[locale] ?? LOADING_COPY.en} />
-        ) : (
-          <VestiDashboard
-            storage={desktopStorage}
-            logoSrc={LOGO_BASE64}
-            themeMode={themeMode}
-            onToggleTheme={toggleTheme}
-            labels={t.dashboard}
-            plaza={plaza}
-            onPlazaAdoptToggle={(id, adopt) => {
-              void setPlazaAdopted(id, adopt).then(setAdoptedIds);
-            }}
-            aiti={aiti}
-            learn={learn}
-            tab={dashboardTab}
-            onTabChange={(tab) => setPage(tab)}
-          />
-        )}
-      </main>
+    <div className="flex h-full w-full flex-col overflow-hidden bg-bg-app text-text-primary">
+      <TitleBar />
+      <div className="flex min-h-0 flex-1">
+        <Dock
+          currentPage={page}
+          onNavigate={setPage}
+          themeMode={themeMode}
+          onToggleTheme={() => void toggleTheme()}
+        />
+        <main className="h-full min-w-0 flex-1">
+          {page === "settings" ? (
+            <SettingsPage themeMode={themeMode} onToggleTheme={() => void toggleTheme()} />
+          ) : showLoading ? (
+            <LoadingState copy={LOADING_COPY[locale] ?? LOADING_COPY.en} />
+          ) : (
+            <VestiDashboard
+              storage={desktopStorage}
+              logoSrc={LOGO_BASE64}
+              themeMode={themeMode}
+              onToggleTheme={toggleTheme}
+              labels={t.dashboard}
+              plaza={plaza}
+              onPlazaAdoptToggle={(id, adopt) => {
+                void setPlazaAdopted(id, adopt).then(setAdoptedIds);
+              }}
+              aiti={aiti}
+              aitiImagery={aitiImagery}
+              aitiEmblemUrl={aitiImagery ? emblemUrl(aitiImagery.emblemId) : undefined}
+              aitiPersonaNote={aitiPersonaNote}
+              learn={learn}
+              tab={dashboardTab}
+              onTabChange={(tab) => setPage(tab)}
+            />
+          )}
+        </main>
+      </div>
     </div>
   );
 }

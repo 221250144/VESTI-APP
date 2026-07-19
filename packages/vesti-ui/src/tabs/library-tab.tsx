@@ -18,8 +18,13 @@ import {
   ChevronDown,
   ExternalLink,
   Expand,
+  Hash,
+  Lightbulb,
   List,
+  ListChecks,
+  Package,
   Shrink,
+  Sparkles,
   Star,
   Check,
   ArrowRight,
@@ -38,6 +43,9 @@ import type {
   Topic,
   StorageApi,
   RelatedConversation,
+  ExtractResult,
+  RelayAvailability,
+  RelayPack,
   Message,
   ChatSummaryData,
   Note,
@@ -65,6 +73,18 @@ import { useNoteDraft, type NoteSaveStatus } from "../hooks/use-note-draft";
 import { buildMessagePreviewText } from "../lib/messagePackage";
 import { buildReaderTimestampFooterModel } from "../lib/reader-timestamps";
 import { serializeSelectionFragmentToMarkdown } from "../lib/selection-markdown";
+import { SourceTreeNav } from "./library/SourceTreeNav";
+import { ExtractPanel } from "./library/ExtractPanel";
+import { OrganizePanel } from "./library/OrganizePanel";
+import { RelayHistoryPanel } from "./library/RelayHistoryPanel";
+import { RelayPanel } from "./library/RelayPanel";
+import {
+  buildConversationTreeLookup,
+  buildSourceTreeModel,
+  describeSelection,
+  filterConversationsBySelection,
+  type SourceSelection,
+} from "./library/sourceTree";
 
 type ViewMode = "conversations" | "notes";
 type FolderItem = { name: string; isCustom: boolean; isTag: boolean };
@@ -111,6 +131,14 @@ const LibrarySplitContext = createContext<LibrarySplitContextValue | null>(
 
 const STANDARD_NOTE_EDITOR_MIN_HEIGHT = 280;
 const SPLIT_NOTE_EDITOR_MIN_HEIGHT = 520;
+
+// Conversation-list windowing (P2b): enable only for large lists. The card's
+// collapsed height is constant (p-3 + one title line); hover/selection
+// expansion happens inside the rendered window and is absorbed by the spacers.
+const VIRTUAL_LIST_THRESHOLD = 300;
+const VIRTUAL_LIST_OVERSCAN = 8;
+const VIRTUAL_ROW_GAP_PX = 6; // space-y-1.5
+const VIRTUAL_ROW_FALLBACK_PX = 55; // measured collapsed card (~49px) + gap
 
 type ImportedVaultFolderNode = {
   name: string;
@@ -511,7 +539,13 @@ export function LibraryTab({
   labels: providedLabels,
 }: LibraryTabProps) {
   const labels = providedLabels ?? ({} as Record<string, any>);
-  const { topics, conversations, refresh } = useLibraryData();
+  const {
+    topics,
+    conversations,
+    refresh,
+    digestByConversationId,
+    conversationTree,
+  } = useLibraryData();
   const getRelatedConversations = storage.getRelatedConversations;
   const getMessages = storage.getMessages;
   const getAnnotationsByConversation = storage.getAnnotationsByConversation;
@@ -533,6 +567,28 @@ export function LibraryTab({
     "all",
   );
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
+  // P2b: source-tree selection (source/project/topic) — an extra filter
+  // dimension on top of listFilter/selectedTag, cleared by the same actions
+  // that clear those.
+  const [sourceSelection, setSourceSelection] = useState<SourceSelection | null>(
+    null,
+  );
+  const [organizeOpen, setOrganizeOpen] = useState(false);
+  const [topicPickerForId, setTopicPickerForId] = useState<number | null>(null);
+  // P4a relay: multi-select mode for handoff-pack generation. Kept separate
+  // from the reader selection so the two never interfere.
+  const [relaySelectMode, setRelaySelectMode] = useState(false);
+  const [relaySelectedIds, setRelaySelectedIds] = useState<number[]>([]);
+  const [relayGenerating, setRelayGenerating] = useState(false);
+  const [relayAvailability, setRelayAvailability] =
+    useState<RelayAvailability | null>(null);
+  const [relayPack, setRelayPack] = useState<RelayPack | null>(null);
+  const [relayHistoryOpen, setRelayHistoryOpen] = useState(false);
+  const [relayNotice, setRelayNotice] = useState<string | null>(null);
+  // P4b knowledge extract: same multi-select pool as the relay flow; the
+  // result opens in its own panel and saves into the deposits area on demand.
+  const [extractGenerating, setExtractGenerating] = useState(false);
+  const [extractResult, setExtractResult] = useState<ExtractResult | null>(null);
   const [relatedConversations, setRelatedConversations] = useState<
     RelatedConversation[]
   >([]);
@@ -653,6 +709,14 @@ export function LibraryTab({
   );
   const messageContentRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const conversationPreviewScrollRef = useRef<HTMLDivElement>(null);
+  // P2b list windowing state
+  const conversationListScrollRef = useRef<HTMLDivElement | null>(null);
+  const listScrollRafRef = useRef<number | null>(null);
+  const [listScrollTop, setListScrollTop] = useState(0);
+  const [listViewportHeight, setListViewportHeight] = useState(0);
+  const [measuredRowPitch, setMeasuredRowPitch] = useState(
+    VIRTUAL_ROW_FALLBACK_PX,
+  );
   const FOLDER_META_KEY = "vesti_folder_meta";
   const NOTION_SETTINGS_KEY = "vesti_notion_settings";
   const [hasNotionExportConfig, setHasNotionExportConfig] = useState(false);
@@ -1321,6 +1385,10 @@ export function LibraryTab({
   const selectedConversation = conversations.find(
     (c) => c.id === selectedConversationId,
   );
+  const selectedDigest =
+    selectedConversationId !== null
+      ? digestByConversationId.get(selectedConversationId) ?? null
+      : null;
   const activeAnnotationMessage =
     activeAnnotationMessageId !== null
       ? messages.find((message) => message.id === activeAnnotationMessageId) ??
@@ -1474,7 +1542,150 @@ export function LibraryTab({
       )
     : baseConversations;
 
-  const filteredConversations = tagFilteredConversations;
+  // P2b: source-tree lookup + aggregated nav model + the extra filter
+  // dimension (source/project/topic) applied on top of the existing filters.
+  const treeLookup = useMemo(
+    () => buildConversationTreeLookup(conversationTree),
+    [conversationTree],
+  );
+  const sourceTreeModel = useMemo(
+    () =>
+      buildSourceTreeModel({
+        tree: conversationTree,
+        conversations,
+        topics,
+        lookup: treeLookup,
+      }),
+    [conversationTree, conversations, topics, treeLookup],
+  );
+  const flattenedTopics = useMemo(() => {
+    const walk = (
+      nodes: Topic[],
+      depth: number,
+    ): Array<{ id: number; name: string; depth: number }> =>
+      nodes.flatMap((node) => [
+        { id: node.id, name: node.name, depth },
+        ...walk(node.children ?? [], depth + 1),
+      ]);
+    return walk(topics, 0);
+  }, [topics]);
+  const sourceSelectionLabel = useMemo(
+    () =>
+      sourceSelection
+        ? describeSelection(
+            sourceTreeModel,
+            sourceSelection,
+            topics,
+            (labels.sourceTree?.browser as string | undefined) ?? "Browser",
+          )
+        : null,
+    [sourceTreeModel, sourceSelection, topics, labels],
+  );
+  const filteredConversations = sourceSelection
+    ? filterConversationsBySelection(
+        tagFilteredConversations,
+        sourceSelection,
+        treeLookup,
+        topics,
+      )
+    : tagFilteredConversations;
+
+  // P2b: lightweight windowing for very large lists (fixed row pitch +
+  // overscan, no dependency). Row pitch is measured from the rendered cards
+  // and refined once per window.
+  const isListVirtualized =
+    filteredConversations.length > VIRTUAL_LIST_THRESHOLD;
+  let virtualStartIndex = 0;
+  let virtualEndIndex = filteredConversations.length;
+  if (isListVirtualized) {
+    const firstVisible = Math.floor(listScrollTop / measuredRowPitch);
+    const lastVisible = Math.ceil(
+      (listScrollTop + listViewportHeight) / measuredRowPitch,
+    );
+    virtualStartIndex = Math.max(
+      0,
+      Math.min(
+        firstVisible - VIRTUAL_LIST_OVERSCAN,
+        filteredConversations.length - 1,
+      ),
+    );
+    virtualEndIndex = Math.min(
+      filteredConversations.length,
+      Math.max(lastVisible + VIRTUAL_LIST_OVERSCAN, virtualStartIndex + 1),
+    );
+  }
+  const visibleConversations = isListVirtualized
+    ? filteredConversations.slice(virtualStartIndex, virtualEndIndex)
+    : filteredConversations;
+  const virtualTopSpacer = isListVirtualized
+    ? virtualStartIndex * measuredRowPitch
+    : 0;
+  const virtualBottomSpacer = isListVirtualized
+    ? Math.max(
+        0,
+        (filteredConversations.length - virtualEndIndex) * measuredRowPitch,
+      )
+    : 0;
+
+  // Reset the list scroll position whenever the effective filter changes.
+  useEffect(() => {
+    setListScrollTop(0);
+    if (conversationListScrollRef.current) {
+      conversationListScrollRef.current.scrollTop = 0;
+    }
+  }, [listFilter, selectedTag, sourceSelection, viewMode]);
+
+  // Track the list viewport height while windowing is active.
+  useEffect(() => {
+    const node = conversationListScrollRef.current;
+    if (!node || !isListVirtualized) return;
+    setListViewportHeight(node.clientHeight);
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      setListViewportHeight(node.clientHeight);
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [isListVirtualized]);
+
+  // Measure the real collapsed card height from the rendered window (min over
+  // sampled cards, so an expanded hovered/selected card can't skew it).
+  useEffect(() => {
+    if (!isListVirtualized) return;
+    const node = conversationListScrollRef.current;
+    if (!node) return;
+    const heights: number[] = [];
+    for (const child of Array.from(node.children)) {
+      const element = child as HTMLElement;
+      if (element.dataset.virtualSpacer !== undefined) continue;
+      if (element.offsetHeight > 0) heights.push(element.offsetHeight);
+      if (heights.length >= 10) break;
+    }
+    if (heights.length === 0) return;
+    const pitch = Math.min(...heights) + VIRTUAL_ROW_GAP_PX;
+    setMeasuredRowPitch((current) =>
+      Math.abs(pitch - current) >= 2 ? pitch : current,
+    );
+  }, [isListVirtualized, virtualStartIndex, virtualEndIndex]);
+
+  useEffect(
+    () => () => {
+      if (listScrollRafRef.current !== null) {
+        cancelAnimationFrame(listScrollRafRef.current);
+      }
+    },
+    [],
+  );
+
+  const handleConversationListScroll = () => {
+    if (listScrollRafRef.current !== null) return;
+    listScrollRafRef.current = requestAnimationFrame(() => {
+      listScrollRafRef.current = null;
+      const node = conversationListScrollRef.current;
+      if (node) setListScrollTop(node.scrollTop);
+    });
+  };
+
   const isSplitActive =
     workspaceMode === "split" &&
     isDesktopSplitAvailable &&
@@ -1625,6 +1836,7 @@ export function LibraryTab({
     if (options?.resetFilters) {
       setListFilter("all");
       setSelectedTag(null);
+      setSourceSelection(null);
     }
     setSelectedConversationId(conversationId);
     if (options?.resetSelectedNote) {
@@ -2062,6 +2274,109 @@ export function LibraryTab({
     } catch (error) {
       window.alert(
         (error as Error)?.message ?? "Failed to delete conversation.",
+      );
+    }
+  };
+
+  // P2b: picking a source-tree node resets the other nav filters (same
+  // contract as the quick entries / folder clicks) and filters the list by
+  // source/project/topic.
+  const handleSourceTreeSelect = (selection: SourceSelection) => {
+    void flushPendingNoteSave();
+    setViewMode("conversations");
+    setListFilter("all");
+    setSelectedTag(null);
+    setSourceSelection(selection);
+    setSelectedConversationId(null);
+    setIsSplitNavigationOpen(false);
+  };
+
+  const handleSourceTreeNotes = () => {
+    setSourceSelection(null);
+    void openNotesView();
+  };
+
+  // P4a relay: multi-select mode for handoff-pack generation.
+  const canRelay = Boolean(storage.generateRelayPack);
+  const relayLabels = (labels.relay ?? {}) as Record<string, string>;
+  const relayL = (key: string, fallback: string) => relayLabels[key] ?? fallback;
+
+  // P4b knowledge extract: shares the relay select-mode pool and LLM probe.
+  const canExtract = Boolean(storage.generateExtract);
+  const extractLabels = (labels.knowledgeExtract ?? {}) as Record<string, string>;
+  const extractL = (key: string, fallback: string) => extractLabels[key] ?? fallback;
+
+  const enterRelaySelectMode = () => {
+    setRelaySelectMode(true);
+    setRelaySelectedIds([]);
+    setRelayNotice(null);
+    setOpenConversationMenuId(null);
+    setTopicPickerForId(null);
+    void storage.getRelayAvailability?.().then(setRelayAvailability);
+  };
+
+  const exitRelaySelectMode = () => {
+    setRelaySelectMode(false);
+    setRelaySelectedIds([]);
+    setRelayNotice(null);
+  };
+
+  const toggleRelaySelection = (conversationId: number) => {
+    setRelaySelectedIds((current) =>
+      current.includes(conversationId)
+        ? current.filter((id) => id !== conversationId)
+        : [...current, conversationId],
+    );
+  };
+
+  const handleRelayGenerate = async () => {
+    if (!storage.generateRelayPack || relaySelectedIds.length === 0) return;
+    setRelayGenerating(true);
+    setRelayNotice(null);
+    try {
+      const pack = await storage.generateRelayPack(relaySelectedIds);
+      setRelayPack(pack);
+      exitRelaySelectMode();
+    } catch (error) {
+      setRelayNotice((error as Error)?.message ?? String(error));
+    } finally {
+      setRelayGenerating(false);
+    }
+  };
+
+  // P4b: run the extract agent over the same selection and open the panel.
+  const handleExtractGenerate = async () => {
+    if (!storage.generateExtract || relaySelectedIds.length === 0) return;
+    setExtractGenerating(true);
+    setRelayNotice(null);
+    try {
+      const result = await storage.generateExtract(relaySelectedIds);
+      setExtractResult(result);
+      exitRelaySelectMode();
+    } catch (error) {
+      setRelayNotice((error as Error)?.message ?? String(error));
+    } finally {
+      setExtractGenerating(false);
+    }
+  };
+
+  // P2b: manual conversation → topic assignment from the card menu.
+  const handleConversationMoveTopic = async (
+    conversation: Conversation,
+    topicId: number | null,
+  ) => {
+    if (!updateConversation) {
+      window.alert("Moving to a topic is not available yet.");
+      return;
+    }
+    try {
+      await updateConversation(conversation.id, { topic_id: topicId });
+      setTopicPickerForId(null);
+      setOpenConversationMenuId(null);
+      await refresh();
+    } catch (error) {
+      window.alert(
+        (error as Error)?.message ?? "Failed to move conversation.",
       );
     }
   };
@@ -3039,7 +3354,10 @@ export function LibraryTab({
   };
 
   const isAllActive =
-    viewMode === "conversations" && !selectedTag && listFilter === "all";
+    viewMode === "conversations" &&
+    !selectedTag &&
+    !sourceSelection &&
+    listFilter === "all";
   const isStarredActive =
     viewMode === "conversations" && listFilter === "starred";
   const isRecentActive =
@@ -3114,6 +3432,7 @@ export function LibraryTab({
                     setViewMode("conversations");
                     setListFilter("all");
                     setSelectedTag(null);
+                    setSourceSelection(null);
                     setSelectedConversationId(null);
                     setIsSplitNavigationOpen(false);
                   }}
@@ -3144,6 +3463,7 @@ export function LibraryTab({
                     setViewMode("conversations");
                     setListFilter("starred");
                     setSelectedTag(null);
+                    setSourceSelection(null);
                     setSelectedConversationId(null);
                     setIsSplitNavigationOpen(false);
                   }}
@@ -3176,6 +3496,7 @@ export function LibraryTab({
                     setViewMode("conversations");
                     setListFilter("recent");
                     setSelectedTag(null);
+                    setSourceSelection(null);
                     setSelectedConversationId(null);
                     setIsSplitNavigationOpen(false);
                   }}
@@ -3205,6 +3526,23 @@ export function LibraryTab({
               </div>
 
               <div className="flex-1 overflow-y-auto px-2">
+                <SourceTreeNav
+                  model={sourceTreeModel}
+                  selection={sourceSelection}
+                  onSelect={handleSourceTreeSelect}
+                  notesCount={notes.length}
+                  notesActive={viewMode === "notes"}
+                  onSelectNotes={handleSourceTreeNotes}
+                  labels={{
+                    sectionLabel:
+                      (labels.sourceTree?.sectionLabel as string) ?? "Sources",
+                    notes:
+                      (labels.sourceTree?.notes as string) ??
+                      (labels.myNotes ?? "My Notes"),
+                    browser: (labels.sourceTree?.browser as string) ?? "Browser",
+                    wslBadge: (labels.sourceTree?.wslBadge as string) ?? "WSL",
+                  }}
+                />
                 <div className="flex items-center justify-between px-2 py-2">
                   <span className="text-[10px] font-sans font-semibold text-text-tertiary uppercase tracking-wider">
                     {labels.folders ?? "FOLDERS"}
@@ -3232,6 +3570,7 @@ export function LibraryTab({
                             setViewMode("conversations");
                             setListFilter("all");
                             setSelectedTag(folder.name);
+                            setSourceSelection(null);
                             setSelectedConversationId(null);
                             setIsSplitNavigationOpen(false);
                           }}
@@ -3242,6 +3581,7 @@ export function LibraryTab({
                               setViewMode("conversations");
                               setListFilter("all");
                               setSelectedTag(folder.name);
+                              setSourceSelection(null);
                               setSelectedConversationId(null);
                               setIsSplitNavigationOpen(false);
                             }
@@ -3310,28 +3650,6 @@ export function LibraryTab({
                   </div>
                 )}
               </div>
-
-              <div className="border-t border-border-subtle px-2 py-2">
-                <button
-                  onClick={() => void openNotesView()}
-                  className={`w-full flex items-center gap-2 px-3 py-2 transition-colors my-1 rounded-lg ${
-                    viewMode === "notes"
-                      ? "bg-bg-surface-card-active"
-                      : "hover:bg-bg-surface-card"
-                  }`}
-                >
-                  <BookOpen
-                    strokeWidth={1.5}
-                    className="w-4 h-4 text-text-secondary"
-                  />
-                  <span className="flex-1 text-sm font-sans text-text-primary">
-                    {labels.myNotes ?? "My Notes"}
-                  </span>
-                  <span className="text-xs font-sans text-text-tertiary">
-                    {notes.length}
-                  </span>
-                </button>
-              </div>
             </aside>
 
             <ResizablePanelDivider
@@ -3354,46 +3672,186 @@ export function LibraryTab({
                         <h2 className="text-lg font-serif font-normal text-text-primary">
                           {selectedTag
                             ? selectedTag
-                            : listFilter === "starred"
-                              ? (labels.starred ?? "Starred")
-                              : listFilter === "recent"
-                                ? (labels.recent ?? "Recent")
-                                : (labels.allConversations ?? "All Conversations")}
+                            : sourceSelection && sourceSelectionLabel
+                              ? sourceSelectionLabel
+                              : listFilter === "starred"
+                                ? (labels.starred ?? "Starred")
+                                : listFilter === "recent"
+                                  ? (labels.recent ?? "Recent")
+                                  : (labels.allConversations ?? "All Conversations")}
                         </h2>
                         <span className="text-xs font-sans text-text-tertiary">
                           · {filteredConversations.length} {labels.conversationCount ?? "conversations"}
                         </span>
                       </div>
+                      <div className="ml-2 flex shrink-0 items-center gap-1">
+                        {canRelay || canExtract ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              relaySelectMode ? exitRelaySelectMode() : enterRelaySelectMode()
+                            }
+                            className={`flex h-6 w-6 items-center justify-center rounded-md transition-colors ${
+                              relaySelectMode
+                                ? "bg-accent-primary-light text-accent-primary"
+                                : "text-text-tertiary hover:bg-bg-surface-card hover:text-text-secondary"
+                            }`}
+                            aria-label={relayL("selectMode", "Select")}
+                            title={relayL("selectMode", "Select")}
+                          >
+                            <ListChecks strokeWidth={1.75} className="h-4 w-4" />
+                          </button>
+                        ) : null}
+                        {storage.listRelayPacks ? (
+                          <button
+                            type="button"
+                            onClick={() => setRelayHistoryOpen(true)}
+                            className="flex h-6 w-6 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-bg-surface-card hover:text-text-secondary"
+                            aria-label={relayL("historyButton", "Relay packs")}
+                            title={relayL("historyButton", "Relay packs")}
+                          >
+                            <Package strokeWidth={1.75} className="h-4 w-4" />
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          onClick={() => setOrganizeOpen(true)}
+                          className="flex h-6 w-6 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-bg-surface-card hover:text-text-secondary"
+                          aria-label={(labels.organize?.button as string) ?? "Organize"}
+                          title={(labels.organize?.button as string) ?? "Organize"}
+                        >
+                          <Sparkles strokeWidth={1.75} className="h-4 w-4" />
+                        </button>
+                      </div>
                     </div>
                   </div>
 
-                  <div className="flex-1 overflow-y-auto p-3 space-y-1.5 mt-2">
-                    {filteredConversations.map((conv) => {
+                  {relaySelectMode ? (
+                    <div className="mx-3 mb-1 rounded-lg border border-border-subtle bg-bg-surface-card px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-vesti-sm font-sans text-text-secondary">
+                          {relayL("selectedCount", "{count} selected").replace(
+                            "{count}",
+                            String(relaySelectedIds.length),
+                          )}
+                        </span>
+                        <div className="ml-auto flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => void handleRelayGenerate()}
+                            disabled={
+                              relaySelectedIds.length === 0 ||
+                              relayGenerating ||
+                              extractGenerating ||
+                              (relayAvailability !== null && !relayAvailability.llmConfigured)
+                            }
+                            className="rounded-md bg-accent-primary px-2.5 py-1 text-vesti-sm font-sans text-text-inverse transition-colors hover:bg-accent-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {relayGenerating
+                              ? relayL("generating", "Generating…")
+                              : relayL("generate", "Generate relay pack")}
+                          </button>
+                          {canExtract ? (
+                            <button
+                              type="button"
+                              onClick={() => void handleExtractGenerate()}
+                              disabled={
+                                relaySelectedIds.length === 0 ||
+                                relayGenerating ||
+                                extractGenerating ||
+                                (relayAvailability !== null && !relayAvailability.llmConfigured)
+                              }
+                              className="inline-flex items-center gap-1 rounded-md border border-border-subtle px-2.5 py-1 text-vesti-sm font-sans text-text-secondary transition-colors hover:bg-bg-surface-card-hover disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              <Lightbulb strokeWidth={1.75} className="h-3.5 w-3.5" />
+                              {extractGenerating
+                                ? extractL("generating", "Extracting…")
+                                : extractL("generate", "Extract knowledge")}
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            onClick={exitRelaySelectMode}
+                            className="rounded-md px-2.5 py-1 text-vesti-sm font-sans text-text-secondary transition-colors hover:bg-bg-surface-card-hover"
+                          >
+                            {relayL("exitSelectMode", "Cancel")}
+                          </button>
+                        </div>
+                      </div>
+                      {relayAvailability !== null && !relayAvailability.llmConfigured ? (
+                        <p className="mt-1 text-vesti-sm font-sans text-danger">
+                          {relayL("llmMissing", "Configure a model in Settings first.")}
+                        </p>
+                      ) : null}
+                      {relayNotice ? (
+                        <p className="mt-1 text-vesti-sm font-sans text-danger">{relayNotice}</p>
+                      ) : null}
+                    </div>
+                  ) : null}
+
+                  <div
+                    ref={conversationListScrollRef}
+                    onScroll={
+                      isListVirtualized ? handleConversationListScroll : undefined
+                    }
+                    className="flex-1 overflow-y-auto p-3 space-y-1.5 mt-2"
+                  >
+                    {isListVirtualized && virtualTopSpacer > 0 ? (
+                      <div
+                        data-virtual-spacer
+                        aria-hidden="true"
+                        style={{ height: virtualTopSpacer }}
+                      />
+                    ) : null}
+                    {visibleConversations.map((conv) => {
                       const isSelected = conv.id === selectedConversationId;
+                      const isRelayChecked = relaySelectedIds.includes(conv.id);
                       return (
                         <div
                           key={conv.id}
                           role="button"
                           tabIndex={0}
-                          onClick={() =>
+                          onClick={() => {
+                            if (relaySelectMode) {
+                              toggleRelaySelection(conv.id);
+                              return;
+                            }
                             void selectConversation(conv.id, {
                               closeNavigation: isSplitActive,
-                            })
-                          }
+                            });
+                          }}
                           onKeyDown={(event) => {
                             if (event.key === "Enter" || event.key === " ") {
                               event.preventDefault();
+                              if (relaySelectMode) {
+                                toggleRelaySelection(conv.id);
+                                return;
+                              }
                               void selectConversation(conv.id, {
                                 closeNavigation: isSplitActive,
                               });
                             }
                           }}
                           className={`w-full text-left p-3 rounded-lg transition-all duration-200 relative group cursor-pointer ${
-                            isSelected
-                              ? "bg-bg-surface-card-active shadow-[0_1px_3px_rgba(0,0,0,0.04)]"
-                              : "bg-bg-surface-card hover:bg-bg-surface-card-hover hover:shadow-[0_1px_3px_rgba(0,0,0,0.04)]"
+                            relaySelectMode && isRelayChecked
+                              ? "bg-bg-surface-card-active shadow-[0_1px_3px_rgba(0,0,0,0.04)] ring-1 ring-accent-primary"
+                              : isSelected
+                                ? "bg-bg-surface-card-active shadow-[0_1px_3px_rgba(0,0,0,0.04)]"
+                                : "bg-bg-surface-card hover:bg-bg-surface-card-hover hover:shadow-[0_1px_3px_rgba(0,0,0,0.04)]"
                           }`}
                         >
+                          {relaySelectMode ? (
+                            <span
+                              aria-hidden="true"
+                              className={`absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded border transition-colors ${
+                                isRelayChecked
+                                  ? "border-accent-primary bg-accent-primary text-text-inverse"
+                                  : "border-border-subtle bg-bg-primary text-transparent"
+                              }`}
+                            >
+                              <Check strokeWidth={2} className="h-3.5 w-3.5" />
+                            </span>
+                          ) : (
                           <button
                             type="button"
                             onClick={(event) => {
@@ -3413,6 +3871,7 @@ export function LibraryTab({
                               className="w-4 h-4"
                             />
                           </button>
+                          )}
                           {openConversationMenuId === conv.id && (
                             <div
                               className="absolute right-2 top-10 z-30 w-52 rounded-md border border-border-subtle bg-bg-primary shadow-[0_8px_24px_rgba(0,0,0,0.08)] py-1"
@@ -3458,6 +3917,63 @@ export function LibraryTab({
                               </button>
                               <button
                                 type="button"
+                                onClick={() =>
+                                  setTopicPickerForId((prev) =>
+                                    prev === conv.id ? null : conv.id,
+                                  )
+                                }
+                                className="w-full flex items-center gap-2 px-3 py-2 text-[13px] font-sans text-text-primary hover:bg-bg-surface-card transition-colors"
+                              >
+                                <Hash strokeWidth={1.5} className="w-4 h-4" />
+                                <span>{labels.moveToTopic ?? "Move to topic"}</span>
+                                <ChevronDown
+                                  strokeWidth={1.5}
+                                  className={`ml-auto w-3.5 h-3.5 transition-transform ${
+                                    topicPickerForId === conv.id ? "" : "-rotate-90"
+                                  }`}
+                                />
+                              </button>
+                              {topicPickerForId === conv.id && (
+                                <div className="max-h-44 overflow-y-auto border-t border-border-subtle py-1">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void handleConversationMoveTopic(conv, null)
+                                    }
+                                    className={`w-full flex items-center gap-2 px-3 py-1.5 text-[13px] font-sans hover:bg-bg-surface-card transition-colors ${
+                                      conv.topic_id === null
+                                        ? "text-accent-primary"
+                                        : "text-text-secondary"
+                                    }`}
+                                  >
+                                    {labels.noTopic ?? "No topic"}
+                                  </button>
+                                  {flattenedTopics.map((topic) => (
+                                    <button
+                                      key={topic.id}
+                                      type="button"
+                                      onClick={() =>
+                                        void handleConversationMoveTopic(
+                                          conv,
+                                          topic.id,
+                                        )
+                                      }
+                                      style={{
+                                        paddingLeft: `${12 + topic.depth * 14}px`,
+                                      }}
+                                      className={`w-full truncate py-1.5 pr-3 text-left text-[13px] font-sans hover:bg-bg-surface-card transition-colors ${
+                                        conv.topic_id === topic.id
+                                          ? "text-accent-primary"
+                                          : "text-text-primary"
+                                      }`}
+                                    >
+                                      {topic.name}
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                              <button
+                                type="button"
                                 onClick={() => {
                                   void handleConversationRemoveFromFolder(conv);
                                   setOpenConversationMenuId(null);
@@ -3498,7 +4014,7 @@ export function LibraryTab({
                           >
                             <div className="overflow-hidden">
                               <p className="text-[13px] font-sans text-text-secondary leading-relaxed mb-2 line-clamp-2">
-                                {conv.snippet}
+                                {digestByConversationId.get(conv.id)?.oneLiner || conv.snippet}
                               </p>
                               <div className="flex items-center gap-1.5 flex-wrap">
                                 <span
@@ -3542,6 +4058,13 @@ export function LibraryTab({
                         </div>
                       );
                     })}
+                    {isListVirtualized && virtualBottomSpacer > 0 ? (
+                      <div
+                        data-virtual-spacer
+                        aria-hidden="true"
+                        style={{ height: virtualBottomSpacer }}
+                      />
+                    ) : null}
                   </div>
                 </>
               ) : (
@@ -3745,6 +4268,16 @@ export function LibraryTab({
                           >
                             {getPlatformLabel(selectedConversation.platform)}
                           </span>
+                          {(selectedConversation as { _source?: string })
+                            ._source === "browser_extension" && (
+                            <>
+                              <span>·</span>
+                              <span className="text-[11px] text-text-tertiary">
+                                {labels.sourceBrowserExtension ??
+                                  "via browser extension"}
+                              </span>
+                            </>
+                          )}
                           <span>·</span>
                           <span>{formatDate(messageDate)}</span>
                           <span>·</span>
@@ -3806,6 +4339,30 @@ export function LibraryTab({
                         <MetaChip key={tag}>{tag}</MetaChip>
                       ))}
                     </div>
+                    {selectedDigest &&
+                      (selectedDigest.keyFiles.length > 0 ||
+                        selectedDigest.decisions.length > 0) && (
+                        <div className="flex flex-wrap items-center gap-2">
+                          {selectedDigest.keyFiles.length > 0 && (
+                            <span className="text-[11px] font-sans uppercase tracking-[0.08em] text-text-tertiary">
+                              {labels.digestKeyFiles ?? "Key files"}
+                            </span>
+                          )}
+                          {selectedDigest.keyFiles.slice(0, 6).map((file) => (
+                            <MetaChip key={`digest-file:${file}`}>{file}</MetaChip>
+                          ))}
+                          {selectedDigest.decisions.length > 0 && (
+                            <span className="text-[11px] font-sans uppercase tracking-[0.08em] text-text-tertiary">
+                              {labels.digestKeyDecisions ?? "Decisions"}
+                            </span>
+                          )}
+                          {selectedDigest.decisions.slice(0, 4).map((decision) => (
+                            <MetaChip key={`digest-decision:${decision}`}>
+                              {decision}
+                            </MetaChip>
+                          ))}
+                        </div>
+                      )}
                   </div>
 
                   {activeTopicName ? (
@@ -5009,6 +5566,40 @@ export function LibraryTab({
               </div>
             </div>
           )}
+          <OrganizePanel
+            open={organizeOpen}
+            onClose={() => setOrganizeOpen(false)}
+            storage={storage}
+            conversations={conversations}
+            topics={topics}
+            sourceSelection={sourceSelection}
+            selectionLabel={sourceSelectionLabel ?? undefined}
+            treeLookup={treeLookup}
+            labels={(labels.organize ?? {}) as Record<string, string>}
+            onApplied={() => void refresh()}
+          />
+          <RelayPanel
+            pack={relayPack}
+            onClose={() => setRelayPack(null)}
+            storage={storage}
+            labels={relayLabels}
+          />
+          <ExtractPanel
+            result={extractResult}
+            onClose={() => setExtractResult(null)}
+            storage={storage}
+            labels={extractLabels}
+          />
+          <RelayHistoryPanel
+            open={relayHistoryOpen}
+            onClose={() => setRelayHistoryOpen(false)}
+            storage={storage}
+            labels={relayLabels}
+            onSelect={(pack) => {
+              setRelayHistoryOpen(false);
+              setRelayPack(pack);
+            }}
+          />
         </div>
       </LibrarySplitContext.Provider>
     </div>

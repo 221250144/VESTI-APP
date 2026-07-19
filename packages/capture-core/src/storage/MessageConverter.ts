@@ -19,6 +19,7 @@ import type {
   MessageSource,
 } from '../types/unified.js';
 import { classifyTool } from '../types/unified.js';
+import { stripInjectedContextBlocks } from '../utils/injectedBlocks.js';
 
 export class MessageConverter {
 
@@ -61,7 +62,8 @@ export class MessageConverter {
       : onlySnapshots ? 'file_snapshot' : 'empty';
 
     // Title generation priority chain:
-    // 1. First user_input text (> 5 chars, not interrupted)
+    // 1. First user_input text (> 5 chars, not interrupted, injected
+    //    context blocks like <environment_context> stripped)
     // 2. First assistant_text text
     // 3. session.meta.first_prompt (from session-meta)
     // 4. "File snapshots - {projectDir}" (file_snapshot type)
@@ -69,7 +71,7 @@ export class MessageConverter {
     let title = 'Untitled';
     for (const m of userInputMessages) {
       if (m.contentText) {
-        const text = m.contentText.trim();
+        const text = stripInjectedContextBlocks(m.contentText);
         if (text.length > 5 && !text.startsWith('[Request interrupted')) {
           title = text.split('\n')[0].slice(0, 80) || 'Untitled';
           break;
@@ -132,10 +134,13 @@ export class MessageConverter {
 
     // Build agent meta with peakContextUsage
     let agentMeta: string | undefined;
-    if (session.meta || session.peakContextUsage) {
+    if (session.meta || session.peakContextUsage || session.warnings?.length) {
       const metaObj: Record<string, unknown> = session.meta ? { ...session.meta } : {};
       if (session.peakContextUsage) {
         metaObj.peakContextUsage = session.peakContextUsage;
+      }
+      if (session.warnings?.length) {
+        metaObj.parse_warnings = session.warnings;
       }
       agentMeta = JSON.stringify(metaObj);
     }
@@ -147,6 +152,7 @@ export class MessageConverter {
       id: sessionId,
       sessionId: session.sessionId,
       platform: session.platform,
+      host: session.host ?? 'native',
       platformVersion: session.claudeCodeVersion,
       projectPath: session.projectPath,
       gitBranch: session.gitBranch,

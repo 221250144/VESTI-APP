@@ -77,9 +77,9 @@ export function SendToMenu({
     try {
       const { title, markdown } = resolvePayload(scope);
       if (target === "notion" && storage.exportConversationToNotion) {
-        await storage.exportConversationToNotion({ title, markdown });
+        await storage.exportConversationToNotion({ title, markdown, conversation, scope });
       } else if (target === "obsidian" && storage.exportConversationToObsidian) {
-        await storage.exportConversationToObsidian({ title, markdown });
+        await storage.exportConversationToObsidian({ title, markdown, conversation, scope });
       }
       flash(labels.sendToDone ?? "Sent ✓");
     } catch (e) {

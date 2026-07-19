@@ -9,7 +9,13 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { Conversation, Topic, StorageApi } from "../types";
+import type {
+  Conversation,
+  ConversationDigest,
+  ConversationTree,
+  Topic,
+  StorageApi,
+} from "../types";
 import {
   useExtensionSync,
   type ConversationUpdatedPayload,
@@ -18,6 +24,12 @@ import {
 type LibraryDataContextValue = {
   topics: Topic[];
   conversations: Conversation[];
+  /** Per-conversation digest (P1.5), keyed by conversation id; empty when the
+   * platform has no digest pipeline. */
+  digestByConversationId: Map<number, ConversationDigest>;
+  /** Desktop conversation tree for the source-tree nav (P2b); null when the
+   * platform has no capture pipeline (extension). */
+  conversationTree: ConversationTree | null;
   refresh: () => Promise<void>;
   updateConversationInState: (payload: ConversationUpdatedPayload) => void;
 };
@@ -60,15 +72,27 @@ export function LibraryDataProvider({
 }) {
   const [topics, setTopics] = useState<Topic[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [digestByConversationId, setDigestByConversationId] = useState<
+    Map<number, ConversationDigest>
+  >(new Map());
+  const [conversationTree, setConversationTree] =
+    useState<ConversationTree | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [topicData, conversationData] = await Promise.all([
-        storage.getTopics(),
-        storage.getConversations(),
-      ]);
+      const [topicData, conversationData, digestData, treeData] =
+        await Promise.all([
+          storage.getTopics(),
+          storage.getConversations(),
+          storage.getConversationDigests?.() ?? Promise.resolve([]),
+          storage.getConversationTree?.() ?? Promise.resolve(null),
+        ]);
       setTopics(topicData);
       setConversations(conversationData);
+      setDigestByConversationId(
+        new Map(digestData.map((digest) => [digest.conversationId, digest]))
+      );
+      setConversationTree(treeData);
     } catch (error) {
       console.error("[dashboard] Failed to load library data", error);
     }
@@ -153,10 +177,19 @@ export function LibraryDataProvider({
     () => ({
       topics,
       conversations,
+      digestByConversationId,
+      conversationTree,
       refresh,
       updateConversationInState,
     }),
-    [topics, conversations, refresh, updateConversationInState]
+    [
+      topics,
+      conversations,
+      digestByConversationId,
+      conversationTree,
+      refresh,
+      updateConversationInState,
+    ]
   );
 
   return (

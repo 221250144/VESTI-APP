@@ -3,13 +3,40 @@ import type {
   AppSettingsUpdate,
   AppSettingsView,
   CapturePlatform,
+  ExtensionBridgeStatusView,
+  ExtensionPairCodeView,
   Overview,
+  WslStatusView,
 } from "../../shared/contracts";
 import { useI18n } from "../i18n";
 import type { SupportedLocale } from "../i18n/locales";
 import { useUiPreference } from "./useUiPreference";
+import { DEFAULT_SKIN_ID, SKINS, resolveSkin } from "../../capsule/skins";
+import {
+  DAILY_TIME_PREF_KEY,
+  DEFAULT_DAILY_TIME,
+  normalizeDailyTime,
+} from "../daily/dailyScheduler";
+import {
+  acceptAllClassifySuggestions,
+  acceptClassifySuggestion,
+  getAutoClassifyState,
+  ignoreClassifySuggestion,
+  listClassifySuggestions,
+  loadAutoClassifyState,
+  runAutoClassify,
+  subscribeAutoClassify,
+  type ClassifySuggestion,
+} from "../organize/autoClassify";
+import { scheduleUpstreamAutoExport } from "../upstream/autoExport";
+import {
+  exportAllToMarkdownDirectory,
+  exportConversationsToObsidian,
+  getUpstreamExportStats,
+  type UpstreamExportStats,
+} from "../upstream/obsidianExport";
 
-type SettingsDraft = AppSettingsUpdate & { apiKeyConfigured: boolean };
+type SettingsDraft = AppSettingsUpdate & { apiKeyConfigured: boolean; notionTokenConfigured: boolean };
 
 const EMPTY_OVERVIEW: Overview = {
   sources: [],
@@ -52,6 +79,26 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     sessions: "个会话",
     enabled: "已启用",
     disabled: "已停用",
+    wslSources: "WSL 来源",
+    wslSourcesDesc: "自动检测 WSL 发行版中的工具数据,纳入同步与定时轮询。",
+    wslNoDistros: "未检测到 WSL 发行版",
+    wslRedetect: "重新检测",
+    wslDetecting: "检测中…",
+    bridgeTitle: "连接 VESTI 扩展",
+    bridgeDesc: "浏览器扩展通过本机回环服务把网页端会话导入 Vesti。生成配对码并在扩展中输入即可完成连接。",
+    bridgeRunning: "服务运行中",
+    bridgeStopped: "服务未运行",
+    bridgeError: "端口冲突,扩展暂不可用",
+    bridgeGenerate: "生成配对码",
+    bridgeCodeHint: "在浏览器扩展中输入此配对码",
+    bridgeCodeExpired: "配对码已过期,请重新生成。",
+    bridgeClients: "已连接客户端",
+    bridgeNoClients: "还没有已连接的客户端。",
+    bridgePairedAt: "配对于",
+    bridgeLastSync: "最近同步",
+    bridgeNeverSynced: "尚未同步",
+    bridgeDisconnect: "断开",
+    bridgeDisconnectConfirm: "确定断开该客户端吗?扩展需要重新配对才能继续同步。",
     dataTitle: "内容数据与隐私",
     dataDesc: "会话数据库、标准化文本和 Agent 结果保存在这里。程序安装目录与内容数据目录相互独立。",
     dataDirectory: "数据目录",
@@ -86,6 +133,62 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     includeThinkingDesc: "如果来源提供思考摘要,将其一并交给分析模型。",
     includeToolDetails: "包含工具调用详情",
     includeToolDetailsDesc: "发送工具名称、输入、输出与错误,以获得更完整的技术分析。",
+    organizeTitle: "整理",
+    organizeDesc: "把未分类会话自动归入主题树。低置信度的结果进入待确认队列;绝不会覆盖你的手动分类。",
+    organizeAuto: "自动分类",
+    organizeAutoDesc: "新会话同步完成后自动运行(延迟约 10 秒)。",
+    organizeUnavailable: "需先在下方「模型服务」配置可用的模型,才能使用自动分类。",
+    organizeModeAuto: "自动落库",
+    organizeModeAutoDesc: "置信度 ≥ 60% 直接归入主题",
+    organizeModeSuggest: "仅建议",
+    organizeModeSuggestDesc: "全部结果进入待确认队列",
+    organizeNow: "立即整理",
+    organizeRunning: "整理中…",
+    organizeNever: "尚未运行过。",
+    organizeLastRun: "最近运行",
+    organizeStatsClassified: "新分类",
+    organizeStatsTopics: "新建主题",
+    organizeStatsQueued: "待确认",
+    organizeStatsFailed: "失败批次",
+    organizeQueue: "待确认队列",
+    organizeQueueEmpty: "没有待确认的建议。",
+    organizeAccept: "接受",
+    organizeIgnore: "忽略",
+    organizeAcceptAll: "全部接受",
+    dailyTitle: "日志",
+    dailyDesc: "每天固定时间自动生成当天日报;启动 App 时会补上错过的昨天。未配置模型时使用本地模板生成。",
+    dailyTime: "每日生成时间",
+    dailyTimeDesc: "默认 21:30。到点自动生成;当天没有活动则跳过。",
+    upstreamTitle: "上游导出",
+    upstreamDesc: "把会话导出到 Obsidian 库或 Notion。Obsidian 写入你选择的本地目录;Notion 通过 Integration Token 连接,Token 由系统安全存储加密。",
+    obsidianSection: "Obsidian",
+    vaultPath: "库目录(Vault)",
+    vaultNotChosen: "尚未选择",
+    vaultChoose: "选择目录",
+    autoExport: "新会话自动导出到 Obsidian",
+    autoExportDesc: "每次同步完成后约 15 秒,自动把未导出的新会话写入库目录。",
+    exportAllObsidian: "导出全部到 Obsidian",
+    exportAllMarkdown: "导出全部到 Markdown 目录",
+    notionSection: "Notion",
+    notionToken: "Integration Token",
+    notionTokenSaved: "(已安全保存,留空则不修改)",
+    deleteNotionToken: "删除已保存的 Token",
+    notionParent: "目标 Page ID / Database ID",
+    notionParentHint: "并在 Notion 目标页「··· → 连接」中授权给该 Integration。",
+    notionParentTypePage: "已识别:页面",
+    notionParentTypeDatabase: "已识别:数据库",
+    notionVerify: "保存并验证连接",
+    notionVerifying: "验证中…",
+    statsExported: "已导出",
+    statsFailed: "失败",
+    statsPending: "待导出",
+    statsLastAt: "最近导出",
+    statsLastError: "最近错误",
+    statsNever: "尚未导出。",
+    exportRunning: "导出中",
+    exportDone: "导出完成",
+    exportFailedCount: "失败",
+    exportNeedVault: "请先选择并保存库目录。",
     networkTitle: "网络与代理",
     networkDesc: "模型请求默认跟随 Windows 系统代理。修改后立即应用,无需重启。",
     proxySystem: "跟随系统",
@@ -100,8 +203,10 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     darkMode: "深色模式",
     darkModeDesc: "切换后立即应用到所有窗口。",
     language: "界面语言",
+    owlSkinTitle: "悬浮球皮肤",
+    owlSkinDesc: "选择小猫头鹰悬浮球的外观,点击立即生效。",
     aboutTitle: "关于 Vesti",
-    aboutDesc: "本地优先的 AI 会话采集、归档与洞察工具。当前支持 Codex、Cursor 和 Kimi Code。",
+    aboutDesc: "本地优先的 AI 会话采集、归档与洞察工具。当前支持 Codex、Cursor、Kimi Code 和 Claude Code。",
     settingsDir: "设置目录",
     contentDir: "内容目录",
     openSettingsDir: "打开设置目录",
@@ -136,6 +241,26 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     sessions: "sessions",
     enabled: "Enabled",
     disabled: "Disabled",
+    wslSources: "WSL sources",
+    wslSourcesDesc: "Tool data found inside WSL distributions is synced and polled automatically.",
+    wslNoDistros: "No WSL distributions detected",
+    wslRedetect: "Re-detect",
+    wslDetecting: "Detecting…",
+    bridgeTitle: "Connect the VESTI extension",
+    bridgeDesc: "The browser extension imports web conversations into Vesti over a loopback service. Generate a pair code and enter it in the extension to connect.",
+    bridgeRunning: "Service running",
+    bridgeStopped: "Service stopped",
+    bridgeError: "Port conflict; extension bridge unavailable",
+    bridgeGenerate: "Generate pair code",
+    bridgeCodeHint: "Enter this code in the browser extension",
+    bridgeCodeExpired: "Code expired. Generate a new one.",
+    bridgeClients: "Connected clients",
+    bridgeNoClients: "No clients connected yet.",
+    bridgePairedAt: "Paired",
+    bridgeLastSync: "Last sync",
+    bridgeNeverSynced: "Never synced",
+    bridgeDisconnect: "Disconnect",
+    bridgeDisconnectConfirm: "Disconnect this client? The extension must pair again to keep syncing.",
     dataTitle: "Data & Privacy",
     dataDesc: "The session database, normalized text, and agent results live here. The install directory and content directory are independent.",
     dataDirectory: "Data directory",
@@ -170,6 +295,62 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     includeThinkingDesc: "Forward source-provided thinking summaries to the analysis model.",
     includeToolDetails: "Include tool call details",
     includeToolDetailsDesc: "Send tool names, inputs, outputs, and errors for deeper technical analysis.",
+    organizeTitle: "Organize",
+    organizeDesc: "Automatically files unclassified conversations into your topic tree. Low-confidence results go to a review queue; manual assignments are never overwritten.",
+    organizeAuto: "Auto-classify",
+    organizeAutoDesc: "Runs automatically about 10s after new conversations finish syncing.",
+    organizeUnavailable: "Configure a working model under Model Service below to enable auto-classify.",
+    organizeModeAuto: "Apply automatically",
+    organizeModeAutoDesc: "Confidence ≥ 60% is filed directly",
+    organizeModeSuggest: "Suggest only",
+    organizeModeSuggestDesc: "Everything goes to the review queue",
+    organizeNow: "Organize now",
+    organizeRunning: "Organizing…",
+    organizeNever: "No runs yet.",
+    organizeLastRun: "Last run",
+    organizeStatsClassified: "classified",
+    organizeStatsTopics: "topics created",
+    organizeStatsQueued: "pending",
+    organizeStatsFailed: "failed batches",
+    organizeQueue: "Review queue",
+    organizeQueueEmpty: "No pending suggestions.",
+    organizeAccept: "Accept",
+    organizeIgnore: "Ignore",
+    organizeAcceptAll: "Accept all",
+    dailyTitle: "Daily log",
+    dailyDesc: "Generates the day's report at a fixed time every evening; a missed yesterday is caught up at launch. Without a configured model the local template is used.",
+    dailyTime: "Daily generation time",
+    dailyTimeDesc: "Default 21:30. Days without any activity are skipped.",
+    upstreamTitle: "Upstream Export",
+    upstreamDesc: "Export conversations to an Obsidian vault or Notion. Obsidian writes into a local folder you choose; Notion connects via an Integration Token encrypted by the OS secure storage.",
+    obsidianSection: "Obsidian",
+    vaultPath: "Vault folder",
+    vaultNotChosen: "Not chosen",
+    vaultChoose: "Choose folder",
+    autoExport: "Auto-export new conversations",
+    autoExportDesc: "About 15s after each sync, unexported new conversations are written into the vault.",
+    exportAllObsidian: "Export all to Obsidian",
+    exportAllMarkdown: "Export all to a Markdown folder",
+    notionSection: "Notion",
+    notionToken: "Integration Token",
+    notionTokenSaved: "(saved securely; leave blank to keep)",
+    deleteNotionToken: "Delete the saved token",
+    notionParent: "Target Page ID / Database ID",
+    notionParentHint: "Also share the target with the integration in Notion (··· → Connections).",
+    notionParentTypePage: "Resolved: page",
+    notionParentTypeDatabase: "Resolved: database",
+    notionVerify: "Save & verify connection",
+    notionVerifying: "Verifying…",
+    statsExported: "exported",
+    statsFailed: "failed",
+    statsPending: "pending",
+    statsLastAt: "last export",
+    statsLastError: "last error",
+    statsNever: "Nothing exported yet.",
+    exportRunning: "Exporting",
+    exportDone: "Export finished",
+    exportFailedCount: "failed",
+    exportNeedVault: "Choose and save a vault folder first.",
     networkTitle: "Network & Proxy",
     networkDesc: "Model requests follow the Windows system proxy by default. Changes apply immediately.",
     proxySystem: "Follow system",
@@ -184,8 +365,10 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     darkMode: "Dark mode",
     darkModeDesc: "Applies to every window immediately.",
     language: "Language",
+    owlSkinTitle: "Floating ball skin",
+    owlSkinDesc: "Pick a look for the owl floating ball; applies instantly.",
     aboutTitle: "About Vesti",
-    aboutDesc: "A local-first AI conversation capture, archive, and insight tool. Currently supports Codex, Cursor, and Kimi Code.",
+    aboutDesc: "A local-first AI conversation capture, archive, and insight tool. Currently supports Codex, Cursor, Kimi Code, and Claude Code.",
     settingsDir: "Settings directory",
     contentDir: "Content directory",
     openSettingsDir: "Open settings directory",
@@ -221,7 +404,17 @@ function toDraft(settings: AppSettingsView): SettingsDraft {
       apiKey: "",
       clearApiKey: false,
     },
+    upstream: {
+      obsidianVaultPath: settings.upstream.obsidianVaultPath,
+      obsidianAutoExport: settings.upstream.obsidianAutoExport,
+      notionParentId: settings.upstream.notionParentId,
+      notionParentType: settings.upstream.notionParentType,
+      notionTitleProperty: settings.upstream.notionTitleProperty,
+      notionToken: "",
+      clearNotionToken: false,
+    },
     apiKeyConfigured: settings.llm.apiKeyConfigured,
+    notionTokenConfigured: settings.upstream.notionTokenConfigured,
   };
 }
 
@@ -334,27 +527,124 @@ export function SettingsPage({
   const { locale, setLocale } = useI18n();
   const copy = { ...COPY.en, ...COPY[locale] };
   const [capsuleEnabled, setCapsuleEnabled] = useUiPreference("capsule.enabled", true, value => value !== false);
+  const [owlSkin, setOwlSkin] = useUiPreference("owlSkin", DEFAULT_SKIN_ID, value => resolveSkin(value).id);
+  const [classifyEnabled, setClassifyEnabled] = useUiPreference("classify.enabled", true, value => value !== false);
+  const [classifyMode, setClassifyMode] = useUiPreference<"auto" | "suggest">(
+    "classify.mode",
+    "auto",
+    value => (value === "suggest" ? "suggest" : "auto"),
+  );
+  const [dailyTime, setDailyTime] = useUiPreference(DAILY_TIME_PREF_KEY, DEFAULT_DAILY_TIME, normalizeDailyTime);
 
   const [settings, setSettings] = useState<AppSettingsView | null>(null);
   const [draft, setDraft] = useState<SettingsDraft | null>(null);
   const [overview, setOverview] = useState<Overview>(EMPTY_OVERVIEW);
+  const [wslStatus, setWslStatus] = useState<WslStatusView | null>(null);
+  const [wslBusy, setWslBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [bridge, setBridge] = useState<ExtensionBridgeStatusView | null>(null);
+  const [pairCode, setPairCode] = useState<ExtensionPairCodeView | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  const [classifyState, setClassifyState] = useState(getAutoClassifyState());
+  const [suggestions, setSuggestions] = useState<ClassifySuggestion[]>([]);
+  const [upstreamStats, setUpstreamStats] = useState<UpstreamExportStats | null>(null);
+  const [upstreamBusy, setUpstreamBusy] = useState<string | null>(null);
+  const [upstreamNote, setUpstreamNote] = useState("");
 
   const load = useCallback(async () => {
-    const [settingsValue, overviewValue] = await Promise.all([
+    const [settingsValue, overviewValue, wslValue, bridgeValue, upstreamStatsValue] = await Promise.all([
       window.vesti.getSettings(),
       window.vesti.getOverview(),
+      window.vesti.getWslStatus(),
+      window.vesti.getExtensionBridgeStatus(),
+      getUpstreamExportStats().catch(() => null),
     ]);
     setSettings(settingsValue);
     setDraft(toDraft(settingsValue));
     setOverview(overviewValue);
+    setWslStatus(wslValue);
+    setBridge(bridgeValue);
+    setUpstreamStats(upstreamStatsValue);
   }, []);
 
   useEffect(() => {
     void load();
-    return window.vesti.onCaptureChanged(() => void load());
+    const unsubscribeCapture = window.vesti.onCaptureChanged(() => void load());
+    const unsubscribeBridge = window.vesti.onExtensionBridgeChanged(() => {
+      void window.vesti.getExtensionBridgeStatus().then(setBridge);
+    });
+    return () => {
+      unsubscribeCapture();
+      unsubscribeBridge();
+    };
   }, [load]);
+
+  // 1s ticker for the pair-code countdown.
+  useEffect(() => {
+    if (!pairCode) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [pairCode]);
+
+  // Auto-classify (P2a): run state + persisted review queue.
+  useEffect(() => {
+    void loadAutoClassifyState();
+    const refreshQueue = () => {
+      void listClassifySuggestions().then(setSuggestions).catch(() => {});
+    };
+    refreshQueue();
+    const unsubscribe = subscribeAutoClassify((next) => {
+      setClassifyState(next);
+      if (!next.running) refreshQueue();
+    });
+    window.addEventListener("vesti:data-updated", refreshQueue);
+    return () => {
+      unsubscribe();
+      window.removeEventListener("vesti:data-updated", refreshQueue);
+    };
+  }, []);
+
+  async function organizeNow() {
+    await runAutoClassify({ trigger: "manual" });
+    setSuggestions(await listClassifySuggestions().catch(() => []));
+  }
+
+  async function acceptSuggestion(conversationId: number) {
+    await acceptClassifySuggestion(conversationId);
+    setSuggestions(await listClassifySuggestions().catch(() => []));
+  }
+
+  async function ignoreSuggestion(conversationId: number) {
+    await ignoreClassifySuggestion(conversationId);
+    setSuggestions(await listClassifySuggestions().catch(() => []));
+  }
+
+  async function acceptAllSuggestions() {
+    await acceptAllClassifySuggestions();
+    setSuggestions(await listClassifySuggestions().catch(() => []));
+  }
+
+  async function generatePairCode() {
+    setPairCode(await window.vesti.createExtensionPairCode());
+    setNow(Date.now());
+  }
+
+  async function disconnectClient(clientId: string) {
+    if (!window.confirm(copy.bridgeDisconnectConfirm)) return;
+    await window.vesti.disconnectExtensionClient(clientId);
+    setBridge(await window.vesti.getExtensionBridgeStatus());
+  }
+
+  async function redetectWsl() {
+    setWslBusy(true);
+    try {
+      setWslStatus(await window.vesti.redetectWsl());
+      await load();
+    } finally {
+      setWslBusy(false);
+    }
+  }
 
   async function chooseDirectory() {
     const directory = await window.vesti.chooseDataDirectory();
@@ -363,8 +653,8 @@ export function SettingsPage({
     }
   }
 
-  async function saveSettings(testAfterSave = false) {
-    if (!draft) return;
+  async function saveSettings(testAfterSave = false): Promise<boolean> {
+    if (!draft) return false;
     setBusy(true);
     setMessage("");
     try {
@@ -375,18 +665,102 @@ export function SettingsPage({
         network: draft.network,
         agent: draft.agent,
         llm: draft.llm,
+        upstream: draft.upstream,
       });
       setSettings(result.settings);
       setDraft(toDraft(result.settings));
       setMessage(result.restartRequired ? copy.savedRestart : copy.saved);
+      if (result.settings.upstream.obsidianAutoExport) scheduleUpstreamAutoExport();
       if (testAfterSave) {
         const tested = await window.vesti.testLlm();
         setMessage(tested.message);
       }
+      return true;
+    } catch (error) {
+      setMessage(errorMessage(error));
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function chooseVaultDirectory() {
+    const directory = await window.vesti.chooseDirectory(copy.vaultPath);
+    if (directory) {
+      setDraft((current) =>
+        current
+          ? { ...current, upstream: { ...current.upstream, obsidianVaultPath: directory } }
+          : current,
+      );
+    }
+  }
+
+  async function verifyNotion() {
+    setUpstreamBusy("verify");
+    try {
+      if (!(await saveSettings())) return;
+      const tested = await window.vesti.testNotionConnection();
+      setMessage(tested.message);
+      await load();
     } catch (error) {
       setMessage(errorMessage(error));
     } finally {
-      setBusy(false);
+      setUpstreamBusy(null);
+    }
+  }
+
+  async function exportAllToObsidian() {
+    if (!settings?.upstream.obsidianVaultPath) {
+      setUpstreamNote(copy.exportNeedVault);
+      return;
+    }
+    setUpstreamBusy("obsidian");
+    setUpstreamNote("");
+    try {
+      const result = await exportConversationsToObsidian((progress) =>
+        setUpstreamNote(
+          `${copy.exportRunning} ${progress.done}/${progress.total}` +
+            (progress.failed > 0 ? ` · ${copy.exportFailedCount} ${progress.failed}` : ""),
+        ),
+      );
+      const total = result.succeeded + result.failed.length;
+      setUpstreamNote(
+        `${copy.exportDone}: ${result.succeeded}/${total}` +
+          (result.failed.length > 0
+            ? ` · ${copy.exportFailedCount} ${result.failed.length}（${result.failed[0].error}）`
+            : ""),
+      );
+      setUpstreamStats(await getUpstreamExportStats());
+    } catch (error) {
+      setUpstreamNote(errorMessage(error));
+    } finally {
+      setUpstreamBusy(null);
+    }
+  }
+
+  async function exportAllToMarkdownFolder() {
+    const directory = await window.vesti.chooseDirectory(copy.exportAllMarkdown);
+    if (!directory) return;
+    setUpstreamBusy("markdown");
+    setUpstreamNote("");
+    try {
+      const result = await exportAllToMarkdownDirectory(directory, (progress) =>
+        setUpstreamNote(
+          `${copy.exportRunning} ${progress.done}/${progress.total}` +
+            (progress.failed > 0 ? ` ${copy.exportFailedCount} ${progress.failed}` : ""),
+        ),
+      );
+      const total = result.succeeded + result.failed.length;
+      setUpstreamNote(
+        `${copy.exportDone}: ${result.succeeded}/${total}` +
+          (result.failed.length > 0
+            ? ` · ${copy.exportFailedCount} ${result.failed.length}（${result.failed[0].error}）`
+            : ""),
+      );
+    } catch (error) {
+      setUpstreamNote(errorMessage(error));
+    } finally {
+      setUpstreamBusy(null);
     }
   }
 
@@ -445,6 +819,9 @@ export function SettingsPage({
     );
   }
 
+  // demo_proxy works out of the box; BYOK needs a saved API key.
+  const llmReady = settings.llm.mode === "demo_proxy" || settings.llm.apiKeyConfigured;
+
   return (
     <div className="h-full overflow-y-auto overflow-x-hidden bg-bg-app px-8 py-8">
       <div className="mx-auto flex max-w-[880px] flex-col gap-6 pb-24">
@@ -498,6 +875,8 @@ export function SettingsPage({
           <div className="grid gap-2 md:grid-cols-3">
             {overview.sources.map((source) => {
               const enabled = draft.capture.enabledPlatforms.includes(source.platform);
+              const wslInstalled =
+                wslStatus?.platforms.some(item => item.platform === source.platform && item.installed) ?? false;
               return (
                 <button
                   type="button"
@@ -516,8 +895,13 @@ export function SettingsPage({
                     {source.label[0]}
                   </span>
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[13px] font-sans font-medium text-text-primary">
-                      {source.label}
+                    <span className="flex items-center gap-1.5 text-[13px] font-sans font-medium text-text-primary">
+                      <span className="truncate">{source.label}</span>
+                      {wslInstalled && (
+                        <span className="shrink-0 rounded bg-accent-primary-light px-1.5 py-px text-[10px] font-medium text-accent-primary">
+                          WSL
+                        </span>
+                      )}
                     </span>
                     <span className="block truncate text-[11px] font-sans text-text-tertiary">
                       {source.installed
@@ -536,6 +920,38 @@ export function SettingsPage({
               );
             })}
           </div>
+          {wslStatus?.supported && (
+            <div className="mt-3 rounded-xl border border-border-subtle bg-bg-primary px-4 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-[13px] font-sans font-medium text-text-primary">{copy.wslSources}</div>
+                  <div className="text-[12px] font-sans text-text-tertiary">{copy.wslSourcesDesc}</div>
+                </div>
+                <button
+                  type="button"
+                  className={buttonSecondary}
+                  disabled={wslBusy}
+                  onClick={() => void redetectWsl()}
+                >
+                  {wslBusy ? copy.wslDetecting : copy.wslRedetect}
+                </button>
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                {wslStatus.distros.length === 0 ? (
+                  <span className="text-[12px] font-sans text-text-tertiary">{copy.wslNoDistros}</span>
+                ) : (
+                  wslStatus.distros.map(distro => (
+                    <span
+                      key={distro}
+                      className="rounded-md bg-bg-tertiary px-2 py-0.5 text-[11px] font-sans text-text-secondary"
+                    >
+                      {distro}
+                    </span>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
           <div className="mt-4 flex items-center gap-3">
             <button
               type="button"
@@ -561,6 +977,70 @@ export function SettingsPage({
                 }
               />
             </div>
+          </div>
+        </Card>
+
+        <Card eyebrow="CONNECT" title={copy.bridgeTitle} description={copy.bridgeDesc}>
+          <div className="mb-4 flex items-center gap-2 text-[12px] font-sans text-text-secondary">
+            <span
+              className={`inline-block h-2 w-2 rounded-full ${
+                bridge?.running ? "bg-success" : bridge?.error ? "bg-danger" : "bg-bg-tertiary"
+              }`}
+            />
+            {bridge?.running
+              ? `${copy.bridgeRunning} · 127.0.0.1:${bridge.port}`
+              : bridge?.error
+                ? copy.bridgeError
+                : copy.bridgeStopped}
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <button type="button" className={buttonSecondary} onClick={() => void generatePairCode()}>
+              {copy.bridgeGenerate}
+            </button>
+            {pairCode && (pairCode.expiresAt > now ? (
+              <div className="flex items-baseline gap-3">
+                <span className="font-mono text-[22px] font-semibold tracking-[0.3em] text-text-primary">
+                  {pairCode.code}
+                </span>
+                <span className="text-[12px] font-sans text-text-tertiary">
+                  {copy.bridgeCodeHint} · {Math.floor((pairCode.expiresAt - now) / 60000)}:
+                  {String(Math.floor(((pairCode.expiresAt - now) % 60000) / 1000)).padStart(2, "0")}
+                </span>
+              </div>
+            ) : (
+              <span className="text-[12px] font-sans text-text-tertiary">{copy.bridgeCodeExpired}</span>
+            ))}
+          </div>
+          <div className="mt-4">
+            <div className="mb-2 text-[12px] font-sans font-medium text-text-secondary">{copy.bridgeClients}</div>
+            {!bridge || bridge.clients.length === 0 ? (
+              <p className="text-[12px] font-sans text-text-tertiary">{copy.bridgeNoClients}</p>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {bridge.clients.map((client) => (
+                  <div
+                    key={client.clientId}
+                    className="flex items-center gap-3 rounded-xl border border-border-subtle bg-bg-primary px-4 py-3"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-[13px] font-sans font-medium text-text-primary">{client.client}</div>
+                      <div className="truncate text-[11px] font-sans text-text-tertiary">
+                        {copy.bridgePairedAt} {new Date(client.pairedAt).toLocaleString()} ·{" "}
+                        {copy.bridgeLastSync}{" "}
+                        {client.lastSyncAt ? new Date(client.lastSyncAt).toLocaleString() : copy.bridgeNeverSynced}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className={buttonDanger}
+                      onClick={() => void disconnectClient(client.clientId)}
+                    >
+                      {copy.bridgeDisconnect}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </Card>
 
@@ -595,6 +1075,157 @@ export function SettingsPage({
             </button>
           </div>
           <p className="mt-2 text-[12px] font-sans text-text-tertiary">{copy.clearAgentNote}</p>
+        </Card>
+
+        <Card eyebrow="UPSTREAM" title={copy.upstreamTitle} description={copy.upstreamDesc}>
+          <div className="mb-2 text-[12px] font-sans font-medium text-text-secondary">
+            {copy.obsidianSection}
+          </div>
+          <Field label={copy.vaultPath} wide>
+            <div className="flex gap-2">
+              <input
+                className={inputClass}
+                value={draft.upstream.obsidianVaultPath || copy.vaultNotChosen}
+                readOnly
+              />
+              <button type="button" className={buttonSecondary} onClick={() => void chooseVaultDirectory()}>
+                {copy.vaultChoose}
+              </button>
+            </div>
+          </Field>
+          <div className="-mx-3 mt-2 flex flex-col">
+            <Toggle
+              checked={draft.upstream.obsidianAutoExport}
+              title={copy.autoExport}
+              description={copy.autoExportDesc}
+              onChange={(checked) =>
+                setDraft({ ...draft, upstream: { ...draft.upstream, obsidianAutoExport: checked } })
+              }
+            />
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              className={buttonSecondary}
+              disabled={upstreamBusy !== null || !settings.upstream.obsidianVaultPath}
+              onClick={() => void exportAllToObsidian()}
+            >
+              {copy.exportAllObsidian}
+            </button>
+            <button
+              type="button"
+              className={buttonSecondary}
+              disabled={upstreamBusy !== null}
+              onClick={() => void exportAllToMarkdownFolder()}
+            >
+              {copy.exportAllMarkdown}
+            </button>
+          </div>
+
+          <div className="mb-2 mt-6 text-[12px] font-sans font-medium text-text-secondary">
+            {copy.notionSection}
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            <Field
+              label={`${copy.notionToken} ${draft.notionTokenConfigured ? copy.notionTokenSaved : ""}`}
+              wide
+            >
+              <input
+                className={inputClass}
+                type="password"
+                autoComplete="off"
+                value={draft.upstream.notionToken ?? ""}
+                placeholder={draft.notionTokenConfigured ? "••••••••••••" : "ntn_…"}
+                onChange={(event) =>
+                  setDraft({ ...draft, upstream: { ...draft.upstream, notionToken: event.target.value } })
+                }
+              />
+            </Field>
+            <Field label={copy.notionParent} wide>
+              <input
+                className={inputClass}
+                value={draft.upstream.notionParentId}
+                placeholder="01234567-89ab-cdef-…"
+                onChange={(event) =>
+                  setDraft({ ...draft, upstream: { ...draft.upstream, notionParentId: event.target.value } })
+                }
+              />
+            </Field>
+          </div>
+          {draft.notionTokenConfigured && (
+            <label className="mt-3 flex items-center gap-2 text-[13px] font-sans text-text-secondary">
+              <input
+                type="checkbox"
+                className="h-4 w-4 accent-[hsl(var(--accent-primary))]"
+                checked={Boolean(draft.upstream.clearNotionToken)}
+                onChange={(event) =>
+                  setDraft({
+                    ...draft,
+                    upstream: { ...draft.upstream, clearNotionToken: event.target.checked },
+                  })
+                }
+              />
+              {copy.deleteNotionToken}
+            </label>
+          )}
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              className={buttonSecondary}
+              disabled={upstreamBusy !== null}
+              onClick={() => void verifyNotion()}
+            >
+              {upstreamBusy === "verify" ? copy.notionVerifying : copy.notionVerify}
+            </button>
+            {settings.upstream.notionParentId && (
+              <span className="text-[12px] font-sans text-text-tertiary">
+                {settings.upstream.notionParentType === "database"
+                  ? copy.notionParentTypeDatabase
+                  : copy.notionParentTypePage}
+              </span>
+            )}
+          </div>
+          <p className="mt-2 text-[12px] font-sans text-text-tertiary">{copy.notionParentHint}</p>
+
+          <div className="mt-4 rounded-xl border border-border-subtle bg-bg-primary px-4 py-3 text-[12px] font-sans leading-relaxed text-text-secondary">
+            {!upstreamStats ||
+            (upstreamStats.obsidian.exported === 0 &&
+              upstreamStats.obsidian.failed === 0 &&
+              upstreamStats.notion.exported === 0 &&
+              upstreamStats.notion.failed === 0) ? (
+              <span className="text-text-tertiary">{copy.statsNever}</span>
+            ) : (
+              <div className="flex flex-col gap-1">
+                <span>
+                  Obsidian · {copy.statsExported} {upstreamStats.obsidian.exported}
+                  {upstreamStats.obsidian.pending > 0
+                    ? ` · ${copy.statsPending} ${upstreamStats.obsidian.pending}`
+                    : ""}
+                  {upstreamStats.obsidian.failed > 0
+                    ? ` · ${copy.statsFailed} ${upstreamStats.obsidian.failed}`
+                    : ""}
+                  {upstreamStats.obsidian.lastExportedAt
+                    ? ` · ${copy.statsLastAt} ${new Date(upstreamStats.obsidian.lastExportedAt).toLocaleString()}`
+                    : ""}
+                </span>
+                <span>
+                  Notion · {copy.statsExported} {upstreamStats.notion.exported}
+                  {upstreamStats.notion.failed > 0
+                    ? ` · ${copy.statsFailed} ${upstreamStats.notion.failed}`
+                    : ""}
+                  {upstreamStats.notion.lastExportedAt
+                    ? ` · ${copy.statsLastAt} ${new Date(upstreamStats.notion.lastExportedAt).toLocaleString()}`
+                    : ""}
+                </span>
+                {(upstreamStats.obsidian.lastError || upstreamStats.notion.lastError) && (
+                  <span className="text-danger">
+                    {copy.statsLastError}: {upstreamStats.obsidian.lastError ?? upstreamStats.notion.lastError}
+                  </span>
+                )}
+              </div>
+            )}
+            {upstreamNote && <div className="mt-1 text-text-secondary">{upstreamNote}</div>}
+          </div>
         </Card>
 
         <Card eyebrow="LLM ACCESS" title={copy.llmTitle} description={copy.llmDesc}>
@@ -753,6 +1384,118 @@ export function SettingsPage({
           </div>
         </Card>
 
+        <Card eyebrow="ORGANIZE" title={copy.organizeTitle} description={copy.organizeDesc}>
+          <div className="-mx-3 flex flex-col">
+            <Toggle
+              checked={classifyEnabled && llmReady}
+              disabled={!llmReady}
+              title={copy.organizeAuto}
+              description={llmReady ? copy.organizeAutoDesc : copy.organizeUnavailable}
+              onChange={setClassifyEnabled}
+            />
+          </div>
+          <div className="mt-2 grid gap-2 md:grid-cols-2">
+            {(
+              [
+                ["auto", copy.organizeModeAuto, copy.organizeModeAutoDesc],
+                ["suggest", copy.organizeModeSuggest, copy.organizeModeSuggestDesc],
+              ] as const
+            ).map(([mode, title, desc]) => (
+              <button
+                type="button"
+                key={mode}
+                onClick={() => setClassifyMode(mode)}
+                className={`rounded-xl border p-3 text-left transition-colors [transition-duration:140ms] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus ${
+                  classifyMode === mode
+                    ? "border-accent-primary/40 bg-accent-primary-light"
+                    : "border-border-subtle bg-bg-primary hover:bg-bg-surface-hover"
+                }`}
+              >
+                <span className="block text-[13px] font-sans font-semibold text-text-primary">{title}</span>
+                <span className="mt-0.5 block text-[11px] font-sans text-text-tertiary">{desc}</span>
+              </button>
+            ))}
+          </div>
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              className={buttonSecondary}
+              disabled={classifyState.running || !llmReady}
+              onClick={() => void organizeNow()}
+            >
+              {classifyState.running ? copy.organizeRunning : copy.organizeNow}
+            </button>
+            <span className="text-[12px] font-sans text-text-tertiary">
+              {classifyState.lastRun
+                ? `${copy.organizeLastRun} ${new Date(classifyState.lastRun.ranAt).toLocaleString()} · ${copy.organizeStatsClassified} ${classifyState.lastRun.classified} · ${copy.organizeStatsTopics} ${classifyState.lastRun.topicsCreated} · ${copy.organizeStatsQueued} ${classifyState.lastRun.queued}${
+                    classifyState.lastRun.failedBatches > 0
+                      ? ` · ${copy.organizeStatsFailed} ${classifyState.lastRun.failedBatches}`
+                      : ""
+                  }`
+                : copy.organizeNever}
+            </span>
+          </div>
+          <div className="mt-4">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <span className="text-[12px] font-sans font-medium text-text-secondary">
+                {copy.organizeQueue} ({suggestions.length})
+              </span>
+              {suggestions.length > 1 && (
+                <button type="button" className={buttonSecondary} onClick={() => void acceptAllSuggestions()}>
+                  {copy.organizeAcceptAll}
+                </button>
+              )}
+            </div>
+            {suggestions.length === 0 ? (
+              <p className="text-[12px] font-sans text-text-tertiary">{copy.organizeQueueEmpty}</p>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {suggestions.map((suggestion) => (
+                  <div
+                    key={suggestion.conversationId}
+                    className="flex items-center gap-3 rounded-xl border border-border-subtle bg-bg-primary px-4 py-3"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-[13px] font-sans font-medium text-text-primary">
+                        {suggestion.title}
+                      </div>
+                      <div className="truncate text-[11px] font-sans text-text-tertiary">
+                        {suggestion.topicPath.join(" / ")} · {Math.round(suggestion.confidence * 100)}%
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className={buttonSecondary}
+                      onClick={() => void acceptSuggestion(suggestion.conversationId)}
+                    >
+                      {copy.organizeAccept}
+                    </button>
+                    <button
+                      type="button"
+                      className={buttonSecondary}
+                      onClick={() => void ignoreSuggestion(suggestion.conversationId)}
+                    >
+                      {copy.organizeIgnore}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </Card>
+
+        <Card eyebrow="DAILY LOG" title={copy.dailyTitle} description={copy.dailyDesc}>
+          <Field label={copy.dailyTime}>
+            <input
+              className={inputClass}
+              type="time"
+              value={dailyTime}
+              onChange={(event) => setDailyTime(event.target.value)}
+            />
+          </Field>
+          <p className="mt-2 text-[12px] font-sans text-text-tertiary">{copy.dailyTimeDesc}</p>
+        </Card>
+
         <Card eyebrow="NETWORK" title={copy.networkTitle} description={copy.networkDesc}>
           <div className="mb-4 grid gap-2 md:grid-cols-3">
             {(
@@ -814,6 +1557,32 @@ export function SettingsPage({
               <option value="ko">한국어</option>
             </select>
           </Field>
+        </Card>
+
+        <Card eyebrow="PERSONALIZATION" title={copy.owlSkinTitle} description={copy.owlSkinDesc}>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {SKINS.map((skin) => {
+              const selected = skin.id === owlSkin;
+              return (
+                <button
+                  type="button"
+                  key={skin.id}
+                  aria-pressed={selected}
+                  onClick={() => setOwlSkin(skin.id)}
+                  className={`flex flex-col items-center gap-2 rounded-xl border p-3 transition-colors [transition-duration:140ms] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus ${
+                    selected
+                      ? "border-accent-primary/40 bg-accent-primary-light ring-2 ring-accent-primary/30"
+                      : "border-border-subtle bg-bg-primary hover:bg-bg-surface-hover"
+                  }`}
+                >
+                  <img src={skin.collapsed} alt="" draggable={false} className="h-14 w-14" />
+                  <span className="text-[12px] font-sans font-medium text-text-primary">
+                    {locale === "zh" ? skin.name.zh : skin.name.en}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
         </Card>
 
         <Card

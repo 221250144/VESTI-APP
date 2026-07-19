@@ -12,6 +12,7 @@
     "electron:cache": "node scripts/prepare-electron-zip.mjs",
     "start": "pnpm core:build && pnpm native:prepare && electron-forge start",
     "typecheck": "pnpm core:build && tsc --noEmit",
+    "test": "vitest run && pnpm -r --if-present test",
     "package": "pnpm core:build && pnpm native:prepare && pnpm electron:cache && electron-forge package",
     "make": "pnpm package && electron-builder --prepackaged out/Vesti-win32-x64 --win nsis --config electron-builder.yml"
   },
@@ -55,7 +56,8 @@
     "tailwindcss-animate": "^1.0.7",
     "tslib": "2.8.1",
     "typescript": "^5.9.3",
-    "vite": "8.1.4"
+    "vite": "8.1.4",
+    "vitest": "^1.2.0"
   },
   "engines": {
     "node": ">=22.12.0"

@@ -9,6 +9,7 @@ import type {
   SessionDetail,
   SessionMessage,
 } from '../shared/contracts';
+import { getAgentKindDefinition } from './agentPrompts';
 import type { CaptureService } from './captureService';
 import type { RuntimeAgentSettings, RuntimeLlmSettings, SettingsService } from './settingsService';
 
@@ -20,27 +21,34 @@ export class AgentService {
     private readonly settings: SettingsService,
   ) {}
 
-  async run(request: AgentRunRequest): Promise<AgentResult> {
+  async run(request: AgentRunRequest, options?: { persist?: boolean }): Promise<AgentResult> {
     const detail = this.capture.getSession(request.sessionId);
-    if (!detail) throw new Error('找不到所选会话，请先重新同步');
+    // Batch kinds (classify) run over renderer-side Dexie conversations whose
+    // ids don't exist in the capture store; a pre-built transcript makes the
+    // session lookup unnecessary.
+    if (!detail && !request.transcriptOverride?.trim()) throw new Error('找不到所选会话，请先重新同步');
     const preferences = this.settings.getRuntimeAgent();
-    const transcript = this.buildTranscript(detail, preferences);
+    // Callers may supply a pre-built transcript (digest pipeline, cross-session
+    // recall); otherwise it is derived from the session messages as usual.
+    const transcript = request.transcriptOverride ?? this.buildTranscript(detail!, preferences);
     if (!transcript.trim()) throw new Error('该会话没有可用于分析的文本内容');
 
     const llm = this.settings.getRuntimeLlm();
     const question = request.question?.trim();
-    const content = await this.complete(llm, this.messagesFor(request.kind, transcript, question, preferences));
+    const definition = getAgentKindDefinition(request.kind);
+    const raw = await this.complete(llm, definition.buildPrompt({ transcript, question, template: request.template, preferences }));
+    const content = definition.parse ? definition.parse(raw) : raw;
     const result: AgentResult = {
       id: randomUUID(),
       kind: request.kind,
-      sessionId: detail.session.id,
-      sessionTitle: detail.session.title,
+      sessionId: detail?.session.id ?? request.sessionId,
+      sessionTitle: detail?.session.title ?? '',
       question: request.kind === 'explore' ? question : undefined,
       content,
       modelId: llm.modelId,
       createdAt: Date.now(),
     };
-    await this.prependResult(result);
+    if (options?.persist !== false) await this.prependResult(result);
     return result;
   }
 
@@ -96,42 +104,6 @@ export class AgentService {
     if (!values.length) return '';
     const role = message.role === 'user' ? '用户' : message.role === 'assistant' ? 'AI' : '系统';
     return `[${turn}] ${role} / ${message.source}\n${values.join('\n')}`;
-  }
-
-  private messagesFor(
-    kind: AgentRunRequest['kind'],
-    transcript: string,
-    question: string | undefined,
-    preferences: RuntimeAgentSettings,
-  ) {
-    const language = preferences.outputLanguage === 'en-US'
-      ? 'Respond in clear English Markdown.'
-      : '使用清晰、简洁的中文 Markdown。';
-    const custom = preferences.customInstructions
-      ? `\n用户的长期分析偏好：${preferences.customInstructions}`
-      : '';
-    if (kind === 'summary') {
-      return [
-        {
-          role: 'system',
-          content: `你是 Vesti 的会话总结助手。只能依据提供的会话，不补造事实。${language}${custom}`,
-        },
-        {
-          role: 'user',
-          content: `请总结下面的会话，包含：主题、关键结论、已做决定、未解决问题、建议的下一步。没有内容的栏目请写“无”。\n\n${transcript}`,
-        },
-      ];
-    }
-    return [
-      {
-        role: 'system',
-        content: `你是 Vesti 的会话探索助手。仅依据提供的会话回答；区分事实、推断和建议，无法判断时明确说明。${language}${custom}`,
-      },
-      {
-        role: 'user',
-        content: `探索问题：${question || '这段会话中还有哪些值得继续探索的方向？'}\n\n会话内容：\n${transcript}`,
-      },
-    ];
   }
 
   private async complete(

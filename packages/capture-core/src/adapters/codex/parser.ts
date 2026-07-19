@@ -14,6 +14,7 @@ import type {
   ToolResultBlock,
 } from '../../types/agent.js';
 import type { ToolExecution } from '../../types/index.js';
+import { stripInjectedContextBlocks } from '../../utils/injectedBlocks.js';
 
 interface RolloutRow {
   timestamp?: string | number;
@@ -184,7 +185,12 @@ export class CodexParser {
           const text = messageContent(payload);
           if (!text) continue;
           const uuid = newId('message', payload.id);
-          if (role === 'user' && !firstPrompt) firstPrompt = text;
+          // <environment_context> / <user_instructions> blocks stay in the
+          // stored message, but the first-prompt/title view skips them.
+          if (role === 'user' && !firstPrompt) {
+            const realText = stripInjectedContextBlocks(text);
+            if (realText) firstPrompt = realText;
+          }
           messages.push({
             uuid,
             type: role,

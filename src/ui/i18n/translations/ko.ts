@@ -741,6 +741,7 @@ export const koTranslations = {
       loadingOriginalConversation: "원본 대화 불러오는 중...",
       messagesAvailableButEmpty: "메시지는 있지만 미리보기 텍스트가 비어 있습니다.",
       openOriginal: "열기",
+      sourceBrowserExtension: "브라우저 확장에서 가져옴",
       splitView: "분할 보기",
       openSplitView: "분할 보기 열기",
       exitSplit: "분할 종료",

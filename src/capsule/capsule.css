@@ -1,29 +1,60 @@
+/*
+ * The capsule window loads only this stylesheet, so it mirrors the semantic
+ * token channels from src/ui/tokens.css instead of importing it. Keep these
+ * values in sync with tokens.css :root / .dark; the capsule-specific
+ * --capsule-* aliases below are derived from them.
+ */
 :root {
   color-scheme: light;
-  --capsule-bg: #fdfcf9;
-  --capsule-border: rgba(28, 32, 28, 0.1);
-  --capsule-text: #23281f;
-  --capsule-text-secondary: #6d746f;
-  --capsule-accent: #5b7f52;
-  --capsule-accent-hover: #4c6d45;
-  --capsule-surface: #f1efe8;
-  --capsule-shadow: 0 10px 30px rgba(28, 32, 28, 0.16), 0 2px 8px rgba(28, 32, 28, 0.08);
-  --capsule-success: #4c9a62;
-  --capsule-muted: #a8ada6;
+  --bg-tertiary: 220 30% 98%;
+  --bg-secondary: 220 23% 94%;
+  --surface-card-hover: 220 22% 92%;
+  --text-primary: 224 15% 12%;
+  --text-secondary: 224 9% 36%;
+  --text-tertiary: 224 7% 56%;
+  --text-inverse: 0 0% 100%;
+  --accent-primary: 224 15% 12%;
+  --accent-primary-hover: 224 16% 9%;
+  --border-subtle: 220 20% 88%;
+  --success: 146 50% 38%;
+  --shadow-color: 28, 20, 15;
+  --shadow-popover: 0 8px 22px rgba(var(--shadow-color), 0.1),
+    0 2px 6px rgba(var(--shadow-color), 0.08);
+  --capsule-ball-shadow: drop-shadow(0 2px 4px rgba(var(--shadow-color), 0.24));
+  --capsule-dot-ring: rgba(255, 255, 255, 0.92);
+
+  --capsule-bg: hsl(var(--bg-tertiary));
+  --capsule-border: hsl(var(--border-subtle));
+  --capsule-text: hsl(var(--text-primary));
+  --capsule-text-secondary: hsl(var(--text-secondary));
+  --capsule-accent: hsl(var(--accent-primary));
+  --capsule-accent-hover: hsl(var(--accent-primary-hover));
+  --capsule-accent-text: hsl(var(--text-inverse));
+  --capsule-surface: hsl(var(--bg-secondary));
+  --capsule-surface-hover: hsl(var(--surface-card-hover));
+  --capsule-shadow: var(--shadow-popover);
+  --capsule-success: hsl(var(--success));
+  --capsule-muted: hsl(var(--text-tertiary));
 }
 
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --capsule-bg: #23271f;
-  --capsule-border: rgba(240, 238, 229, 0.12);
-  --capsule-text: #ecede6;
-  --capsule-text-secondary: #9aa096;
-  --capsule-accent: #7ba36f;
-  --capsule-accent-hover: #8cb57f;
-  --capsule-surface: #2c3127;
-  --capsule-shadow: 0 12px 34px rgba(0, 0, 0, 0.45), 0 2px 8px rgba(0, 0, 0, 0.3);
-  --capsule-success: #63b57d;
-  --capsule-muted: #5b6156;
+  --bg-tertiary: 0 0% 10%;
+  --bg-secondary: 0 0% 16%;
+  --surface-card-hover: 0 0% 17%;
+  --text-primary: 0 0% 96%;
+  --text-secondary: 0 0% 78%;
+  --text-tertiary: 0 0% 62%;
+  --text-inverse: 0 0% 10%;
+  --accent-primary: 0 0% 96%;
+  --accent-primary-hover: 0 0% 100%;
+  --border-subtle: 0 0% 20%;
+  --success: 145 55% 46%;
+  --shadow-color: 0, 0, 0;
+  --shadow-popover: 0 12px 30px rgba(var(--shadow-color), 0.4),
+    0 4px 10px rgba(var(--shadow-color), 0.3);
+  --capsule-ball-shadow: drop-shadow(0 2px 5px rgba(var(--shadow-color), 0.55));
+  --capsule-dot-ring: rgba(0, 0, 0, 0.6);
 }
 
 * {
@@ -49,31 +80,29 @@ body,
   display: flex;
   align-items: center;
   justify-content: center;
+  background: transparent;
 }
 
-/* ---- Collapsed ball ---- */
+/* ---- Collapsed ball ----
+ * No chrome of its own: the transparent-background owl PNG fills the window
+ * and the drop-shadow filter follows the image alpha, so no box edge or
+ * white corner can leak onto the desktop. */
 
 .capsule-ball {
   position: relative;
-  width: 44px;
-  height: 44px;
-  border-radius: 50%;
-  border: 1px solid var(--capsule-border);
-  background: var(--capsule-bg);
-  box-shadow: var(--capsule-shadow);
+  width: 100%;
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   user-select: none;
-  -webkit-app-region: no-drag;
-  animation: capsule-breathe 3.2s ease-in-out infinite;
+  animation: capsule-enter 200ms ease-out;
   transition: transform 160ms ease-out;
 }
 
 .capsule-ball:hover {
   transform: scale(1.06);
-  animation-play-state: paused;
 }
 
 .capsule-ball:active {
@@ -81,19 +110,21 @@ body,
 }
 
 .capsule-ball img {
-  width: 26px;
-  height: 26px;
+  /* 48px artwork inside the 56px window leaves margin for the drop-shadow. */
+  width: 48px;
+  height: 48px;
   pointer-events: none;
+  filter: var(--capsule-ball-shadow);
 }
 
 .capsule-ball .status-dot {
   position: absolute;
-  right: -1px;
-  bottom: -1px;
+  right: 6px;
+  bottom: 7px;
   width: 11px;
   height: 11px;
   border-radius: 50%;
-  border: 2px solid var(--capsule-bg);
+  border: 2px solid var(--capsule-dot-ring);
   background: var(--capsule-muted);
 }
 
@@ -105,13 +136,14 @@ body,
   animation: capsule-spin 1.1s linear infinite;
 }
 
-@keyframes capsule-breathe {
-  0%,
-  100% {
-    box-shadow: var(--capsule-shadow);
+@keyframes capsule-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.92);
   }
-  50% {
-    box-shadow: 0 10px 30px rgba(28, 32, 28, 0.24), 0 2px 8px rgba(28, 32, 28, 0.12);
+  to {
+    opacity: 1;
+    transform: scale(1);
   }
 }
 
@@ -136,6 +168,7 @@ body,
   background: var(--capsule-bg);
   box-shadow: var(--capsule-shadow);
   overflow: hidden;
+  animation: capsule-enter 200ms ease-out;
 }
 
 .capsule-panel-header {
@@ -148,8 +181,9 @@ body,
 }
 
 .capsule-panel-header img {
-  width: 22px;
-  height: 22px;
+  /* Small current-skin thumbnail decorating the panel header. */
+  width: 20px;
+  height: 20px;
 }
 
 .capsule-panel-header .title {
@@ -173,7 +207,7 @@ body,
 }
 
 .capsule-panel-header .collapse:hover {
-  background: var(--capsule-surface);
+  background: var(--capsule-surface-hover);
   color: var(--capsule-text);
 }
 
@@ -236,13 +270,13 @@ body,
 }
 
 .capsule-action:hover {
-  background: var(--capsule-surface);
+  background: var(--capsule-surface-hover);
 }
 
 .capsule-action.primary {
   background: var(--capsule-accent);
   border-color: transparent;
-  color: #fff;
+  color: var(--capsule-accent-text);
   font-weight: 600;
 }
 
@@ -278,6 +312,6 @@ body,
 }
 
 .capsule-hide:hover {
-  background: var(--capsule-surface);
+  background: var(--capsule-surface-hover);
   color: var(--capsule-text);
 }

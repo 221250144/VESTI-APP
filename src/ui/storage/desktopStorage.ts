@@ -5,27 +5,58 @@
 // renderer runs in the same process as the Dexie database, so each method
 // calls the ported repository/promptRepository directly. AI-backed methods
 // reuse the existing window.vesti agent IPC instead of the extension's LLM
-// service; capabilities with no desktop equivalent (Notion/Obsidian vault,
-// vector similarity) are left unimplemented — the StorageApi marks them
-// optional and the UI hides them.
+// service; conversation export to Notion/Obsidian goes through the P3
+// upstream modules (src/ui/upstream/*). Capabilities with no desktop
+// equivalent (Obsidian vault connection, vector similarity) are left
+// unimplemented — the StorageApi marks them optional and the UI hides them.
 
-import type { ChatSummaryData, StorageApi } from "@vesti/ui";
-import type { VestiDesktopApi } from "../../shared/contracts";
+import type {
+  ChatSummaryData,
+  ConversationDigest,
+  CreateDepositInput,
+  DailyLog,
+  DailyLogOverview,
+  Deposit,
+  DepositScope,
+  DepositTemplate,
+  ExtractPayload,
+  ExtractResult,
+  GenerateDepositInput,
+  RelayAvailability,
+  RelayCliCommandView,
+  RelayPack,
+  RelayPackPayload,
+  StorageApi,
+  WeeklyReport,
+} from "@vesti/ui";
+import { serializeRelayPackMarkdown } from "@vesti/ui";
+import type { SessionRecallHit, VestiDesktopApi } from "../../shared/contracts";
 import { db } from "../db/schema";
 import type { ConversationRecord } from "../db/schema";
+import { loadConversationTree } from "../sync/conversationTree";
+import { listConversationDigests } from "../sync/conversationDigests";
 import {
   addExploreMessage,
+  bulkAddTagToConversations,
+  bulkSetConversationFlags,
+  createDeposit,
   createExploreSession,
   createNote,
+  createRelayPack,
   deleteAnnotation,
   deleteConversation,
+  deleteDeposit,
   deleteExploreSession,
   deleteNote,
+  deleteRelayPack,
   exportAllData,
+  getAllSummaries,
   getAnnotationExportContext,
+  getDeposit,
   getExploreMessages,
   getExploreSession,
   getNoteAsset,
+  getRelayPack,
   getStorageUsage,
   getSummary as getSummaryRecord,
   getTopics,
@@ -33,11 +64,16 @@ import {
   importObsidianZip,
   listAnnotations,
   listConversations,
+  listDailyLogs,
+  listDeposits,
   listExploreSessions,
   listMessages,
   listNotes,
+  listRelayPacks,
+  listWeeklyReports,
   moveTagAcrossConversations,
   removeTagFromConversations,
+  renameDeposit,
   renameTagAcrossConversations,
   saveAnnotation,
   saveSummary,
@@ -59,6 +95,36 @@ import {
 } from "../db/promptRepository";
 import type { ConversationSummaryV2, SummaryRecord } from "../db/types";
 import { buildMessageFallbackDisplayText } from "../db/utils/messageContentPackage";
+import {
+  exportConversationToNotion,
+  exportMarkdownPayloadToNotion,
+} from "../upstream/notionExport";
+import {
+  exportConversationToObsidian,
+  exportMarkdownPayloadToObsidian,
+  getConfiguredObsidianVault,
+} from "../upstream/obsidianExport";
+import { sanitizeFileBaseName } from "../upstream/markdownSerializer";
+import {
+  buildRelayTranscript,
+  type RelayContextConversation,
+} from "../relay/relayContext";
+import {
+  nextDepositVersion,
+  resolveScopeConversationIds,
+  type ScopeResolutionData,
+} from "../deposits/deposits";
+import {
+  generateDailyLog as generateDailyLogService,
+  generateWeeklyReport as generateWeeklyReportService,
+  getDailyLogOverview as getDailyLogOverviewService,
+} from "../daily/dailyService";
+import {
+  DAILY_TIME_PREF_KEY,
+  computePendingDailyDates,
+  normalizeDailyTime,
+} from "../daily/dailyScheduler";
+import { todayDateString } from "../daily/dailyActivity";
 
 // Extra fields the main process stamps on local-terminal capture records;
 // they ride along in Dexie but are not part of the extension's record types.
@@ -377,6 +443,392 @@ async function generateSummaryImpl(conversationId: number): Promise<ChatSummaryD
 const NO_CONTEXT_ANSWER =
   "Please choose at least one conversation first — the desktop explore agent answers questions against a selected local session.";
 
+// ---- P1.5: conversation digests + cross-session recall --------------------
+
+/** Digest rows for every local-terminal conversation live in
+ * src/ui/sync/conversationDigests.ts (shared with the P4c daily pipeline). */
+
+/** Map recalled CLI sessions back to renderer conversation records, keeping
+ * the recall ranking and normalizing scores to [0, 1] for the sources UI. */
+async function recallSources(hits: SessionRecallHit[]): Promise<RagSources> {
+  const records = (await db.conversations.toArray()) as Array<
+    ConversationRecord & LocalTerminalFields
+  >;
+  const conversationByCliId = new Map<string, ConversationRecord & LocalTerminalFields>();
+  for (const record of records) {
+    if (typeof record._cli_id === "string") conversationByCliId.set(record._cli_id, record);
+  }
+  const maxScore = Math.max(...hits.map((hit) => hit.score), Number.EPSILON);
+  const sources: RagSources = [];
+  for (const hit of hits) {
+    const record = conversationByCliId.get(hit.sessionId);
+    if (record?.id === undefined) continue;
+    sources.push({
+      id: record.id,
+      title: record.title || hit.title,
+      platform: record.platform,
+      similarity: hit.score / maxScore,
+    });
+  }
+  return sources;
+}
+
+// ---- P4a AI relay (handoff packs) -----------------------------------------
+// Multi-select → condensed context → relay agent (persist:false) → Dexie
+// relay_packs. Everything IO-bound lives here; budget/serialization logic is
+// pure (src/ui/relay/relayContext, @vesti/ui serializeRelayPackMarkdown).
+
+/** Only the tail of each conversation feeds the context; the pure assembler
+ * further caps it to the most recent few messages within budget. */
+const RELAY_MESSAGE_FETCH_LIMIT = 40;
+
+function normalizeSelectedIds(conversationIds: number[]): number[] {
+  return [...new Set(conversationIds)].filter(
+    (id) => Number.isInteger(id) && id > 0
+  );
+}
+
+/**
+ * Gather the condensed per-conversation context (digest → summary → snippet
+ * head + recent messages) for a selection, in the caller's selection order.
+ * Shared by the relay / extract / distill pipelines (P4a/P4b).
+ */
+async function gatherRelayContexts(
+  uniqueIds: number[]
+): Promise<RelayContextConversation[]> {
+  const [records, digests, summaries] = await Promise.all([
+    db.conversations.where("id").anyOf(uniqueIds).toArray(),
+    listConversationDigests().catch(() => []),
+    getAllSummaries().catch(() => []),
+  ]);
+  const digestById = new Map(digests.map((digest) => [digest.conversationId, digest]));
+  const summaryById = new Map<number, { content: string; createdAt: number }>();
+  for (const summary of summaries) {
+    const existing = summaryById.get(summary.conversationId);
+    if (!existing || summary.createdAt > existing.createdAt) {
+      summaryById.set(summary.conversationId, {
+        content: summary.content,
+        createdAt: summary.createdAt,
+      });
+    }
+  }
+  // Keep the caller's selection order for a stable, predictable transcript.
+  const ordered = uniqueIds
+    .map((id) => records.find((record) => record.id === id))
+    .filter((record): record is NonNullable<typeof record> => Boolean(record));
+  if (ordered.length === 0) {
+    throw new Error("所选会话不存在，请刷新列表后重试");
+  }
+
+  const contexts: RelayContextConversation[] = [];
+  for (const record of ordered) {
+    const id = record.id as number;
+    const messages = await listMessages(id).catch(() => []);
+    contexts.push({
+      id,
+      title: record.title,
+      platform: record.platform,
+      digest: digestById.get(id) ?? null,
+      summary: summaryById.get(id)?.content ?? null,
+      snippet: record.snippet ?? null,
+      messages: messages
+        .slice(-RELAY_MESSAGE_FETCH_LIMIT)
+        .map((message) => ({ role: message.role, content: message.content_text })),
+    });
+  }
+  return contexts;
+}
+
+async function generateRelayPackImpl(conversationIds: number[]): Promise<RelayPack> {
+  const api = vestiApi();
+  if (!api) {
+    throw new Error("桌面环境不可用，无法生成交接包");
+  }
+  const uniqueIds = normalizeSelectedIds(conversationIds);
+  if (uniqueIds.length === 0) {
+    throw new Error("请先选择至少一个会话");
+  }
+
+  const contexts = await gatherRelayContexts(uniqueIds);
+  const transcript = buildRelayTranscript(contexts);
+  const result = await api.runAgent({
+    kind: "relay",
+    // No capture-store session backs a multi-selection; the pre-built
+    // transcript carries everything (same pattern as the classify pipeline).
+    sessionId: `relay:${Date.now()}`,
+    transcriptOverride: transcript,
+    persist: false,
+  });
+  const payload = JSON.parse(result.content) as RelayPackPayload;
+  return createRelayPack({
+    title: payload.title,
+    conversationIds: contexts.map((context) => context.id),
+    pack: payload,
+    suggestedPrompt: payload.suggested_prompt,
+  });
+}
+
+async function requireRelayPack(id: number): Promise<RelayPack> {
+  const pack = await getRelayPack(id);
+  if (!pack) {
+    throw new Error("交接包不存在，可能已被删除");
+  }
+  return pack;
+}
+
+async function exportRelayPackMarkdownImpl(
+  id: number
+): Promise<{ relativePath: string } | null> {
+  const api = vestiApi();
+  if (!api) throw new Error("桌面环境不可用，无法导出交接包");
+  const pack = await requireRelayPack(id);
+  const markdown = serializeRelayPackMarkdown(pack);
+  const directory = await api.chooseDirectory("选择交接包导出目录");
+  if (!directory) return null;
+  const relativePath = `VestiRelay/${sanitizeFileBaseName(pack.title)}-${pack.id}.md`;
+  await api.writeUpstreamFile({ rootPath: directory, relativePath, content: markdown });
+  return { relativePath };
+}
+
+async function getRelayPackCliCommandsImpl(id: number): Promise<RelayCliCommandView[]> {
+  const api = vestiApi();
+  if (!api) throw new Error("桌面环境不可用，无法生成启动命令");
+  const pack = await requireRelayPack(id);
+  const markdown = serializeRelayPackMarkdown(pack);
+  const result = await api.prepareRelayCliCommands({
+    id: pack.id,
+    slug: pack.title,
+    markdown,
+  });
+  return result.commands;
+}
+
+async function deliverRelayPackToBrowserImpl(id: number): Promise<void> {
+  const api = vestiApi();
+  if (!api) throw new Error("桌面环境不可用，无法投递到浏览器");
+  const pack = await requireRelayPack(id);
+  await api.enqueueRelayOutbox({ prompt: pack.suggestedPrompt });
+}
+
+async function getRelayAvailabilityImpl(): Promise<RelayAvailability> {
+  const api = vestiApi();
+  if (!api) return { llmConfigured: false, extensionConnected: false };
+  const [settingsView, bridgeStatus] = await Promise.all([
+    api.getSettings().catch(() => null),
+    api.getExtensionBridgeStatus().catch(() => null),
+  ]);
+  const llmConfigured = settingsView
+    ? settingsView.llm.mode === "demo_proxy" || settingsView.llm.apiKeyConfigured
+    : false;
+  return {
+    llmConfigured,
+    extensionConnected: (bridgeStatus?.clients.length ?? 0) > 0,
+  };
+}
+
+// ---- P4b knowledge extract + deposits --------------------------------------
+// Extract reuses the relay context assembly (multi-select → condensed
+// transcript) but distills reusable knowledge assets instead of a handoff
+// pack; the result is persisted on demand as a deposits row (template
+// 'extract'). Deposits distillation resolves a scope (project / topic /
+// time window / manual selection) to conversations, runs the distill agent
+// and stores the Markdown body with a version chain.
+
+const DEPOSIT_TEMPLATE_LABELS: Record<DepositTemplate, string> = {
+  background_knowledge: "个人背景知识",
+  project_state: "项目开发状态",
+  writing_style: "写作风格",
+  extract: "知识提取",
+  custom: "自定义提炼",
+};
+
+function pad2(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
+function toLocalDate(value: number): string {
+  const d = new Date(value);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+function describeDepositScope(scope: DepositScope): string {
+  switch (scope.kind) {
+    case "project":
+      return `项目 ${scope.label}`;
+    case "topic":
+      return `话题 ${scope.label}`;
+    case "timerange":
+      return `${toLocalDate(scope.start)} ~ ${toLocalDate(scope.end)}`;
+    case "selection":
+      return `手动选择 ${scope.conversationIds.length} 个会话`;
+  }
+}
+
+async function generateExtractImpl(conversationIds: number[]): Promise<ExtractResult> {
+  const api = vestiApi();
+  if (!api) {
+    throw new Error("桌面环境不可用，无法生成知识提取");
+  }
+  const uniqueIds = normalizeSelectedIds(conversationIds);
+  if (uniqueIds.length === 0) {
+    throw new Error("请先选择至少一个会话");
+  }
+
+  const contexts = await gatherRelayContexts(uniqueIds);
+  const transcript = buildRelayTranscript(contexts);
+  const result = await api.runAgent({
+    kind: "extract",
+    sessionId: `extract:${Date.now()}`,
+    transcriptOverride: transcript,
+    persist: false,
+  });
+  const extract = JSON.parse(result.content) as ExtractPayload;
+  const firstTitle = truncate(contexts[0]?.title ?? "", 20) || "未命名会话";
+  const title = contexts.length > 1
+    ? `知识提取 · ${firstTitle} 等 ${contexts.length} 个会话`
+    : `知识提取 · ${firstTitle}`;
+  return { title, conversationIds: contexts.map((context) => context.id), extract };
+}
+
+/** Conversations + tree in the shape the pure scope resolver expects. */
+async function gatherScopeResolutionData(): Promise<ScopeResolutionData> {
+  const [records, tree] = await Promise.all([
+    db.conversations.toArray() as Promise<Array<ConversationRecord & LocalTerminalFields>>,
+    loadConversationTree().catch(() => null),
+  ]);
+  return {
+    conversations: records
+      .filter((record) => typeof record.id === "number")
+      .map((record) => ({
+        id: record.id as number,
+        topic_id: record.topic_id ?? null,
+        updated_at: record.updated_at ?? null,
+        _cli_id: typeof record._cli_id === "string" ? record._cli_id : null,
+      })),
+    tree,
+  };
+}
+
+async function resolveDepositScopeImpl(scope: DepositScope): Promise<number[]> {
+  const data = await gatherScopeResolutionData();
+  return resolveScopeConversationIds(scope, data);
+}
+
+async function generateDepositImpl(input: GenerateDepositInput): Promise<Deposit> {
+  const api = vestiApi();
+  if (!api) {
+    throw new Error("桌面环境不可用，无法生成沉淀");
+  }
+  const conversationIds = await resolveDepositScopeImpl(input.scope);
+  if (conversationIds.length === 0) {
+    throw new Error("该范围内没有会话，请调整范围后重试");
+  }
+
+  const contexts = await gatherRelayContexts(conversationIds);
+  const transcript = buildRelayTranscript(contexts);
+  const result = await api.runAgent({
+    kind: "distill",
+    sessionId: `distill:${Date.now()}`,
+    template: input.template,
+    question: input.customInstruction?.trim() || undefined,
+    transcriptOverride: transcript,
+    persist: false,
+  });
+
+  // Regeneration chains onto the previous head as version+1.
+  const previous = input.previousId ? await getDeposit(input.previousId) : null;
+  const { version, prevId } = nextDepositVersion(previous);
+  return createDeposit({
+    template: input.template,
+    title: `${DEPOSIT_TEMPLATE_LABELS[input.template]} · ${describeDepositScope(input.scope)}`,
+    scope: input.scope,
+    contentMarkdown: result.content,
+    version,
+    prevId,
+    customInstruction: input.customInstruction?.trim() || null,
+  });
+}
+
+async function exportDepositMarkdownImpl(
+  id: number
+): Promise<{ relativePath: string } | null> {
+  const api = vestiApi();
+  if (!api) throw new Error("桌面环境不可用，无法导出沉淀");
+  const deposit = await getDeposit(id);
+  if (!deposit) {
+    throw new Error("沉淀不存在，可能已被删除");
+  }
+  const directory = await api.chooseDirectory("选择沉淀导出目录");
+  if (!directory) return null;
+  const relativePath = `VestiDeposits/${sanitizeFileBaseName(deposit.title)}-v${deposit.version}.md`;
+  await api.writeUpstreamFile({
+    rootPath: directory,
+    relativePath,
+    content: deposit.contentMarkdown,
+  });
+  return { relativePath };
+}
+
+// ---- P4c daily log + weekly report -------------------------------------------
+// Thin wrappers over src/ui/daily/* (pure aggregation core + IO service);
+// manual generation from the tab shares the same pipeline as the scheduler.
+
+async function generateDailyLogImpl(input?: { date?: string }): Promise<DailyLog | null> {
+  const date = input?.date?.trim() || todayDateString();
+  return generateDailyLogService(date, "manual");
+}
+
+async function getPendingDailyDatesImpl(): Promise<string[]> {
+  const stored = await window.vestiUi?.getUiPreference(DAILY_TIME_PREF_KEY).catch(() => null);
+  const logs = await listDailyLogs().catch(() => []);
+  return computePendingDailyDates({
+    now: Date.now(),
+    scheduledTime: normalizeDailyTime(stored),
+    existingDates: logs.map((log) => log.date),
+  });
+}
+
+function toWeeklyReportView(record: {
+  id: number;
+  rangeStart: number;
+  rangeEnd: number;
+  content: string;
+  createdAt: number;
+}): WeeklyReport {
+  return {
+    id: record.id,
+    rangeStart: record.rangeStart,
+    rangeEnd: record.rangeEnd,
+    content: record.content,
+    createdAt: record.createdAt,
+  };
+}
+
+async function exportDailyLogMarkdownImpl(
+  id: number
+): Promise<{ relativePath: string } | null> {
+  const api = vestiApi();
+  if (!api) throw new Error("桌面环境不可用，无法导出日报");
+  const log = await getDailyLogById(id);
+  if (!log) {
+    throw new Error("日报不存在，可能已被删除");
+  }
+  const directory = await api.chooseDirectory("选择日报导出目录");
+  if (!directory) return null;
+  const relativePath = `VestiDaily/daily-${log.date}.md`;
+  await api.writeUpstreamFile({
+    rootPath: directory,
+    relativePath,
+    content: log.contentMarkdown,
+  });
+  return { relativePath };
+}
+
+async function getDailyLogById(id: number): Promise<DailyLog | null> {
+  const logs = await listDailyLogs();
+  return logs.find((log) => log.id === id) ?? null;
+}
+
 // ---- StorageApi ------------------------------------------------------------
 
 export const desktopStorage: StorageApi = {
@@ -397,9 +849,46 @@ export const desktopStorage: StorageApi = {
   deleteConversation: async (id) => {
     await deleteConversation(id);
   },
+  // P2b organizer: source tree + bulk operations. Soft trash keeps the record
+  // (and its capture lineage), so re-syncs reconcile instead of resurrecting.
+  getConversationTree: () => loadConversationTree(),
+  trashConversations: (ids) => bulkSetConversationFlags(ids, { is_trash: true }),
+  bulkAddTag: (ids, tag) => bulkAddTagToConversations(ids, tag),
   renameFolderTag: async (from, to) => ({ updated: await renameTagAcrossConversations(from, to) }),
   moveFolderTag: async (from, to) => ({ updated: await moveTagAcrossConversations(from, to) }),
   removeFolderTag: async (tag) => ({ updated: await removeTagFromConversations(tag) }),
+
+  // P4a AI relay: handoff packs over multi-selected conversations.
+  listRelayPacks: () => listRelayPacks(),
+  generateRelayPack: (conversationIds) => generateRelayPackImpl(conversationIds),
+  deleteRelayPack: async (id) => {
+    await deleteRelayPack(id);
+  },
+  exportRelayPackMarkdown: (id) => exportRelayPackMarkdownImpl(id),
+  getRelayPackCliCommands: (id) => getRelayPackCliCommandsImpl(id),
+  deliverRelayPackToBrowser: (id) => deliverRelayPackToBrowserImpl(id),
+  getRelayAvailability: () => getRelayAvailabilityImpl(),
+
+  // P4b knowledge extract + deposits area.
+  generateExtract: (conversationIds) => generateExtractImpl(conversationIds),
+  listDeposits: () => listDeposits(),
+  createDeposit: (input) => createDeposit(input),
+  generateDeposit: (input) => generateDepositImpl(input),
+  renameDeposit: (id, title) => renameDeposit(id, title),
+  deleteDeposit: async (id) => {
+    await deleteDeposit(id);
+  },
+  resolveDepositScope: (scope) => resolveDepositScopeImpl(scope),
+  exportDepositMarkdown: (id) => exportDepositMarkdownImpl(id),
+
+  // P4c daily log + weekly report.
+  listDailyLogs: () => listDailyLogs(),
+  generateDailyLog: (input) => generateDailyLogImpl(input),
+  getPendingDailyDates: () => getPendingDailyDatesImpl(),
+  getDailyLogOverview: (): Promise<DailyLogOverview> => getDailyLogOverviewService(),
+  listWeeklyReports: async () => (await listWeeklyReports()).map(toWeeklyReportView),
+  generateWeeklyReport: async () => toWeeklyReportView(await generateWeeklyReportService()),
+  exportDailyLogMarkdown: (id) => exportDailyLogMarkdownImpl(id),
 
   askKnowledgeBase: async (query, sessionId, _limit, _mode, options) => {
     const trimmed = query.trim();
@@ -413,28 +902,53 @@ export const desktopStorage: StorageApi = {
 
     const scopeIds = options?.searchScope?.conversationIds ?? [];
     const api = vestiApi();
-    const info = scopeIds.length > 0 ? await getConversationCliId(scopeIds[0]) : null;
 
     let answer = NO_CONTEXT_ANSWER;
     let sources: RagSources = [];
 
-    if (api && info?.cliId) {
-      const result = await api.runAgent({
-        kind: "explore",
-        sessionId: info.cliId,
-        question: trimmed,
-      });
-      answer = result.content;
-      const record = await db.conversations.get(scopeIds[0]);
-      if (record?.id !== undefined) {
-        sources = [
-          {
-            id: record.id,
-            title: record.title,
-            platform: record.platform,
-            similarity: 1,
-          },
-        ];
+    if (api) {
+      // P1.5: cross-session recall first — digests + FTS hit snippets from the
+      // top-K sessions become the explore context; answers cite their sources.
+      const hits = await api.recallSessions(trimmed, 5).catch(() => []);
+      if (hits.length > 0) {
+        const context = hits
+          .map((hit, index) => {
+            const lines = [`[会话 ${index + 1}] ${hit.title}`];
+            if (hit.oneLiner) lines.push(`摘要：${hit.oneLiner}`);
+            if (hit.snippet) lines.push(`命中片段：${hit.snippet}`);
+            return lines.join("\n");
+          })
+          .join("\n\n");
+        const result = await api.runAgent({
+          kind: "explore",
+          sessionId: hits[0].sessionId,
+          question: trimmed,
+          transcriptOverride: context,
+        });
+        answer = result.content;
+        sources = await recallSources(hits);
+      } else {
+        // No recall hits: fall back to the first selected conversation.
+        const info = scopeIds.length > 0 ? await getConversationCliId(scopeIds[0]) : null;
+        if (info?.cliId) {
+          const result = await api.runAgent({
+            kind: "explore",
+            sessionId: info.cliId,
+            question: trimmed,
+          });
+          answer = result.content;
+          const record = await db.conversations.get(scopeIds[0]);
+          if (record?.id !== undefined) {
+            sources = [
+              {
+                id: record.id,
+                title: record.title,
+                platform: record.platform,
+                similarity: 1,
+              },
+            ];
+          }
+        }
       }
     }
 
@@ -477,6 +991,28 @@ export const desktopStorage: StorageApi = {
     return summaryRecordToChatSummaryData(record, info?.title);
   },
   generateSummary: (conversationId) => generateSummaryImpl(conversationId),
+  getConversationDigests: () => listConversationDigests(),
+
+  // P3 upstream export (SendToMenu): whole conversations re-serialize from
+  // structured Dexie data (frontmatter, digest, AST); the summary scope and
+  // derived payloads (AITI etc.) send the prebuilt markdown instead.
+  exportConversationToNotion: async (input) => {
+    if (input.scope !== "summary" && input.conversation?.id != null) {
+      return exportConversationToNotion(input.conversation.id);
+    }
+    return exportMarkdownPayloadToNotion({ title: input.title, markdown: input.markdown });
+  },
+  exportConversationToObsidian: async (input) => {
+    const { vaultName } = await getConfiguredObsidianVault();
+    const outcome = input.scope !== "summary" && input.conversation?.id != null
+      ? await exportConversationToObsidian(input.conversation.id)
+      : await exportMarkdownPayloadToObsidian({ title: input.title, markdown: input.markdown });
+    return {
+      relative_path: outcome.relativePath,
+      vault_name: vaultName,
+      exported_at: outcome.exportedAt,
+    };
+  },
 
   getNotes: () => listNotes(),
   saveNote: (note) => createNote(note),

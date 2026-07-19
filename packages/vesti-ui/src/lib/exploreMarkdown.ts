@@ -1,4 +1,5 @@
 import type {
+  AitiImagery,
   AitiProfile,
   DashboardLabels,
   LearnProfile,
@@ -10,11 +11,26 @@ import type {
 // promote a reflection (AITI portrait / Learn digest / Roundtable synthesis) into
 // Notion / Obsidian / clipboard as a clean document — same payload, many targets.
 
+/** P5 思维意象 extras: imagery identity + optional LLM persona footnote. */
+export interface AitiMarkdownExtras {
+  imagery?: Pick<AitiImagery, "name" | "code" | "origin" | "verdict"> | null;
+  personaNote?: string | null;
+}
+
 export function buildAitiMarkdown(
   profile: AitiProfile,
   labels: DashboardLabels["aiti"],
+  extras?: AitiMarkdownExtras,
 ): string {
   const lines: string[] = [`# ${labels.title}`, ""];
+  if (extras?.imagery) {
+    const { name, code, origin, verdict } = extras.imagery;
+    lines.push(`## ${name} · ${code}`, "");
+    lines.push(`> ${verdict}`, "");
+    lines.push(`_${origin}_`, "");
+    const note = extras.personaNote?.trim();
+    if (note) lines.push(`**${labels.personaNoteLabel}**：${note}`, "");
+  }
   if (labels.empoweringIntro) lines.push(labels.empoweringIntro, "");
   lines.push(`## ${labels.strengthsTitle}`, "");
   const axisStrength: Record<string, [string, string]> = {

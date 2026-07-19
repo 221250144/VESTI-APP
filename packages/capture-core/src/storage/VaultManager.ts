@@ -22,10 +22,14 @@ export class VaultManager {
   }
 
   /**
-   * Backup a raw session file to the vault
+   * Backup a raw session file to the vault. WSL sources get an extra
+   * wsl-<distro> subdirectory so identical file names from different
+   * distros (or from the native host) never overwrite each other.
    */
-  async backup(filePath: string, platform: string, sessionId?: string): Promise<string> {
-    const platformDir = path.join(this.vaultPath, platform, 'raw');
+  async backup(filePath: string, platform: string, sessionId?: string, host?: string): Promise<string> {
+    const platformDir = host && host !== 'native'
+      ? path.join(this.vaultPath, platform, 'raw', host.replace(':', '-'))
+      : path.join(this.vaultPath, platform, 'raw');
     await fs.ensureDir(platformDir);
 
     const basename = sessionId ? `${sessionId}.jsonl` : path.basename(filePath);
