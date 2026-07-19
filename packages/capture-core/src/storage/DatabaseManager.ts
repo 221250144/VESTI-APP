@@ -7,6 +7,10 @@
 
 import fs from 'fs-extra';
 import path from 'path';
+import { MIGRATIONS } from './migrations.js';
+import { deriveProjectKey, projectBasis, projectLabel } from './projectRegistry.js';
+import { buildConversationTree, type ConversationTree } from '../tree/TreeIndex.js';
+import { recallSessions, type SessionRecallHit, type SessionRecallOptions } from '../search/SessionRecall.js';
 import type {
   VestiConversation,
   VestiMessage,
@@ -24,6 +28,7 @@ import type {
   ContextCompaction,
   SystemEvent,
   MessageSource,
+  SessionDigest,
 } from '../types/unified.js';
 
 type Database = import('better-sqlite3').Database;
@@ -46,7 +51,7 @@ export class DatabaseManager {
     this.db.pragma('foreign_keys = ON');
 
     this.createTables();
-    this.migrateAddColumns();
+    this.runMigrations();
     this.createIndexes();
     this.createFTS();
   }
@@ -424,14 +429,32 @@ export class DatabaseManager {
   }
 
   /**
-   * Add new columns to existing tables (safe for already-migrated DBs)
+   * Apply pending schema migrations in version order. Each migration runs
+   * once inside a transaction together with its schema_migrations record.
    */
-  private migrateAddColumns(): void {
+  private runMigrations(): void {
     const db = this.getDb();
-    const addColumnSafe = (table: string, column: string, def: string) => {
-      try { db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`); } catch { /* already exists */ }
-    };
-    addColumnSafe('work_sessions', 'session_type', "TEXT DEFAULT 'conversation'");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      )
+    `);
+    const applied = new Set(
+      (db.prepare('SELECT version FROM schema_migrations').all() as Array<{ version: number }>)
+        .map(row => row.version),
+    );
+    const record = db.prepare(
+      'INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)'
+    );
+    for (const migration of MIGRATIONS) {
+      if (applied.has(migration.version)) continue;
+      db.transaction(() => {
+        migration.up(db);
+        record.run(migration.version, migration.name, new Date().toISOString());
+      })();
+    }
   }
 
   // ==================== WorkSession CRUD ====================
@@ -440,7 +463,7 @@ export class DatabaseManager {
     const db = this.getDb();
     db.prepare(`
       INSERT INTO work_sessions (
-        id, session_id, platform, platform_version, project_path, git_branch, git_remote, model, models,
+        id, session_id, platform, host, platform_version, project_path, git_branch, git_remote, model, models,
         title, summary, tags, status,
         started_at, ended_at, last_activity_at, duration_ms,
         message_count, user_input_count, assistant_message_count,
@@ -448,7 +471,7 @@ export class DatabaseManager {
         total_input_tokens, total_output_tokens, total_cache_creation_tokens, total_cache_read_tokens,
         has_subagents, has_context_compaction, agent_meta, claude_code_version, session_type, created_at, updated_at
       ) VALUES (
-        @id, @sessionId, @platform, @platformVersion, @projectPath, @gitBranch, @gitRemote, @model, @models,
+        @id, @sessionId, @platform, @host, @platformVersion, @projectPath, @gitBranch, @gitRemote, @model, @models,
         @title, @summary, @tags, @status,
         @startedAt, @endedAt, @lastActivityAt, @durationMs,
         @messageCount, @userInputCount, @assistantMessageCount,
@@ -457,6 +480,7 @@ export class DatabaseManager {
         @hasSubagents, @hasContextCompaction, @agentMeta, @claudeCodeVersion, @sessionType, @createdAt, @updatedAt
       )
       ON CONFLICT(id) DO UPDATE SET
+        host = excluded.host,
         platform_version = excluded.platform_version,
         project_path = excluded.project_path,
         git_branch = excluded.git_branch,
@@ -489,6 +513,7 @@ export class DatabaseManager {
       id: s.id,
       sessionId: s.sessionId,
       platform: s.platform,
+      host: s.host ?? 'native',
       platformVersion: s.platformVersion ?? null,
       projectPath: s.projectPath ?? '',
       gitBranch: s.gitBranch ?? null,
@@ -521,6 +546,37 @@ export class DatabaseManager {
       sessionType: s.sessionType ?? 'conversation',
       createdAt: s.createdAt,
       updatedAt: s.updatedAt,
+    });
+    this.upsertProjectForSession(s);
+  }
+
+  /**
+   * Keep project_registry in step with work_sessions (P1.5): every session
+   * upsert refreshes its project's first/last_seen. The key is derived with
+   * the same pure function TreeIndex uses, so both always agree.
+   */
+  private upsertProjectForSession(s: WorkSession): void {
+    const host = s.host ?? 'native';
+    const basis = projectBasis({ projectPath: s.projectPath ?? '', gitRemote: s.gitRemote });
+    const projectKey = deriveProjectKey({ platform: s.platform, host, projectPath: s.projectPath ?? '', gitRemote: s.gitRemote });
+    const firstSeen = new Date(s.startedAt || s.lastActivityAt || Date.now()).toISOString();
+    const lastSeen = new Date(s.lastActivityAt || s.startedAt || Date.now()).toISOString();
+    this.getDb().prepare(`
+      INSERT INTO project_registry (project_key, kind, label, path_or_domain, first_seen, last_seen)
+      VALUES (@projectKey, 'cli_path', @label, @pathOrDomain, @firstSeen, @lastSeen)
+      ON CONFLICT(project_key) DO UPDATE SET
+        first_seen = CASE WHEN excluded.first_seen < project_registry.first_seen
+          THEN excluded.first_seen ELSE project_registry.first_seen END,
+        last_seen = CASE WHEN excluded.last_seen > project_registry.last_seen
+          THEN excluded.last_seen ELSE project_registry.last_seen END,
+        label = excluded.label,
+        path_or_domain = excluded.path_or_domain
+    `).run({
+      projectKey,
+      label: projectLabel(basis),
+      pathOrDomain: basis,
+      firstSeen,
+      lastSeen,
     });
   }
 
@@ -1256,6 +1312,115 @@ export class DatabaseManager {
     }
   }
 
+  // ==================== Session Digests (P1.5) ====================
+
+  upsertSessionDigest(digest: SessionDigest): void {
+    this.getDb().prepare(`
+      INSERT INTO session_digests (
+        session_id, host, platform, project_key, one_liner,
+        key_topics, key_files, decisions, open_questions,
+        embedding, embedding_status, digest_version, message_count, updated_at
+      ) VALUES (
+        @sessionId, @host, @platform, @projectKey, @oneLiner,
+        @keyTopics, @keyFiles, @decisions, @openQuestions,
+        @embedding, @embeddingStatus, @digestVersion, @messageCount, @updatedAt
+      )
+      ON CONFLICT(session_id) DO UPDATE SET
+        host = excluded.host,
+        platform = excluded.platform,
+        project_key = excluded.project_key,
+        one_liner = excluded.one_liner,
+        key_topics = excluded.key_topics,
+        key_files = excluded.key_files,
+        decisions = excluded.decisions,
+        open_questions = excluded.open_questions,
+        embedding = excluded.embedding,
+        embedding_status = excluded.embedding_status,
+        digest_version = excluded.digest_version,
+        message_count = excluded.message_count,
+        updated_at = excluded.updated_at
+    `).run({
+      sessionId: digest.sessionId,
+      host: digest.host,
+      platform: digest.platform,
+      projectKey: digest.projectKey,
+      oneLiner: digest.oneLiner,
+      keyTopics: JSON.stringify(digest.keyTopics ?? []),
+      keyFiles: JSON.stringify(digest.keyFiles ?? []),
+      decisions: JSON.stringify(digest.decisions ?? []),
+      openQuestions: JSON.stringify(digest.openQuestions ?? []),
+      embedding: digest.embedding ?? null,
+      embeddingStatus: digest.embeddingStatus,
+      digestVersion: digest.digestVersion,
+      messageCount: digest.messageCount,
+      updatedAt: digest.updatedAt,
+    });
+  }
+
+  getSessionDigest(sessionId: string): SessionDigest | null {
+    const row = this.getDb().prepare('SELECT * FROM session_digests WHERE session_id = ?').get(sessionId) as any;
+    return row ? this.rowToSessionDigest(row) : null;
+  }
+
+  /**
+   * Conversation sessions whose digest is missing, stale (fewer messages
+   * digested than captured) or built by an older prompt version.
+   */
+  listSessionsNeedingDigest(digestVersion: number): Array<{ id: string; messageCount: number }> {
+    return (this.getDb().prepare(`
+      SELECT ws.id, ws.message_count
+      FROM work_sessions ws
+      LEFT JOIN session_digests sd ON sd.session_id = ws.id
+      WHERE ws.session_type = 'conversation'
+        AND ws.message_count > 0
+        AND (
+          sd.session_id IS NULL
+          OR sd.message_count IS NULL
+          OR sd.message_count < ws.message_count
+          OR sd.digest_version < ?
+        )
+      ORDER BY ws.last_activity_at DESC
+    `).all(digestVersion) as any[]).map(row => ({ id: row.id, messageCount: row.message_count }));
+  }
+
+  private rowToSessionDigest(row: any): SessionDigest {
+    const parseArray = (value: unknown): string[] => {
+      if (typeof value !== 'string' || !value) return [];
+      try {
+        const parsed = JSON.parse(value) as unknown;
+        return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+      } catch {
+        return [];
+      }
+    };
+    return {
+      sessionId: row.session_id,
+      host: row.host ?? 'native',
+      platform: row.platform ?? '',
+      projectKey: row.project_key ?? '',
+      oneLiner: row.one_liner ?? '',
+      keyTopics: parseArray(row.key_topics),
+      keyFiles: parseArray(row.key_files),
+      decisions: parseArray(row.decisions),
+      openQuestions: parseArray(row.open_questions),
+      embedding: row.embedding ?? null,
+      embeddingStatus: row.embedding_status ?? 'none',
+      digestVersion: row.digest_version ?? 1,
+      messageCount: row.message_count ?? 0,
+      updatedAt: row.updated_at ?? '',
+    };
+  }
+
+  // ==================== Conversation Tree & Recall (P1.5) ====================
+
+  buildConversationTree(): ConversationTree {
+    return buildConversationTree(this.getDb());
+  }
+
+  recallSessions(query: string, options: SessionRecallOptions = {}): SessionRecallHit[] {
+    return recallSessions(this.getDb(), query, options);
+  }
+
   // ==================== Stats ====================
 
   getStats(): VestiStats {
@@ -1332,6 +1497,7 @@ export class DatabaseManager {
       id: r.id,
       sessionId: r.session_id,
       platform: r.platform,
+      host: r.host ?? 'native',
       platformVersion: r.platform_version,
       projectPath: r.project_path,
       gitBranch: r.git_branch,

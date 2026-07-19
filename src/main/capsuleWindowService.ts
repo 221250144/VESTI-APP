@@ -2,7 +2,7 @@ import { BrowserWindow, Menu, screen } from 'electron';
 import path from 'node:path';
 import { IPC, type CapsuleState } from '../shared/contracts';
 
-const BALL_SIZE = 64;
+const BALL_SIZE = 56;
 const PANEL_WIDTH = 340;
 const PANEL_HEIGHT = 344;
 const EDGE_MARGIN = 16;
@@ -128,6 +128,7 @@ export class CapsuleWindowService {
     this.expanded = expanded;
     const bounds = this.window.getBounds();
     const area = screen.getDisplayMatching(bounds).workArea;
+    let next: Electron.Rectangle;
     if (expanded) {
       const width = PANEL_WIDTH;
       const height = PANEL_HEIGHT;
@@ -140,7 +141,7 @@ export class CapsuleWindowService {
         area.y + EDGE_MARGIN,
         Math.max(area.y + EDGE_MARGIN, area.y + area.height - height - EDGE_MARGIN),
       );
-      this.window.setBounds({ x, y, width, height }, true);
+      next = { x, y, width, height };
     } else {
       const width = BALL_SIZE;
       const height = BALL_SIZE;
@@ -151,8 +152,14 @@ export class CapsuleWindowService {
         area.y + EDGE_MARGIN,
         Math.max(area.y + EDGE_MARGIN, area.y + area.height - height - EDGE_MARGIN),
       );
-      this.window.setBounds({ x, y, width, height }, true);
+      next = { x, y, width, height };
     }
+    // Instant resize between hide/show instead of an animated setBounds:
+    // animated resizes leave ghost frames on transparent Windows windows.
+    // The enter transition lives in the content CSS (capsule-enter).
+    this.window.hide();
+    this.window.setBounds(next);
+    this.window.showInactive();
     this.pushState();
   }
 

@@ -4,6 +4,7 @@
  */
 
 import type { AgentPlatform, VestiMessage, VestiConversation, ToolExecution, Subagent, TokenUsage } from './index.js';
+import type { HomeRoot } from '../platform/PathResolver.js';
 
 // ==================== Adapter Interface ====================
 
@@ -28,6 +29,12 @@ export interface AgentAdapter {
 
   /** Whether SyncEngine should keep a compressed raw copy. */
   readonly shouldBackupSource?: boolean;
+
+  /**
+   * Multi-root support: replace the adapter's home roots (native first,
+   * then any WSL homes). Adapters that omit this stay native-only.
+   */
+  setHomeRoots?(homes: HomeRoot[]): void;
 }
 
 export interface AgentDetectResult {
@@ -47,6 +54,9 @@ export interface ParsedSession {
   claudeCodeVersion?: string;
   model?: string;
 
+  /** Source host tag: 'native' or 'wsl:<distro>'. Set by SyncEngine from the file path. */
+  host?: string;
+
   messages: ParsedMessage[];
   toolExecutions: ToolExecution[];
   subagents: SubagentRef[];
@@ -58,6 +68,12 @@ export interface ParsedSession {
   meta?: Record<string, unknown>;
   contextCompactions?: Array<{ sequence: number; compactedAt: number; summary?: string }>;
   peakContextUsage?: number;
+
+  /**
+   * Non-fatal parse warnings, e.g. a high share of unrecognized wire events.
+   * Surfaced so "parsed OK but extracted nothing" never fails silently.
+   */
+  warnings?: string[];
 }
 
 export interface ParsedMessage {

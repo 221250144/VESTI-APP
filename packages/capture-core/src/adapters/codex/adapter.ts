@@ -2,9 +2,9 @@
 
 import fs from 'fs-extra';
 import path from 'path';
-import os from 'os';
 import { glob } from 'glob';
 import type { AgentAdapter, AgentDetectResult, ParsedSession } from '../../types/agent.js';
+import { nativeHomeRoot, type HomeRoot } from '../../platform/PathResolver.js';
 import { CodexParser } from './parser.js';
 
 export class CodexAdapter implements AgentAdapter {
@@ -12,10 +12,25 @@ export class CodexAdapter implements AgentAdapter {
   readonly name = 'Codex';
 
   private readonly parser = new CodexParser();
-  private readonly codexDir = path.join(os.homedir(), '.codex');
+  private homes: HomeRoot[] = [nativeHomeRoot()];
+
+  setHomeRoots(homes: HomeRoot[]): void {
+    this.homes = homes;
+  }
+
+  private codexDirs(): string[] {
+    return this.homes.map(home => path.join(home.homeDir, '.codex'));
+  }
 
   async detect(): Promise<AgentDetectResult> {
-    if (!(await fs.pathExists(this.codexDir))) return { installed: false };
+    let installPath: string | undefined;
+    for (const dir of this.codexDirs()) {
+      if (await fs.pathExists(dir)) {
+        installPath = dir;
+        break;
+      }
+    }
+    if (!installPath) return { installed: false };
 
     const files = await this.getSessionFiles();
     let version: string | undefined;
@@ -30,7 +45,7 @@ export class CodexAdapter implements AgentAdapter {
     return {
       installed: true,
       version,
-      installPath: this.codexDir,
+      installPath,
       sessionCount: files.length,
     };
   }
@@ -40,10 +55,10 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async getSessionFiles(): Promise<string[]> {
-    const roots = [
-      path.join(this.codexDir, 'sessions'),
-      path.join(this.codexDir, 'archived_sessions'),
-    ];
+    const roots = this.codexDirs().flatMap(dir => [
+      path.join(dir, 'sessions'),
+      path.join(dir, 'archived_sessions'),
+    ]);
     const files: string[] = [];
     for (const root of roots) {
       if (!(await fs.pathExists(root))) continue;
@@ -54,9 +69,9 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   getWatchPatterns(): string[] {
-    return [
-      path.join(this.codexDir, 'sessions', '**', '*.jsonl'),
-      path.join(this.codexDir, 'archived_sessions', '**', '*.jsonl'),
-    ];
+    return this.codexDirs().flatMap(dir => [
+      path.join(dir, 'sessions', '**', '*.jsonl'),
+      path.join(dir, 'archived_sessions', '**', '*.jsonl'),
+    ]);
   }
 }

@@ -38,9 +38,10 @@ export type ToolOutcome = 'success' | 'error' | 'pending';
 // ==================== WorkSession ====================
 
 export interface WorkSession {
-  id: string;                    // {platform}:{sessionId}
+  id: string;                    // {platform}:{sessionId} — WSL sources: {platform}:wsl-<distro>-{sessionId}
   sessionId: string;
   platform: AgentPlatform;
+  host?: string;                 // 'native' | 'wsl:<distro>'
   platformVersion?: string;
   projectPath: string;
   gitBranch?: string;
@@ -223,6 +224,38 @@ export interface ConvertedSession {
   systemEvents: SystemEvent[];
   subagentLinks: SubagentLink[];
   contextCompactions: ContextCompaction[];
+}
+
+// ==================== Session Digest (P1.5) ====================
+
+export type DigestEmbeddingStatus = 'none' | 'ok' | 'skipped' | 'failed';
+
+export interface SessionDigest {
+  sessionId: string;             // work_sessions.id
+  host: string;
+  platform: string;
+  projectKey: string;
+  oneLiner: string;
+  keyTopics: string[];           // stored as JSON arrays
+  keyFiles: string[];
+  decisions: string[];
+  openQuestions: string[];
+  embedding?: Buffer | null;     // serialized Float32Array (little-endian)
+  embeddingStatus: DigestEmbeddingStatus;
+  digestVersion: number;
+  messageCount: number;
+  updatedAt: string;             // ISO 8601
+}
+
+// ==================== Project Registry (P1.5) ====================
+
+export interface ProjectRegistryEntry {
+  projectKey: string;
+  kind: 'cli_path';
+  label: string;
+  pathOrDomain: string;
+  firstSeen: string;             // ISO 8601
+  lastSeen: string;              // ISO 8601
 }
 
 // ==================== Tool Category Mapping ====================

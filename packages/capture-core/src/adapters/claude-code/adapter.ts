@@ -5,9 +5,9 @@
 
 import fs from 'fs-extra';
 import path from 'path';
-import os from 'os';
 import { glob } from 'glob';
 import type { AgentAdapter, AgentDetectResult, ParsedSession } from '../../types/agent.js';
+import { nativeHomeRoot, type HomeRoot } from '../../platform/PathResolver.js';
 import { ClaudeCodeParser } from './parser.js';
 import type { ClaudeSessionMeta } from './types.js';
 
@@ -16,12 +16,29 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   readonly name = 'Claude Code';
 
   private parser = new ClaudeCodeParser();
-  private claudeDir = path.join(os.homedir(), '.claude');
-  private projectsDir = path.join(os.homedir(), '.claude', 'projects');
+  private homes: HomeRoot[] = [nativeHomeRoot()];
+
+  setHomeRoots(homes: HomeRoot[]): void {
+    this.homes = homes;
+  }
+
+  private claudeDirs(): string[] {
+    return this.homes.map(home => path.join(home.homeDir, '.claude'));
+  }
+
+  private projectsDirs(): string[] {
+    return this.homes.map(home => path.join(home.homeDir, '.claude', 'projects'));
+  }
 
   async detect(): Promise<AgentDetectResult> {
-    const installed = await fs.pathExists(this.claudeDir);
-    if (!installed) {
+    let installPath: string | undefined;
+    for (const dir of this.claudeDirs()) {
+      if (await fs.pathExists(dir)) {
+        installPath = dir;
+        break;
+      }
+    }
+    if (!installPath) {
       return { installed: false };
     }
 
@@ -50,9 +67,9 @@ export class ClaudeCodeAdapter implements AgentAdapter {
     } catch { /* ignore */ }
 
     return {
-      installed,
+      installed: true,
       version,
-      installPath: this.claudeDir,
+      installPath,
       sessionCount,
     };
   }
@@ -66,44 +83,52 @@ export class ClaudeCodeAdapter implements AgentAdapter {
   }
 
   async getSessionFiles(): Promise<string[]> {
-    if (!(await fs.pathExists(this.projectsDir))) return [];
-
-    const files = await glob('**/*.jsonl', {
-      cwd: this.projectsDir,
-      absolute: true,
-      ignore: ['**/subagents/**'],
-    });
-
+    const files: string[] = [];
+    for (const projectsDir of this.projectsDirs()) {
+      if (!(await fs.pathExists(projectsDir))) continue;
+      // Subagent transcripts (**/subagents/agent-*.jsonl) are included so they
+      // sync as standalone sessions; resolveSubagentLinks() then attaches them
+      // to their parent via subagent_links.file_path.
+      files.push(...await glob('**/*.jsonl', {
+        cwd: projectsDir,
+        absolute: true,
+      }));
+    }
     return files;
   }
 
   getWatchPatterns(): string[] {
-    return [
-      path.join(this.projectsDir, '**', '*.jsonl'),
-    ];
+    return this.projectsDirs().map(projectsDir => path.join(projectsDir, '**', '*.jsonl'));
   }
 
   /**
-   * Get all project directories under ~/.claude/projects/
+   * Get all project directories under each home's .claude/projects/
    */
   async getProjectDirs(): Promise<string[]> {
-    if (!(await fs.pathExists(this.projectsDir))) return [];
-    const entries = await fs.readdir(this.projectsDir, { withFileTypes: true });
-    return entries
-      .filter(e => e.isDirectory())
-      .map(e => path.join(this.projectsDir, e.name));
+    const dirs: string[] = [];
+    for (const projectsDir of this.projectsDirs()) {
+      if (!(await fs.pathExists(projectsDir))) continue;
+      const entries = await fs.readdir(projectsDir, { withFileTypes: true });
+      dirs.push(...entries
+        .filter(e => e.isDirectory())
+        .map(e => path.join(projectsDir, e.name)));
+    }
+    return dirs;
   }
 
   /**
-   * Get session-meta data from ~/.claude/usage-data/session-meta/{sessionId}.json
+   * Get session-meta data from .claude/usage-data/session-meta/{sessionId}.json
+   * (searched across all home roots)
    */
   async getSessionMeta(sessionId: string): Promise<ClaudeSessionMeta | null> {
-    const metaFile = path.join(this.claudeDir, 'usage-data', 'session-meta', `${sessionId}.json`);
-    try {
-      if (await fs.pathExists(metaFile)) {
-        return await fs.readJSON(metaFile) as ClaudeSessionMeta;
-      }
-    } catch { /* ignore */ }
+    for (const claudeDir of this.claudeDirs()) {
+      const metaFile = path.join(claudeDir, 'usage-data', 'session-meta', `${sessionId}.json`);
+      try {
+        if (await fs.pathExists(metaFile)) {
+          return await fs.readJSON(metaFile) as ClaudeSessionMeta;
+        }
+      } catch { /* ignore */ }
+    }
     return null;
   }
 }

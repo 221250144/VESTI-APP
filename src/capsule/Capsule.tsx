@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { LOGO_BASE64 } from '../ui/logo';
 import type { CapsuleState, VestiCapsuleApi } from '../shared/contracts';
+import { DEFAULT_SKIN_ID, resolveSkin } from './skins';
 
 type Locale = 'zh' | 'en' | 'ja' | 'ko';
 
@@ -85,6 +85,7 @@ export function Capsule() {
     expanded: false,
   });
   const [locale, setLocale] = useState<Locale>('zh');
+  const [skinId, setSkinId] = useState<string>(DEFAULT_SKIN_ID);
   const dragRef = useRef<{
     pointerId: number;
     startX: number;
@@ -111,13 +112,18 @@ export function Capsule() {
       if (key === 'theme') {
         document.documentElement.dataset.theme = value === 'dark' ? 'dark' : 'light';
       }
+      if (key === 'owlSkin') {
+        setSkinId(resolveSkin(value).id);
+      }
     };
     void bridge.getUiPreference('language').then(value => apply('language', value));
     void bridge.getUiPreference('theme').then(value => apply('theme', value));
+    void bridge.getUiPreference('owlSkin').then(value => apply('owlSkin', value));
     return bridge.onUiPreferenceChanged(apply);
   }, []);
 
   const copy = COPY[locale];
+  const skin = resolveSkin(skinId);
 
   const handlePointerDown = useCallback((event: React.PointerEvent) => {
     if (event.button !== 0) return;
@@ -173,7 +179,7 @@ export function Capsule() {
           onPointerUp={handlePointerUp}
           onContextMenu={handleContextMenu}
         >
-          <img src={LOGO_BASE64} alt="Vesti" draggable={false} />
+          <img src={skin.collapsed} alt="Vesti" draggable={false} />
           <span className={`status-dot${state.watching ? ' watching' : ''}`} />
         </div>
       </div>
@@ -189,7 +195,7 @@ export function Capsule() {
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
         >
-          <img src={LOGO_BASE64} alt="Vesti" draggable={false} />
+          <img src={skin.collapsed} alt="Vesti" draggable={false} />
           <span className="title">{copy.dock}</span>
           <button
             type="button"

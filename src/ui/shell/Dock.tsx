@@ -1,4 +1,6 @@
 import {
+  Archive,
+  BookText,
   Compass,
   LibraryBig,
   Moon,
@@ -28,6 +30,8 @@ const DOCK_COPY: Record<
     explore: "Explore",
     network: "Knowledge Graph",
     prompts: "Prompts",
+    deposits: "Deposits",
+    daily: "Daily log",
     settings: "Settings",
     backToLibrary: "Back to Library",
     toggleTheme: "Toggle theme",
@@ -37,6 +41,8 @@ const DOCK_COPY: Record<
     explore: "探索",
     network: "知识图谱",
     prompts: "提示词",
+    deposits: "沉淀区",
+    daily: "日志",
     settings: "设置",
     backToLibrary: "回到会话库",
     toggleTheme: "切换主题",
@@ -46,6 +52,8 @@ const DOCK_COPY: Record<
     explore: "探索",
     network: "ナレッジグラフ",
     prompts: "プロンプト",
+    deposits: "デポジット",
+    daily: "ログ",
     settings: "設定",
     backToLibrary: "ライブラリに戻る",
     toggleTheme: "テーマ切替",
@@ -55,6 +63,8 @@ const DOCK_COPY: Record<
     explore: "탐색",
     network: "지식 그래프",
     prompts: "프롬프트",
+    deposits: "보관함",
+    daily: "로그",
     settings: "설정",
     backToLibrary: "라이브러리로 돌아가기",
     toggleTheme: "테마 전환",
@@ -71,6 +81,8 @@ const TOP_ITEMS: DockItem[] = [
   { id: "explore", icon: <Compass className="h-5 w-5" strokeWidth={1.75} /> },
   { id: "network", icon: <Network className="h-5 w-5" strokeWidth={1.75} /> },
   { id: "prompts", icon: <ScrollText className="h-5 w-5" strokeWidth={1.75} /> },
+  { id: "deposits", icon: <Archive className="h-5 w-5" strokeWidth={1.75} /> },
+  { id: "daily", icon: <BookText className="h-5 w-5" strokeWidth={1.75} /> },
 ];
 
 interface DockProps {

@@ -16,8 +16,13 @@ import type {
   ConversationMatchSummary,
   ConversationSummaryV2,
   CreateNoteInput,
+  DailyLog,
+  DailyLogStats,
   DashboardStats,
   DataOverviewSnapshot,
+  Deposit,
+  DepositScope,
+  DepositTemplate,
   ExploreAgentMeta,
   ExploreMessage,
   ExploreSession,
@@ -35,6 +40,8 @@ import type {
   ObsidianImportSummary,
   Platform,
   RelatedConversation,
+  RelayPack,
+  RelayPackPayload,
   SearchConversationMatchesQuery,
   SearchMatchSurface,
   StorageUsageSnapshot,
@@ -73,12 +80,15 @@ import { db } from "./schema"
 import type {
   AnnotationRecord,
   ConversationRecord,
+  DailyLogRecord,
+  DepositRecord,
   ExploreMessageRecord,
   ExploreSessionRecord,
   MessageRecord,
   NoteAssetRecord,
   NoteRecord,
   NoteSourceRecord,
+  RelayPackRecord,
   SummaryRecordRecord,
   TopicRecord,
   WeeklyReportRecordRecord
@@ -998,6 +1008,10 @@ export async function listConversations(
     results = await db.conversations.toArray()
   }
 
+  // Trashed conversations stay in the table (soft trash, so capture re-syncs
+  // reconcile cleanly) but never surface in library/explore listings.
+  results = results.filter((record) => !record.is_trash)
+
   if (filters?.search) {
     const q = filters.search.toLowerCase()
     results = results.filter(
@@ -1167,12 +1181,18 @@ export async function updateConversationTopic(
   const updatedAt = Date.now()
   await db.conversations.update(id, {
     topic_id,
+    // A manual re-assignment clears the auto-classify marker and any pending
+    // suggestion: the conversation now counts as manually organized.
+    auto_classified: 0,
+    classify_suggestion: null,
     updated_at: updatedAt
   })
 
   return toConversation({
     ...existing,
     topic_id,
+    auto_classified: 0,
+    classify_suggestion: null,
     updated_at: updatedAt,
     id: existing.id
   })
@@ -1204,6 +1224,9 @@ export async function updateConversation(
       }
     }
     updates.topic_id = changes.topic_id ?? null
+    // Manual topic change: no longer auto-classified, stale suggestion gone.
+    updates.auto_classified = 0
+    updates.classify_suggestion = null
     updated = true
   }
 
@@ -1319,14 +1342,19 @@ export async function removeTagFromConversations(tag: string): Promise<number> {
   return replaceTagAcrossConversations(tag, null)
 }
 
-/** Bulk-toggle is_starred / is_archived over the given conversation ids. */
+/** Bulk-toggle is_starred / is_archived / is_trash over the given conversation ids. */
 export async function bulkSetConversationFlags(
   ids: number[],
-  patch: { is_starred?: boolean; is_archived?: boolean }
+  patch: { is_starred?: boolean; is_archived?: boolean; is_trash?: boolean }
 ): Promise<number> {
   const idSet = new Set(ids.filter((value) => Number.isFinite(value)))
   if (idSet.size === 0) return 0
-  if (patch.is_starred === undefined && patch.is_archived === undefined) return 0
+  if (
+    patch.is_starred === undefined &&
+    patch.is_archived === undefined &&
+    patch.is_trash === undefined
+  )
+    return 0
 
   await enforceStorageWriteGuard()
   const now = Date.now()
@@ -1343,6 +1371,10 @@ export async function bulkSetConversationFlags(
       }
       if (patch.is_archived !== undefined && record.is_archived !== patch.is_archived) {
         record.is_archived = patch.is_archived
+        changed = true
+      }
+      if (patch.is_trash !== undefined && record.is_trash !== patch.is_trash) {
+        record.is_trash = patch.is_trash
         changed = true
       }
       if (!changed) return
@@ -1978,6 +2010,132 @@ export async function importAllData(
     summaries: summaries.length,
     weeklyReports: weeklyReports.length,
     annotations: annotations.length
+  }
+}
+
+// Conversations arriving via the browser-extension bridge are stamped with
+// this source so captureSync's reconciliation (which only manages the
+// "local_terminal" namespace) never reconciles them away.
+export const EXTENSION_SOURCE = "browser_extension"
+
+export interface ExtensionBundleImportResult {
+  conversations: number
+  messages: number
+  maxCapturedAt: string | null
+}
+
+type SourceStamped = { _source?: string }
+
+/**
+ * Idempotent merge import for Bridge Protocol v1 payloads. Unlike
+ * importAllData (a full-restore wipe), this upserts by [platform+uuid]:
+ * existing conversations keep their Dexie id and user-curated fields
+ * (topic, star, tags); messages for each imported conversation are replaced
+ * wholesale. New records let Dexie auto-assign ids, which can never collide
+ * with captureSync's explicit SQLite ids (IndexedDB key generators advance
+ * past any explicitly inserted numeric key).
+ */
+export async function importExtensionBundle(
+  bundle: unknown
+): Promise<ExtensionBundleImportResult> {
+  const root = asImportObject(bundle, "root")
+  if (
+    root.schema_version !== undefined &&
+    root.schema_version !== "vesti_export.v1"
+  ) {
+    throw new Error(
+      'Only Vesti JSON exports with schema_version "vesti_export.v1" can be imported.'
+    )
+  }
+  const data = root.data !== undefined ? asImportObject(root.data, "data") : root
+  const conversations = readImportArray(data, "conversations", "data").map(
+    normalizeImportedConversation
+  )
+  const messages = readImportArray(data, "messages", "data", {
+    optional: true
+  }).map(normalizeImportedMessage)
+
+  const messagesByConversation = new Map<number, MessageRecord[]>()
+  const bundleConversationIds = new Set(
+    conversations.map((item) => item.id as number)
+  )
+  let importedMessageCount = 0
+  let maxCapturedAt = 0
+  for (const message of messages) {
+    // Skip orphans instead of failing the whole import: the extension retries
+    // on HTTP errors, and an unretryable bundle would poison the cursor.
+    if (!bundleConversationIds.has(message.conversation_id)) continue
+    const list = messagesByConversation.get(message.conversation_id) ?? []
+    list.push(message)
+    messagesByConversation.set(message.conversation_id, list)
+    importedMessageCount += 1
+    if (message.created_at > maxCapturedAt) maxCapturedAt = message.created_at
+  }
+
+  await db.transaction("rw", db.conversations, db.messages, async () => {
+    for (const conversation of conversations) {
+      const incomingId = conversation.id as number
+      const conversationMessages = messagesByConversation.get(incomingId) ?? []
+      const messageCount = conversationMessages.length
+      const aiCount = conversationMessages.filter(
+        (message) => message.role === "ai"
+      ).length
+      if (conversation.last_captured_at > maxCapturedAt) {
+        maxCapturedAt = conversation.last_captured_at
+      }
+
+      const existing = await db.conversations
+        .where("[platform+uuid]")
+        .equals([conversation.platform, conversation.uuid])
+        .first()
+
+      const stamped: ConversationRecord & SourceStamped = {
+        ...conversation,
+        message_count: messageCount,
+        turn_count: aiCount || Math.floor(messageCount / 2),
+        _source: EXTENSION_SOURCE
+      }
+      let conversationId: number
+      if (existing && typeof existing.id === "number") {
+        stamped.id = existing.id
+        stamped.topic_id = existing.topic_id ?? null
+        stamped.is_starred = existing.is_starred ?? false
+        stamped.tags = Array.isArray(existing.tags) ? existing.tags : stamped.tags
+        // Preserve P2a auto-classify bookkeeping across re-imports, same as
+        // the user-curated fields above.
+        stamped.auto_classified = existing.auto_classified ?? 0
+        stamped.classify_suggestion = existing.classify_suggestion ?? null
+        // P2b: local trash/archive flags are user organization state; a
+        // re-import must not resurrect or un-archive the record.
+        stamped.is_trash = existing.is_trash ?? false
+        stamped.is_archived = existing.is_archived ?? false
+        conversationId = await db.conversations.put(stamped)
+      } else {
+        delete stamped.id
+        conversationId = await db.conversations.add(stamped)
+      }
+
+      await db.messages.where("conversation_id").equals(conversationId).delete()
+      if (conversationMessages.length > 0) {
+        await db.messages.bulkAdd(
+          conversationMessages.map((message) => {
+            const stampedMessage: MessageRecord & SourceStamped = {
+              ...message,
+              conversation_id: conversationId,
+              _source: EXTENSION_SOURCE
+            }
+            delete stampedMessage.id
+            return stampedMessage
+          })
+        )
+      }
+    }
+  })
+
+  return {
+    conversations: conversations.length,
+    messages: importedMessageCount,
+    maxCapturedAt: maxCapturedAt > 0 ? new Date(maxCapturedAt).toISOString() : null
   }
 }
 
@@ -2905,4 +3063,307 @@ export async function getAllExploreMessages(): Promise<ExploreMessage[]> {
     agentMeta: parseExploreAgentMeta(record.agentMeta),
     timestamp: record.timestamp
   }))
+}
+
+// ============================================================
+// --- P4a AI Relay: handoff pack persistence (relay_packs) ---
+// ============================================================
+
+export interface CreateRelayPackInput {
+  title: string
+  conversationIds: number[]
+  pack: RelayPackPayload
+  suggestedPrompt: string
+  source?: "manual"
+}
+
+function parseRelayPackJson<T>(raw: string, fallback: T): T {
+  try {
+    const parsed = JSON.parse(raw) as T
+    return parsed ?? fallback
+  } catch {
+    return fallback
+  }
+}
+
+function toRelayPack(record: RelayPackRecord & { id: number }): RelayPack {
+  const emptyPack: RelayPackPayload = {
+    title: record.title,
+    goal: "",
+    current_state: "",
+    key_decisions: [],
+    key_files: [],
+    open_issues: [],
+    next_steps: [],
+    suggested_prompt: record.suggested_prompt
+  }
+  return {
+    id: record.id,
+    createdAt: record.created_at,
+    title: record.title,
+    conversationIds: parseRelayPackJson<number[]>(record.conversation_ids, []),
+    pack: parseRelayPackJson<RelayPackPayload>(record.pack, emptyPack),
+    suggestedPrompt: record.suggested_prompt,
+    source: "manual"
+  }
+}
+
+export async function createRelayPack(
+  input: CreateRelayPackInput
+): Promise<RelayPack> {
+  await enforceStorageWriteGuard()
+
+  const id = await db.relay_packs.add({
+    created_at: Date.now(),
+    title: input.title,
+    conversation_ids: JSON.stringify(input.conversationIds),
+    pack: JSON.stringify(input.pack),
+    suggested_prompt: input.suggestedPrompt,
+    source: input.source ?? "manual"
+  })
+  const record = await db.relay_packs.get(id)
+  if (!record || record.id === undefined) {
+    throw new Error("Failed to create relay pack")
+  }
+  return toRelayPack(record as RelayPackRecord & { id: number })
+}
+
+export async function listRelayPacks(): Promise<RelayPack[]> {
+  const records = await db.relay_packs.orderBy("created_at").reverse().toArray()
+  return records
+    .filter(
+      (record): record is RelayPackRecord & { id: number } =>
+        record.id !== undefined
+    )
+    .map(toRelayPack)
+}
+
+export async function getRelayPack(id: number): Promise<RelayPack | null> {
+  const record = await db.relay_packs.get(id)
+  if (!record || record.id === undefined) {
+    return null
+  }
+  return toRelayPack(record as RelayPackRecord & { id: number })
+}
+
+export async function deleteRelayPack(id: number): Promise<void> {
+  await enforceStorageWriteGuard()
+  await db.relay_packs.delete(id)
+}
+
+// ============================================================
+// --- P4b Deposits: knowledge deposit persistence (deposits) ---
+// ============================================================
+
+export interface CreateDepositInput {
+  template: DepositTemplate
+  title: string
+  scope: DepositScope
+  contentMarkdown: string
+  /** Version-chain pointer; defaults to a fresh v1 (no predecessor). */
+  version?: number
+  prevId?: number | null
+  customInstruction?: string | null
+}
+
+const DEPOSIT_TEMPLATES: readonly DepositTemplate[] = [
+  "background_knowledge",
+  "project_state",
+  "writing_style",
+  "extract",
+  "custom"
+]
+
+function normalizeDepositTemplate(value: unknown): DepositTemplate {
+  return DEPOSIT_TEMPLATES.includes(value as DepositTemplate)
+    ? (value as DepositTemplate)
+    : "custom"
+}
+
+function normalizeDepositScope(value: unknown): DepositScope {
+  if (value && typeof value === "object" && typeof (value as { kind?: unknown }).kind === "string") {
+    return value as DepositScope
+  }
+  return { kind: "selection", conversationIds: [] }
+}
+
+function toDeposit(record: DepositRecord & { id: number }): Deposit {
+  return {
+    id: record.id,
+    createdAt: record.created_at,
+    updatedAt: record.updated_at,
+    template: normalizeDepositTemplate(record.template),
+    title: record.title,
+    scope: normalizeDepositScope(record.scope),
+    contentMarkdown: record.content_markdown,
+    version: Number.isFinite(record.version) && record.version > 0 ? Math.floor(record.version) : 1,
+    prevId: typeof record.prev_id === "number" ? record.prev_id : null,
+    customInstruction: record.custom_instruction ?? null
+  }
+}
+
+export async function createDeposit(input: CreateDepositInput): Promise<Deposit> {
+  await enforceStorageWriteGuard()
+
+  const now = Date.now()
+  const id = await db.deposits.add({
+    created_at: now,
+    updated_at: now,
+    template: input.template,
+    title: input.title,
+    scope: input.scope,
+    content_markdown: input.contentMarkdown,
+    version: input.version ?? 1,
+    prev_id: input.prevId ?? null,
+    custom_instruction: input.customInstruction ?? null
+  })
+  const record = await db.deposits.get(id)
+  if (!record || record.id === undefined) {
+    throw new Error("Failed to create deposit")
+  }
+  return toDeposit(record as DepositRecord & { id: number })
+}
+
+export async function listDeposits(): Promise<Deposit[]> {
+  const records = await db.deposits.orderBy("created_at").reverse().toArray()
+  return records
+    .filter(
+      (record): record is DepositRecord & { id: number } =>
+        record.id !== undefined
+    )
+    .map(toDeposit)
+}
+
+export async function getDeposit(id: number): Promise<Deposit | null> {
+  const record = await db.deposits.get(id)
+  if (!record || record.id === undefined) {
+    return null
+  }
+  return toDeposit(record as DepositRecord & { id: number })
+}
+
+export async function renameDeposit(id: number, title: string): Promise<Deposit> {
+  await enforceStorageWriteGuard()
+  const trimmed = title.trim()
+  if (!trimmed) {
+    throw new Error("Deposit title cannot be empty")
+  }
+  const updated = await db.deposits.update(id, { title: trimmed, updated_at: Date.now() })
+  if (updated === 0) {
+    throw new Error("Deposit not found")
+  }
+  const deposit = await getDeposit(id)
+  if (!deposit) {
+    throw new Error("Deposit not found")
+  }
+  return deposit
+}
+
+export async function deleteDeposit(id: number): Promise<void> {
+  await enforceStorageWriteGuard()
+  await db.deposits.delete(id)
+}
+
+// ============================================================
+// --- P4c Daily Log: per-day summaries (daily_logs) + weekly reports ---
+// ============================================================
+
+export interface UpsertDailyLogInput {
+  /** Local calendar day, "YYYY-MM-DD"; unique upsert target. */
+  date: string
+  contentMarkdown: string
+  stats: DailyLogStats
+  source: "auto" | "manual"
+}
+
+function normalizeDailyLogStats(value: unknown): DailyLogStats {
+  const stats = (value && typeof value === "object" ? value : {}) as Partial<DailyLogStats>
+  const asCount = (item: unknown) =>
+    typeof item === "number" && Number.isFinite(item) ? Math.max(0, Math.floor(item)) : 0
+  const asList = (item: unknown) =>
+    Array.isArray(item)
+      ? item.filter((entry): entry is string => typeof entry === "string" && Boolean(entry))
+      : []
+  return {
+    cliSessions: asCount(stats.cliSessions),
+    browserConversations: asCount(stats.browserConversations),
+    platforms: asList(stats.platforms),
+    projects: asList(stats.projects),
+    messages: asCount(stats.messages)
+  }
+}
+
+function toDailyLog(record: DailyLogRecord & { id: number }): DailyLog {
+  return {
+    id: record.id,
+    date: record.date,
+    createdAt: record.created_at,
+    updatedAt: record.updated_at,
+    contentMarkdown: record.content_markdown,
+    stats: normalizeDailyLogStats(record.stats),
+    source: record.source === "manual" ? "manual" : "auto"
+  }
+}
+
+/** Insert or replace the log for a local day (date is the unique key). */
+export async function upsertDailyLog(input: UpsertDailyLogInput): Promise<DailyLog> {
+  await enforceStorageWriteGuard()
+
+  const now = Date.now()
+  const existing = await db.daily_logs.where("date").equals(input.date).first()
+  if (existing?.id !== undefined) {
+    await db.daily_logs.update(existing.id, {
+      content_markdown: input.contentMarkdown,
+      stats: input.stats,
+      source: input.source,
+      updated_at: now
+    })
+    const updated = await db.daily_logs.get(existing.id)
+    if (!updated || updated.id === undefined) {
+      throw new Error("Failed to update daily log")
+    }
+    return toDailyLog(updated as DailyLogRecord & { id: number })
+  }
+
+  const id = await db.daily_logs.add({
+    date: input.date,
+    created_at: now,
+    updated_at: now,
+    content_markdown: input.contentMarkdown,
+    stats: input.stats,
+    source: input.source
+  })
+  const record = await db.daily_logs.get(id)
+  if (!record || record.id === undefined) {
+    throw new Error("Failed to create daily log")
+  }
+  return toDailyLog(record as DailyLogRecord & { id: number })
+}
+
+export async function getDailyLog(date: string): Promise<DailyLog | null> {
+  const record = await db.daily_logs.where("date").equals(date).first()
+  if (!record || record.id === undefined) {
+    return null
+  }
+  return toDailyLog(record as DailyLogRecord & { id: number })
+}
+
+export async function listDailyLogs(): Promise<DailyLog[]> {
+  const records = await db.daily_logs.orderBy("date").reverse().toArray()
+  return records
+    .filter(
+      (record): record is DailyLogRecord & { id: number } =>
+        record.id !== undefined
+    )
+    .map(toDailyLog)
+}
+
+export async function deleteDailyLog(id: number): Promise<void> {
+  await enforceStorageWriteGuard()
+  await db.daily_logs.delete(id)
+}
+
+export async function listWeeklyReports(): Promise<WeeklyReportRecord[]> {
+  const records = await db.weekly_reports.orderBy("rangeStart").reverse().toArray()
+  return records.map(toWeeklyReport)
 }

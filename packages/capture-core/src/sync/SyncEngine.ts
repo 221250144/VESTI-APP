@@ -4,11 +4,13 @@
  */
 
 import fs from 'fs-extra';
+import path from 'path';
 import type { AgentPlatform } from '../types/index.js';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import type { DatabaseManager } from '../storage/DatabaseManager.js';
 import type { VaultManager } from '../storage/VaultManager.js';
 import type { ClaudeCodeAdapter } from '../adapters/claude-code/adapter.js';
+import { hostFromPath, rewriteSessionIdForHost } from '../platform/PathResolver.js';
 import { MessageConverter } from '../storage/MessageConverter.js';
 
 export interface SyncResult {
@@ -115,6 +117,9 @@ export class SyncEngine {
       return null;
     }
 
+    // Source host ('native' or 'wsl:<distro>'), derived from the file path.
+    const host = hostFromPath(filePath);
+
     // Vault backup (Layer 1)
     const adapter = this.adapters.getAdapter(platform);
     if (this.vault && adapter?.shouldBackupSource !== false) {
@@ -123,6 +128,7 @@ export class SyncEngine {
           filePath,
           platform,
           sessions.length === 1 ? sessions[0].sessionId : undefined,
+          host,
         );
       } catch {
         // Non-fatal: continue even if backup fails
@@ -146,6 +152,15 @@ export class SyncEngine {
           const meta = await claudeAdapter.getSessionMeta(session.sessionId);
           if (meta) session.meta = meta as Record<string, unknown>;
         } catch { /* non-fatal */ }
+      }
+
+      // Tag the host and give WSL sessions a distinct id so the same
+      // sessionId captured natively and inside WSL never collides in
+      // work_sessions. Done after the meta lookup, which keys on the
+      // original sessionId.
+      session.host = host;
+      if (host !== 'native') {
+        session.sessionId = rewriteSessionIdForHost(session.sessionId, host);
       }
 
       const converted = MessageConverter.convertV2(session);
@@ -187,14 +202,25 @@ export class SyncEngine {
   }
 
   /**
-   * Resolve unlinked subagent links by matching file_path to sync_state
+   * Resolve unlinked subagent links by matching file_path to sync_state.
+   * Link file paths come from parsers (path.join style) while sync_state keys
+   * come from enumeration (glob forward-slash style on Windows), so the
+   * lookup tries the raw path plus both separator variants.
    */
   private resolveSubagentLinks(): void {
     const unresolved = this.db.getUnresolvedSubagentLinks();
     for (const link of unresolved) {
-      const syncState = this.db.getSyncState(link.filePath);
-      if (syncState?.conversationId) {
-        this.db.updateSubagentLinkChild(link.id, syncState.conversationId);
+      const candidates = [
+        link.filePath,
+        link.filePath.replace(/\\/g, '/'),
+        link.filePath.replace(/\//g, path.sep),
+      ];
+      for (const candidate of candidates) {
+        const syncState = this.db.getSyncState(candidate);
+        if (syncState?.conversationId) {
+          this.db.updateSubagentLinkChild(link.id, syncState.conversationId);
+          break;
+        }
       }
     }
   }

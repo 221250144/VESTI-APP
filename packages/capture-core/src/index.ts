@@ -13,12 +13,36 @@ export { CodexParser } from './adapters/codex/parser.js';
 export { CursorAdapter } from './adapters/cursor/adapter.js';
 export { CursorParser } from './adapters/cursor/parser.js';
 export { AiderAdapter } from './adapters/aider/adapter.js';
+export { AiderParser } from './adapters/aider/parser.js';
 export { KimiCodeAdapter } from './adapters/kimi-code/adapter.js';
 export { KimiCodeParser } from './adapters/kimi-code/parser.js';
 export { AdapterManager } from './adapters/AdapterManager.js';
+export { WslDetector, decodeWslOutput, parseWslDistroList, wslDistroRoot } from './platform/WslDetector.js';
+export type { WslDetection, WslDetectorOptions, WslUserHome } from './platform/WslDetector.js';
+export { hostFromPath, nativeHomeRoot, rewriteSessionIdForHost } from './platform/PathResolver.js';
+export type { HomeRoot } from './platform/PathResolver.js';
 export { SyncEngine } from './sync/SyncEngine.js';
 export type { SyncResult, SyncFileResult } from './sync/SyncEngine.js';
 export { SearchEngine } from './search/SearchEngine.js';
+export { serializeVector, deserializeVector, cosineSimilarity, searchByVector } from './search/VectorSearch.js';
+export type { VectorCandidate, VectorMatch } from './search/VectorSearch.js';
+export { recallSessions, recallTokens, toFtsQuery, buildSnippet } from './search/SessionRecall.js';
+export type { SessionRecallHit, SessionRecallOptions } from './search/SessionRecall.js';
+export { buildConversationTree } from './tree/TreeIndex.js';
+export type {
+  ConversationTree,
+  ConversationTreeSource,
+  ConversationTreeProject,
+  ConversationTreeSession,
+} from './tree/TreeIndex.js';
+export {
+  deriveProjectKey,
+  projectBasis,
+  projectLabel,
+  normalizeProjectPath,
+  normalizeGitRemote,
+} from './storage/projectRegistry.js';
+export type { ProjectKeyInput } from './storage/projectRegistry.js';
 export { ExportEngine } from './export/ExportEngine.js';
 export { VaultManager } from './storage/VaultManager.js';
 export { APIServer } from './api/APIServer.js';

@@ -63,7 +63,35 @@ export interface Conversation {
   tags: string[]
   topic_id: number | null
   is_starred: boolean
+  /** P2a auto-classify: 1 when topic_id was assigned by the classifier;
+   * absent/0 means the assignment is manual (or there is none). Non-indexed. */
+  auto_classified?: number
+  /** P2a auto-classify: pending low-confidence topic suggestion awaiting
+   * user confirmation (the "suggestion queue" lives on the record).
+   * Non-indexed. */
+  classify_suggestion?: {
+    topicPath: string[]
+    confidence: number
+    createdAt: number
+  } | null
   has_note?: boolean
+  /** P3 upstream export: last successful Obsidian vault write. Non-indexed. */
+  exported_obsidian_at?: number
+  /** P3 upstream export: vault-relative path of the last Obsidian write;
+   * re-export updates that file in place (frontmatter uuid must match).
+   * Non-indexed. */
+  obsidian_export_path?: string
+  /** P3 upstream export: last Obsidian export failure (shown in Settings).
+   * Non-indexed. */
+  obsidian_export_error?: string | null
+  /** P3 upstream export: Notion page created for this conversation.
+   * Non-indexed. */
+  notion_page_id?: string | null
+  /** P3 upstream export: last successful Notion export. Non-indexed. */
+  exported_notion_at?: number
+  /** P3 upstream export: last Notion export failure (shown in Settings).
+   * Non-indexed. */
+  notion_export_error?: string | null
 }
 
 export interface SearchConversationMatchesQuery {
@@ -867,3 +895,97 @@ export interface WeeklyReportRecord {
 }
 
 export type AsyncStatus = "idle" | "loading" | "ready" | "error"
+
+// ============================================================
+// --- P4a AI Relay (handoff packs) ---
+// ============================================================
+
+// Field-for-field mirror of the relay agent's normalized JSON payload
+// (src/main/agentPrompts.ts); the Dexie relay_packs row stores it verbatim
+// as a JSON string.
+export interface RelayPackKeyFile {
+  path: string
+  why: string
+  last_state: string
+}
+
+export interface RelayPackPayload {
+  title: string
+  goal: string
+  current_state: string
+  key_decisions: string[]
+  key_files: RelayPackKeyFile[]
+  open_issues: string[]
+  next_steps: string[]
+  suggested_prompt: string
+}
+
+export interface RelayPack {
+  id: number
+  createdAt: number
+  title: string
+  conversationIds: number[]
+  pack: RelayPackPayload
+  suggestedPrompt: string
+  source: "manual"
+}
+
+// ============================================================
+// --- P4b Deposits (knowledge deposits area) ---
+// ============================================================
+
+// Distillation templates; 'extract' rows come from the library knowledge
+// extract flow, 'custom' carries the user's own instruction.
+export type DepositTemplate =
+  | "background_knowledge"
+  | "project_state"
+  | "writing_style"
+  | "extract"
+  | "custom"
+
+// Scope of conversations a deposit was distilled from. Stored as a plain
+// JSON object on the Dexie row (non-indexed).
+export type DepositScope =
+  | { kind: "project"; projectKey: string; label: string }
+  | { kind: "topic"; topicId: number; label: string }
+  | { kind: "timerange"; start: number; end: number }
+  | { kind: "selection"; conversationIds: number[] }
+
+export interface Deposit {
+  id: number
+  createdAt: number
+  updatedAt: number
+  template: DepositTemplate
+  title: string
+  scope: DepositScope
+  contentMarkdown: string
+  version: number
+  prevId: number | null
+  customInstruction: string | null
+}
+
+// ============================================================
+// --- P4c Daily Log (daily summaries feeding the weekly report) ---
+// ============================================================
+
+// Aggregated activity counters for one local day. Stored as a plain JSON
+// object on the Dexie row (non-indexed).
+export interface DailyLogStats {
+  cliSessions: number
+  browserConversations: number
+  platforms: string[]
+  projects: string[]
+  messages: number
+}
+
+export interface DailyLog {
+  id: number
+  /** Local calendar day, "YYYY-MM-DD". Unique per row. */
+  date: string
+  createdAt: number
+  updatedAt: number
+  contentMarkdown: string
+  stats: DailyLogStats
+  /** 'auto' rows come from the scheduler, 'manual' from the generate button. */
+  source: "auto" | "manual"
+}

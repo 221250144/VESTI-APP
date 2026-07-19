@@ -11,13 +11,37 @@ import type {
   GeneralSettings,
   LlmAccessMode,
   NetworkSettings,
+  NotionParentType,
   SettingsSaveResult,
 } from '../shared/contracts';
 
 const DEMO_BASE_URL = 'https://vesti-gate.vercel.app/api';
 const CUSTOM_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 const DEMO_SERVICE_TOKEN = 'vesti-kcq-default-d850d4dcd610a0e2e919eb610f42066faff1e1c57c0c047c';
-const PRIMARY_PLATFORMS: CapturePlatform[] = ['codex', 'cursor', 'kimi-code'];
+const PRIMARY_PLATFORMS: CapturePlatform[] = ['codex', 'cursor', 'kimi-code', 'claude-code'];
+export const DEFAULT_EMBEDDING_MODEL = 'text-embedding-3-small';
+
+export interface StoredBridgeClient {
+  clientId: string;
+  client: string;
+  tokenEncrypted: string;
+  pairedAt: number;
+  lastSyncAt: number | null;
+}
+
+/** Bridge Protocol v1.1 relay outbox item (prompts awaiting extension pickup). */
+export interface StoredBridgeOutboxItem {
+  id: number;
+  prompt: string;
+  createdAt: number;
+}
+
+interface StoredBridgeSettings {
+  /** Optional override for the extension bridge port (default 28765). */
+  port?: number;
+  clients?: StoredBridgeClient[];
+  outbox?: StoredBridgeOutboxItem[];
+}
 
 interface StoredSettings {
   version: 2;
@@ -33,7 +57,17 @@ interface StoredSettings {
     temperature: number;
     maxTokens: number;
     encryptedApiKey?: string;
+    embeddingModel?: string;
   };
+  upstream: {
+    obsidianVaultPath: string;
+    obsidianAutoExport: boolean;
+    notionParentId: string;
+    notionParentType: NotionParentType;
+    notionTitleProperty: string;
+    encryptedNotionToken?: string;
+  };
+  bridge?: StoredBridgeSettings;
 }
 
 export interface RuntimeLlmSettings {
@@ -44,6 +78,17 @@ export interface RuntimeLlmSettings {
   maxTokens: number;
   apiKey: string;
   serviceToken: string;
+  embeddingModel: string;
+}
+
+/** Decrypted upstream secrets for main-process services (never sent to the renderer). */
+export interface RuntimeUpstreamSettings {
+  obsidianVaultPath: string;
+  obsidianAutoExport: boolean;
+  notionParentId: string;
+  notionParentType: NotionParentType;
+  notionTitleProperty: string;
+  notionToken: string;
 }
 
 export type RuntimeAgentSettings = AgentSettings;
@@ -94,6 +139,34 @@ export class SettingsService {
     return { ...this.settings.agent };
   }
 
+  getBridgePort(): number | undefined {
+    return this.settings.bridge?.port;
+  }
+
+  getBridgeClients(): StoredBridgeClient[] {
+    return (this.settings.bridge?.clients ?? []).map((client) => ({ ...client }));
+  }
+
+  async saveBridgeClients(clients: StoredBridgeClient[]): Promise<void> {
+    this.settings = {
+      ...this.settings,
+      bridge: { ...this.settings.bridge, clients },
+    };
+    await this.persist();
+  }
+
+  getBridgeOutbox(): StoredBridgeOutboxItem[] {
+    return (this.settings.bridge?.outbox ?? []).map((item) => ({ ...item }));
+  }
+
+  async saveBridgeOutbox(items: StoredBridgeOutboxItem[]): Promise<void> {
+    this.settings = {
+      ...this.settings,
+      bridge: { ...this.settings.bridge, outbox: items },
+    };
+    await this.persist();
+  }
+
   getView(activeDataDirectory: string): AppSettingsView {
     const mode = this.settings.llm.mode;
     return {
@@ -114,7 +187,48 @@ export class SettingsService {
         maxTokens: this.settings.llm.maxTokens,
         apiKeyConfigured: Boolean(this.settings.llm.encryptedApiKey),
       },
+      upstream: {
+        obsidianVaultPath: this.settings.upstream.obsidianVaultPath,
+        obsidianAutoExport: this.settings.upstream.obsidianAutoExport,
+        notionParentId: this.settings.upstream.notionParentId,
+        notionParentType: this.settings.upstream.notionParentType,
+        notionTitleProperty: this.settings.upstream.notionTitleProperty,
+        notionTokenConfigured: Boolean(this.settings.upstream.encryptedNotionToken),
+      },
     };
+  }
+
+  getRuntimeUpstream(): RuntimeUpstreamSettings {
+    let notionToken = '';
+    if (this.settings.upstream.encryptedNotionToken) {
+      if (!safeStorage.isEncryptionAvailable()) {
+        throw new Error('系统安全存储当前不可用，无法读取 Notion Token');
+      }
+      notionToken = safeStorage.decryptString(
+        Buffer.from(this.settings.upstream.encryptedNotionToken, 'base64'),
+      );
+    }
+    return {
+      obsidianVaultPath: this.settings.upstream.obsidianVaultPath,
+      obsidianAutoExport: this.settings.upstream.obsidianAutoExport,
+      notionParentId: this.settings.upstream.notionParentId,
+      notionParentType: this.settings.upstream.notionParentType,
+      notionTitleProperty: this.settings.upstream.notionTitleProperty,
+      notionToken,
+    };
+  }
+
+  /** Persist the parent type/title property resolved by a Notion verify or export. */
+  async saveResolvedNotionParent(type: NotionParentType, titleProperty: string): Promise<void> {
+    this.settings = {
+      ...this.settings,
+      upstream: {
+        ...this.settings.upstream,
+        notionParentType: type,
+        notionTitleProperty: type === 'database' ? titleProperty : '',
+      },
+    };
+    await this.persist();
   }
 
   getRuntimeLlm(): RuntimeLlmSettings {
@@ -133,6 +247,7 @@ export class SettingsService {
       maxTokens: this.settings.llm.maxTokens,
       apiKey,
       serviceToken: DEMO_SERVICE_TOKEN,
+      embeddingModel: this.settings.llm.embeddingModel?.trim() || DEFAULT_EMBEDDING_MODEL,
     };
   }
 
@@ -169,6 +284,21 @@ export class SettingsService {
       : update.network.proxyUrl.trim();
     const outputLanguage = update.agent.outputLanguage === 'en-US' ? 'en-US' : 'zh-CN';
 
+    const obsidianVaultPath = update.upstream.obsidianVaultPath.trim();
+    if (obsidianVaultPath && !path.isAbsolute(obsidianVaultPath)) {
+      throw new Error('Obsidian 库目录必须是绝对路径');
+    }
+    let encryptedNotionToken = this.settings.upstream.encryptedNotionToken;
+    if (update.upstream.clearNotionToken) encryptedNotionToken = undefined;
+    const notionToken = update.upstream.notionToken?.trim();
+    if (notionToken) {
+      if (!safeStorage.isEncryptionAvailable()) {
+        throw new Error('系统安全存储不可用，Vesti 不会以明文保存 Notion Token');
+      }
+      encryptedNotionToken = safeStorage.encryptString(notionToken).toString('base64');
+    }
+    const notionParentType: NotionParentType = update.upstream.notionParentType === 'database' ? 'database' : 'page';
+
     this.settings = {
       version: 2,
       dataDirectory,
@@ -195,7 +325,20 @@ export class SettingsService {
         temperature: this.numberInRange(update.llm.temperature, 0, 2, 0.3),
         maxTokens: Math.round(this.numberInRange(update.llm.maxTokens, 128, 16_384, 1600)),
         encryptedApiKey,
+        // Not editable from the settings UI yet; keep any value present in settings.json.
+        embeddingModel: this.settings.llm.embeddingModel,
       },
+      upstream: {
+        obsidianVaultPath: obsidianVaultPath ? path.resolve(obsidianVaultPath) : '',
+        obsidianAutoExport: Boolean(update.upstream.obsidianAutoExport),
+        notionParentId: update.upstream.notionParentId.trim(),
+        notionParentType,
+        notionTitleProperty: notionParentType === 'database' ? update.upstream.notionTitleProperty.trim() : '',
+        encryptedNotionToken,
+      },
+      // Extension bridge pairing state is managed by the bridge service, not
+      // the settings form; carry it through untouched.
+      bridge: this.settings.bridge,
     };
     await this.persist();
     const settings = this.getView(activeDataDirectory);
@@ -231,6 +374,13 @@ export class SettingsService {
         modelId: 'qwen-plus',
         temperature: 0.3,
         maxTokens: 1600,
+      },
+      upstream: {
+        obsidianVaultPath: '',
+        obsidianAutoExport: false,
+        notionParentId: '',
+        notionParentType: 'page',
+        notionTitleProperty: '',
       },
     };
   }
@@ -291,8 +441,67 @@ export class SettingsService {
         temperature: this.numberInRange(llm.temperature, 0, 2, defaults.llm.temperature),
         maxTokens: Math.round(this.numberInRange(llm.maxTokens, 128, 16_384, defaults.llm.maxTokens)),
         encryptedApiKey: typeof llm.encryptedApiKey === 'string' ? llm.encryptedApiKey : undefined,
+        embeddingModel: typeof llm.embeddingModel === 'string' && llm.embeddingModel.trim()
+          ? llm.embeddingModel.trim()
+          : undefined,
       },
+      upstream: this.mergeUpstream(parsed.upstream, defaults.upstream),
+      bridge: this.mergeBridge(parsed.bridge),
     };
+  }
+
+  private mergeUpstream(
+    upstream: StoredSettings['upstream'] | undefined,
+    defaults: StoredSettings['upstream'],
+  ): StoredSettings['upstream'] {
+    if (!upstream || typeof upstream !== 'object') return { ...defaults };
+    const vaultPath = typeof upstream.obsidianVaultPath === 'string' ? upstream.obsidianVaultPath.trim() : '';
+    return {
+      obsidianVaultPath: vaultPath && path.isAbsolute(vaultPath) ? path.resolve(vaultPath) : '',
+      obsidianAutoExport: typeof upstream.obsidianAutoExport === 'boolean'
+        ? upstream.obsidianAutoExport
+        : defaults.obsidianAutoExport,
+      notionParentId: typeof upstream.notionParentId === 'string'
+        ? upstream.notionParentId.trim()
+        : defaults.notionParentId,
+      notionParentType: upstream.notionParentType === 'database' ? 'database' : 'page',
+      notionTitleProperty: upstream.notionParentType === 'database' && typeof upstream.notionTitleProperty === 'string'
+        ? upstream.notionTitleProperty.trim()
+        : '',
+      encryptedNotionToken: typeof upstream.encryptedNotionToken === 'string'
+        ? upstream.encryptedNotionToken
+        : undefined,
+    };
+  }
+
+  private mergeBridge(bridge: StoredSettings['bridge']): StoredBridgeSettings | undefined {
+    if (!bridge || typeof bridge !== 'object') return undefined;
+    const port = typeof bridge.port === 'number'
+      && Number.isInteger(bridge.port)
+      && bridge.port >= 1
+      && bridge.port <= 65535
+      ? bridge.port
+      : undefined;
+    const clients = Array.isArray(bridge.clients)
+      ? bridge.clients.filter(
+          (client): client is StoredBridgeClient => Boolean(client)
+            && typeof client.clientId === 'string'
+            && typeof client.client === 'string'
+            && typeof client.tokenEncrypted === 'string'
+            && typeof client.pairedAt === 'number',
+        ).map((client) => ({ ...client, lastSyncAt: client.lastSyncAt ?? null }))
+      : undefined;
+    const outbox = Array.isArray(bridge.outbox)
+      ? bridge.outbox.filter(
+          (item): item is StoredBridgeOutboxItem => Boolean(item)
+            && Number.isInteger(item.id)
+            && item.id >= 1
+            && typeof item.prompt === 'string'
+            && typeof item.createdAt === 'number',
+        ).map((item) => ({ ...item }))
+      : undefined;
+    if (port === undefined && clients === undefined && outbox === undefined) return undefined;
+    return { port, clients, outbox };
   }
 
   private async ensureWritableDirectory(directory: string): Promise<void> {

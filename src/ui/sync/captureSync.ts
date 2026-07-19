@@ -101,6 +101,15 @@ async function importBundles(bundles: ConversationExportBundle[]): Promise<void>
         topic_id: prev.topic_id ?? null,
         is_starred: prev.is_starred ?? false,
         tags: Array.isArray(prev.tags) ? prev.tags : conversation.tags,
+        // P2a auto-classify bookkeeping rides the same merge so a re-sync
+        // never wipes it.
+        auto_classified: prev.auto_classified ?? 0,
+        classify_suggestion: prev.classify_suggestion ?? null,
+        // P2b: local trash/archive flags are user organization state; the
+        // source export always reports them false, so without preserving them
+        // a re-sync would silently resurrect organized-away records.
+        is_trash: prev.is_trash ?? false,
+        is_archived: prev.is_archived ?? false,
       };
     });
     await db.conversations.bulkPut(merged);

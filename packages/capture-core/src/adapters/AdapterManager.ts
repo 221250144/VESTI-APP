@@ -7,6 +7,8 @@ import { EventEmitter } from 'events';
 import chokidar from 'chokidar';
 import type { AgentAdapter, AgentDetectResult, ParsedSession } from '../types/agent.js';
 import type { AgentPlatform } from '../types/index.js';
+import { nativeHomeRoot, type HomeRoot } from '../platform/PathResolver.js';
+import { AiderAdapter } from './aider/adapter.js';
 import { ClaudeCodeAdapter } from './claude-code/adapter.js';
 import { CodexAdapter } from './codex/adapter.js';
 import { CursorAdapter } from './cursor/adapter.js';
@@ -24,6 +26,7 @@ export class AdapterManager extends EventEmitter {
   constructor() {
     super();
     // Register built-in adapters
+    this.register(new AiderAdapter());
     this.register(new ClaudeCodeAdapter());
     this.register(new CodexAdapter());
     this.register(new CursorAdapter());
@@ -36,6 +39,20 @@ export class AdapterManager extends EventEmitter {
 
   getAdapter(platform: AgentPlatform): AgentAdapter | undefined {
     return this.adapters.get(platform);
+  }
+
+  /**
+   * Push WSL homes discovered by WslDetector into every adapter that
+   * supports multi-root capture. The native home always stays first.
+   */
+  setWslHomes(wslHomes: Array<{ distro: string; homeUnc: string }>): void {
+    const homes: HomeRoot[] = [
+      nativeHomeRoot(),
+      ...wslHomes.map(home => ({ host: `wsl:${home.distro}`, homeDir: home.homeUnc })),
+    ];
+    for (const adapter of this.adapters.values()) {
+      adapter.setHomeRoots?.(homes);
+    }
   }
 
   /**
@@ -97,7 +114,9 @@ export class AdapterManager extends EventEmitter {
       const watcher = chokidar.watch(patterns, {
         persistent: true,
         ignoreInitial: true,
-        ignored: ['**/subagents/**'],
+        // Subagent files are watched too so subagent_links resolve; they are
+        // append-heavy like main transcripts, and awaitWriteFinish already
+        // debounces events until writes settle.
         awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
       });
 

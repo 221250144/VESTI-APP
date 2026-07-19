@@ -4,9 +4,15 @@ import {
   SyncEngine,
   VaultManager,
   VestiConfig,
+  WslDetector,
+  hostFromPath,
   sessionMessagesToVestiMessages,
   workSessionToVestiConversation,
+  type ConversationTree,
+  type SessionDigest,
+  type SessionRecallHit,
   type SyncResult,
+  type WslDetection,
 } from '@vesti/capture-core';
 import type {
   CapturePlatform,
@@ -16,9 +22,10 @@ import type {
   SessionSummary,
   SourceStatus,
   SyncSummary,
+  WslStatusView,
 } from '../shared/contracts';
 
-const PRIMARY_PLATFORMS: CapturePlatform[] = ['codex', 'cursor', 'kimi-code'];
+const PRIMARY_PLATFORMS: CapturePlatform[] = ['codex', 'cursor', 'kimi-code', 'claude-code'];
 const SOURCE_LABELS: Record<CapturePlatform, string> = {
   codex: 'Codex',
   cursor: 'Cursor',
@@ -33,9 +40,19 @@ export class CaptureService {
   private watching = false;
   private syncing = false;
   private notify?: () => void;
+  private syncCompleted?: () => void;
   private fileQueue = new Map<string, Promise<void>>();
   private basePath = '';
   private enabledPlatforms = new Set<CapturePlatform>(PRIMARY_PLATFORMS);
+  private wslDetection: WslDetection | null = null;
+  private wslDetectedAt: number | null = null;
+  private wslPollTimer: NodeJS.Timeout | null = null;
+  private wslPollIntervalMs: number;
+
+  constructor(options?: { wslPollIntervalMs?: number }) {
+    // Polling fallback for WSL UNC sources; 0 disables it (tests).
+    this.wslPollIntervalMs = options?.wslPollIntervalMs ?? 60_000;
+  }
 
   async initialize(notify: () => void, basePath: string, enabledPlatforms = PRIMARY_PLATFORMS): Promise<void> {
     this.notify = notify;
@@ -49,6 +66,16 @@ export class CaptureService {
     const vault = new VaultManager(config.vaultPath);
     await vault.initialize();
     this.syncEngine = new SyncEngine(this.adapters, this.db, vault);
+    await this.refreshWslDetection();
+  }
+
+  /**
+   * Fired after a sync actually stored session data (full sync, file watch,
+   * WSL poll). The digest pipeline hooks here; unlike `notify`, state-only
+   * changes (watch toggles, sync start) do not trigger it.
+   */
+  setSyncCompletedListener(listener: () => void): void {
+    this.syncCompleted = listener;
   }
 
   get activeDataDirectory(): string {
@@ -57,6 +84,88 @@ export class CaptureService {
 
   get isWatching(): boolean {
     return this.watching;
+  }
+
+  /**
+   * Run WSL detection and push discovered homes into the adapters.
+   * Detection is best-effort: any failure keeps the previous result.
+   */
+  private async refreshWslDetection(): Promise<void> {
+    try {
+      const detection = await new WslDetector().detect();
+      this.wslDetection = detection;
+      this.wslDetectedAt = Date.now();
+      const wslHomes = detection.homes
+        .filter(home => Object.keys(home.roots).length > 0)
+        .map(home => ({ distro: home.distro, homeUnc: home.homeUnc }));
+      this.adapters.setWslHomes(wslHomes);
+    } catch { /* WSL is an optional source — stay native-only */ }
+  }
+
+  getWslStatus(): WslStatusView {
+    const detection = this.wslDetection;
+    return {
+      supported: detection?.supported ?? process.platform === 'win32',
+      distros: detection?.distros ?? [],
+      platforms: PRIMARY_PLATFORMS.map(platform => ({
+        platform,
+        installed: Boolean(detection?.homes.some(home => home.roots[platform])),
+      })),
+      detectedAt: this.wslDetectedAt,
+    };
+  }
+
+  async redetectWsl(): Promise<WslStatusView> {
+    await this.refreshWslDetection();
+    this.notify?.();
+    // Newly discovered sources should flow in without waiting for a file event.
+    void this.syncAll().catch(() => undefined);
+    return this.getWslStatus();
+  }
+
+  /** Polling fallback for WSL UNC sources: chokidar events over the 9P
+   * share are unreliable, so WSL files are re-synced on a fixed interval.
+   * sync_state makes unchanged files a cheap stat + skip. */
+  private startWslPolling(): void {
+    if (this.wslPollTimer || this.wslPollIntervalMs <= 0) return;
+    this.wslPollTimer = setInterval(() => {
+      void this.pollWslOnce().catch(() => undefined);
+    }, this.wslPollIntervalMs);
+    this.wslPollTimer.unref();
+  }
+
+  private stopWslPolling(): void {
+    if (this.wslPollTimer) {
+      clearInterval(this.wslPollTimer);
+      this.wslPollTimer = null;
+    }
+  }
+
+  private async pollWslOnce(): Promise<void> {
+    if (this.syncing) return;
+    if (!this.wslDetection?.homes.some(home => Object.keys(home.roots).length > 0)) return;
+    let changed = false;
+    for (const platform of PRIMARY_PLATFORMS) {
+      if (!this.enabledPlatforms.has(platform)) continue;
+      const adapter = this.adapters.getAdapter(platform);
+      if (!adapter) continue;
+      let files: string[];
+      try {
+        files = (await adapter.getSessionFiles()).filter(file => hostFromPath(file) !== 'native');
+      } catch {
+        continue; // WSL share unreachable — retry on the next tick
+      }
+      for (const filePath of files) {
+        try {
+          const stored = await this.syncEngine.syncFile(platform, filePath);
+          changed = changed || stored !== null;
+        } catch { /* keep the poll loop resilient */ }
+      }
+    }
+    if (changed) {
+      this.syncCompleted?.();
+      this.notify?.();
+    }
   }
 
   async getOverview(): Promise<Overview> {
@@ -120,6 +229,24 @@ export class CaptureService {
     });
   }
 
+  // ---- P1.5: digest store surface + conversation tree + session recall ----
+
+  listSessionsNeedingDigest(digestVersion: number): Array<{ id: string; messageCount: number }> {
+    return this.db.listSessionsNeedingDigest(digestVersion);
+  }
+
+  upsertSessionDigest(digest: SessionDigest): void {
+    this.db.upsertSessionDigest(digest);
+  }
+
+  getConversationTree(): ConversationTree {
+    return this.db.buildConversationTree();
+  }
+
+  recallSessions(query: string, topK: number, queryVector: Float32Array | null): SessionRecallHit[] {
+    return this.db.recallSessions(query, { topK, queryVector });
+  }
+
   async syncAll(): Promise<SyncSummary> {
     if (this.syncing) return { sessions: 0, messages: 0, tools: 0, errors: [] };
     this.syncing = true;
@@ -139,7 +266,9 @@ export class CaptureService {
         const platformFiles = byPlatform.get(platform);
         if (platformFiles?.length) results.push(await this.syncEngine.syncPlatform(platform, platformFiles));
       }
-      return this.summarize(results);
+      const summary = this.summarize(results);
+      if (summary.sessions > 0 || summary.messages > 0) this.syncCompleted?.();
+      return summary;
     } finally {
       this.syncing = false;
       this.notify?.();
@@ -150,6 +279,7 @@ export class CaptureService {
     if (enabled === this.watching) return this.watching;
     if (!enabled) {
       await this.adapters.stopWatching();
+      this.stopWslPolling();
       this.watching = false;
       this.notify?.();
       return false;
@@ -162,7 +292,8 @@ export class CaptureService {
       const next = previous
         .catch(() => undefined)
         .then(async () => {
-          await this.syncEngine.syncFile(platform, filePath);
+          const stored = await this.syncEngine.syncFile(platform, filePath);
+          if (stored) this.syncCompleted?.();
           this.notify?.();
         })
         .finally(() => {
@@ -170,6 +301,7 @@ export class CaptureService {
         });
       this.fileQueue.set(key, next);
     });
+    this.startWslPolling();
     this.watching = true;
     this.notify?.();
     return true;
@@ -191,6 +323,7 @@ export class CaptureService {
 
   async close(): Promise<void> {
     await this.adapters.stopWatching();
+    this.stopWslPolling();
     await Promise.allSettled(this.fileQueue.values());
     await this.db.close();
   }
