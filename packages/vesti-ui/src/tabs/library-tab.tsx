@@ -15,6 +15,7 @@ import {
 import {
   BookOpen,
   ArrowLeft,
+  Bot,
   ChevronDown,
   ExternalLink,
   Expand,
@@ -81,8 +82,10 @@ import { RelayPanel } from "./library/RelayPanel";
 import {
   buildConversationTreeLookup,
   buildSourceTreeModel,
+  collectSubagentTopics,
   describeSelection,
   filterConversationsBySelection,
+  isSubagentConversation,
   type SourceSelection,
 } from "./library/sourceTree";
 
@@ -567,6 +570,10 @@ export function LibraryTab({
     "all",
   );
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
+  // A1: per-card expansion of the "N subagents" strip (default collapsed).
+  const [expandedSubagentCards, setExpandedSubagentCards] = useState<
+    Record<number, boolean>
+  >({});
   // P2b: source-tree selection (source/project/topic) — an extra filter
   // dimension on top of listFilter/selectedTag, cleared by the same actions
   // that clear those.
@@ -1382,13 +1389,26 @@ export function LibraryTab({
     }
   }, [renameNoteTarget]);
 
+  // P2b/A1: source-tree lookup. Built early because both the detail header
+  // and the conversation list below fold subagent sessions under parents.
+  const treeLookup = useMemo(
+    () => buildConversationTreeLookup(conversationTree),
+    [conversationTree],
+  );
   const selectedConversation = conversations.find(
     (c) => c.id === selectedConversationId,
-  );
-  const selectedDigest =
+  );  const selectedDigest =
     selectedConversationId !== null
       ? digestByConversationId.get(selectedConversationId) ?? null
       : null;
+  // A1: subagent key_topics merged into the parent digest header (read-only;
+  // nothing is written back to the digest store).
+  const selectedSubagentTopics = useMemo(() => {
+    const cliId = (selectedConversation as { _cli_id?: unknown } | undefined)
+      ?._cli_id;
+    if (typeof cliId !== "string") return [];
+    return collectSubagentTopics(treeLookup.subagentsByParentId.get(cliId), 5);
+  }, [selectedConversation, treeLookup]);
   const activeAnnotationMessage =
     activeAnnotationMessageId !== null
       ? messages.find((message) => message.id === activeAnnotationMessageId) ??
@@ -1473,9 +1493,30 @@ export function LibraryTab({
     }).trim();
     return preview || "Messages are available, but preview text is empty.";
   }, [messages, messagesLoading]);
+  // A1: the library list shows main sessions only; subagent sessions surface
+  // through the parent card's "N subagents" strip.
+  const mainConversations = useMemo(
+    () =>
+      conversations.filter(
+        (conversation) => !isSubagentConversation(conversation, treeLookup),
+      ),
+    [conversations, treeLookup],
+  );
+  // A1: cli session id → Dexie record, so subagent strip rows can open the
+  // child conversation with the regular selection mechanism.
+  const conversationByCliId = useMemo(() => {
+    const map = new Map<string, Conversation>();
+    for (const conversation of conversations) {
+      const cliId = (conversation as { _cli_id?: unknown })._cli_id;
+      if (typeof cliId === "string" && !map.has(cliId)) {
+        map.set(cliId, conversation);
+      }
+    }
+    return map;
+  }, [conversations]);
   const tagCounts = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const conversation of conversations) {
+    for (const conversation of mainConversations) {
       for (const tag of normalizeTags(conversation.tags)) {
         const normalized = tag.trim();
         if (!normalized) continue;
@@ -1485,19 +1526,19 @@ export function LibraryTab({
     return Array.from(counts.entries())
       .map(([tag, count]) => ({ tag, count }))
       .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
-  }, [conversations]);
+  }, [mainConversations]);
 
   const starredCount = useMemo(
     () =>
-      conversations.filter((conversation) => conversation.is_starred).length,
-    [conversations],
+      mainConversations.filter((conversation) => conversation.is_starred).length,
+    [mainConversations],
   );
   const recentConversations = useMemo(() => {
-    const sorted = [...conversations].sort(
+    const sorted = [...mainConversations].sort(
       (a, b) => b.updated_at - a.updated_at,
     );
     return sorted.slice(0, 20);
-  }, [conversations]);
+  }, [mainConversations]);
   const folderItems = useMemo<FolderItem[]>(() => {
     const normalize = (value: string) => value.trim().toLowerCase();
     const used = new Set<string>();
@@ -1532,22 +1573,18 @@ export function LibraryTab({
 
   const baseConversations =
     listFilter === "starred"
-      ? conversations.filter((conversation) => conversation.is_starred)
+      ? mainConversations.filter((conversation) => conversation.is_starred)
       : listFilter === "recent"
         ? recentConversations
-        : conversations;
+        : mainConversations;
   const tagFilteredConversations = selectedTag
     ? baseConversations.filter((conversation) =>
         normalizeTags(conversation.tags).includes(selectedTag),
       )
     : baseConversations;
 
-  // P2b: source-tree lookup + aggregated nav model + the extra filter
-  // dimension (source/project/topic) applied on top of the existing filters.
-  const treeLookup = useMemo(
-    () => buildConversationTreeLookup(conversationTree),
-    [conversationTree],
-  );
+  // P2b: aggregated nav model + the extra filter dimension (source/project/
+  // topic) applied on top of the existing filters.
   const sourceTreeModel = useMemo(
     () =>
       buildSourceTreeModel({
@@ -3806,6 +3843,15 @@ export function LibraryTab({
                     {visibleConversations.map((conv) => {
                       const isSelected = conv.id === selectedConversationId;
                       const isRelayChecked = relaySelectedIds.includes(conv.id);
+                      // A1: subagent sessions fold under this main session's
+                      // card (default collapsed).
+                      const convCliId = (conv as { _cli_id?: unknown })._cli_id;
+                      const subagentChildren =
+                        typeof convCliId === "string"
+                          ? treeLookup.subagentsByParentId.get(convCliId) ?? []
+                          : [];
+                      const subagentsExpanded =
+                        expandedSubagentCards[conv.id] === true;
                       return (
                         <div
                           key={conv.id}
@@ -4055,6 +4101,74 @@ export function LibraryTab({
                               </div>
                             </div>
                           </div>
+                          {subagentChildren.length > 0 && (
+                            <div
+                              className="mt-2 border-t border-border-subtle pt-1.5"
+                              onClick={(event) => event.stopPropagation()}
+                              onKeyDown={(event) => event.stopPropagation()}
+                            >
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExpandedSubagentCards((prev) => ({
+                                    ...prev,
+                                    [conv.id]: !subagentsExpanded,
+                                  }))
+                                }
+                                aria-expanded={subagentsExpanded}
+                                className="flex items-center gap-1.5 text-[11px] font-sans text-text-tertiary transition-colors hover:text-text-secondary"
+                              >
+                                <ChevronDown
+                                  strokeWidth={1.75}
+                                  className={`h-3.5 w-3.5 transition-transform duration-150 ${
+                                    subagentsExpanded ? "" : "-rotate-90"
+                                  }`}
+                                />
+                                <Bot strokeWidth={1.75} className="h-3.5 w-3.5" />
+                                <span>
+                                  {subagentChildren.length}{" "}
+                                  {labels.subagents ?? "subagents"}
+                                </span>
+                              </button>
+                              {subagentsExpanded ? (
+                                <div className="mt-1 space-y-0.5">
+                                  {subagentChildren.map((child) => {
+                                    const childConversation =
+                                      conversationByCliId.get(child.id);
+                                    return (
+                                      <button
+                                        key={child.id}
+                                        type="button"
+                                        disabled={!childConversation}
+                                        onClick={() => {
+                                          if (!childConversation) return;
+                                          void selectConversation(
+                                            childConversation.id,
+                                            {
+                                              closeNavigation: isSplitActive,
+                                            },
+                                          );
+                                        }}
+                                        className="flex w-full items-center gap-2 rounded-md py-1 pl-6 pr-2 text-left transition-colors hover:bg-bg-surface-card-hover disabled:cursor-default disabled:opacity-60"
+                                      >
+                                        <Bot
+                                          strokeWidth={1.75}
+                                          className="h-3.5 w-3.5 shrink-0 text-text-tertiary"
+                                        />
+                                        <span className="min-w-0 flex-1 truncate text-[12px] font-sans text-text-secondary">
+                                          {childConversation?.title ||
+                                            child.title}
+                                        </span>
+                                        <span className="shrink-0 text-[11px] font-sans text-text-tertiary">
+                                          {child.messageCount}
+                                        </span>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              ) : null}
+                            </div>
+                          )}
                         </div>
                       );
                     })}
@@ -4363,6 +4477,18 @@ export function LibraryTab({
                           ))}
                         </div>
                       )}
+                    {selectedSubagentTopics.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-[11px] font-sans uppercase tracking-[0.08em] text-text-tertiary">
+                          {labels.subagentHighlights ?? "Subagent highlights"}
+                        </span>
+                        {selectedSubagentTopics.map((topic) => (
+                          <MetaChip key={`subagent-topic:${topic}`}>
+                            {topic}
+                          </MetaChip>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   {activeTopicName ? (

@@ -78,7 +78,8 @@ export interface RelayPackRecord {
 
 // P4b deposits: persisted knowledge deposits. scope rides along as a plain
 // JSON object (non-indexed); created_at/template are indexed for ordering
-// and per-template filtering.
+// and per-template filtering. last_ops (mem0-style maintain ops, JSON string)
+// is non-indexed too — no schema bump needed.
 export interface DepositRecord {
   id?: number;
   created_at: number;
@@ -90,6 +91,7 @@ export interface DepositRecord {
   version: number;
   prev_id: number | null;
   custom_instruction: string | null;
+  last_ops?: string | null;
 }
 
 // P4c daily logs: one row per local calendar day. date is unique (upsert

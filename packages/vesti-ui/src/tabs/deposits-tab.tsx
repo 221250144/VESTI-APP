@@ -31,6 +31,7 @@ import type {
   Conversation,
   ConversationTree,
   Deposit,
+  DepositMaintainOp,
   DepositScope,
   DepositTemplate,
   RelayAvailability,
@@ -109,6 +110,24 @@ function findDepositHeads(deposits: Deposit[]): Deposit[] {
     .sort((a, b) => b.createdAt - a.createdAt);
 }
 
+/** Count mem0-style maintain ops by kind; NOOPs don't count as changes. */
+function countMaintainOps(ops: DepositMaintainOp[]): {
+  added: number;
+  updated: number;
+  deleted: number;
+  total: number;
+} {
+  let added = 0;
+  let updated = 0;
+  let deleted = 0;
+  for (const op of ops) {
+    if (op.op === "ADD") added += 1;
+    else if (op.op === "UPDATE") updated += 1;
+    else if (op.op === "DELETE") deleted += 1;
+  }
+  return { added, updated, deleted, total: added + updated + deleted };
+}
+
 /** Walk a version chain newest → oldest (cycle-safe, stops on dangling ids). */
 function collectVersionChain(deposits: Deposit[], headId: number): Deposit[] {
   const byId = new Map(deposits.map((deposit) => [deposit.id, deposit]));
@@ -170,6 +189,7 @@ export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps)
   const [renameTitle, setRenameTitle] = useState("");
   const [exportOpen, setExportOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [opsOpen, setOpsOpen] = useState(false);
 
   const available = Boolean(storage.listDeposits && storage.generateDeposit);
   const llmMissing = availability !== null && !availability.llmConfigured;
@@ -324,6 +344,7 @@ export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps)
     setComposerTemplate(null);
     setRenaming(false);
     setExportOpen(false);
+    setOpsOpen(false);
     setNotice(null);
   };
 
@@ -989,6 +1010,17 @@ export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps)
               <p className="mt-2 text-vesti-sm font-sans text-danger">{notice}</p>
             ) : null}
 
+            {/* Maintain-ops summary (mem0-style merge), when this version was
+                produced by a maintain pass. */}
+            {viewDeposit.lastOps && viewDeposit.lastOps.length > 0 ? (
+              <MaintainOpsBadge
+                ops={viewDeposit.lastOps}
+                open={opsOpen}
+                onToggle={() => setOpsOpen((value) => !value)}
+                l={l}
+              />
+            ) : null}
+
             {/* Version chain */}
             {chain.length > 1 ? (
               <div className="mt-3 flex flex-wrap items-center gap-1.5">
@@ -1038,6 +1070,90 @@ export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps)
           </div>
         )}
       </main>
+    </div>
+  );
+}
+
+/** Change-summary badge for a maintain-merged deposit version, expandable to
+ * the per-op details (section, old → new text, reason). */
+function MaintainOpsBadge({
+  ops,
+  open,
+  onToggle,
+  l,
+}: {
+  ops: DepositMaintainOp[];
+  open: boolean;
+  onToggle: () => void;
+  l: (key: string, fallback: string) => string;
+}) {
+  const counts = countMaintainOps(ops);
+  const opLabel = (op: DepositMaintainOp["op"]): string => {
+    switch (op) {
+      case "ADD":
+        return l("opAdd", "Add");
+      case "UPDATE":
+        return l("opUpdate", "Update");
+      case "DELETE":
+        return l("opDelete", "Delete");
+      case "NOOP":
+        return l("opNoop", "Keep");
+    }
+  };
+  return (
+    <div className="mt-3 rounded-lg border border-border-subtle bg-bg-surface-card">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left"
+      >
+        <span className="inline-flex items-center rounded-full bg-accent-primary-light px-2.5 py-0.5 text-vesti-sm font-sans font-medium text-accent-primary">
+          {l("opsBadge", "{total} changes: {added} added · {updated} updated · {deleted} deleted")
+            .replace("{total}", String(counts.total))
+            .replace("{added}", String(counts.added))
+            .replace("{updated}", String(counts.updated))
+            .replace("{deleted}", String(counts.deleted))}
+        </span>
+        <ChevronDown
+          strokeWidth={1.75}
+          className={`h-3.5 w-3.5 text-text-tertiary transition-transform ${open ? "rotate-180" : ""}`}
+        />
+      </button>
+      {open ? (
+        <ul className="space-y-2 border-t border-border-subtle px-3 py-2.5">
+          {ops.map((op, index) => (
+            <li key={index} className="text-vesti-sm font-sans">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span
+                  className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                    op.op === "DELETE"
+                      ? "bg-bg-tertiary text-danger"
+                      : op.op === "NOOP"
+                        ? "bg-bg-tertiary text-text-tertiary"
+                        : "bg-bg-tertiary text-text-secondary"
+                  }`}
+                >
+                  {opLabel(op.op)}
+                </span>
+                <span className="font-medium text-text-primary">{op.section}</span>
+              </div>
+              {op.old_text ? (
+                <p className="mt-1 whitespace-pre-wrap text-text-tertiary line-through">
+                  {op.old_text}
+                </p>
+              ) : null}
+              {op.new_text ? (
+                <p className="mt-1 whitespace-pre-wrap text-text-primary">{op.new_text}</p>
+              ) : null}
+              {op.reason ? (
+                <p className="mt-1 text-text-tertiary">
+                  {l("opsReason", "Reason")}: {op.reason}
+                </p>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </div>
   );
 }

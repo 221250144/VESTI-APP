@@ -4,6 +4,9 @@
 // ============================================================
 
 import type { AstRoot, AstVersion } from "./ast"
+import type { DepositMaintainOp } from "../../shared/depositMaintain"
+
+export type { DepositMaintainOp } from "../../shared/depositMaintain"
 
 export type Platform =
   | "ChatGPT"
@@ -137,6 +140,8 @@ export interface RelatedConversation {
   title: string
   platform: Platform
   similarity: number
+  /** A1: the recall hit surfaced through a subagent of this conversation. */
+  fromSubagent?: boolean
 }
 
 export type ExploreMode = "agent" | "classic"
@@ -902,21 +907,53 @@ export type AsyncStatus = "idle" | "loading" | "ready" | "error"
 
 // Field-for-field mirror of the relay agent's normalized JSON payload
 // (src/main/agentPrompts.ts); the Dexie relay_packs row stores it verbatim
-// as a JSON string.
+// as a JSON string. Schema v2: completed/in_progress/git_state/failed_paths/
+// verification/confidence are additive — stored v1 packs lack them and are
+// normalized at render time (normalizeRelayPackPayload in @vesti/ui).
 export interface RelayPackKeyFile {
   path: string
   why: string
   last_state: string
 }
 
+export interface RelayPackGitState {
+  branch?: string
+  dirty_files: string[]
+  last_commits: string[]
+}
+
+export interface RelayPackFailedPath {
+  approach: string
+  why_failed: string
+}
+
+export interface RelayPackVerification {
+  commands: string[]
+  last_results: string[]
+}
+
+export interface RelayPackConfidence {
+  /** 0-1 overall confidence. */
+  overall: number
+  low_areas: string[]
+}
+
 export interface RelayPackPayload {
   title: string
   goal: string
+  /** v1 free-text state; v2 packs carry completed/in_progress instead. */
   current_state: string
+  completed: string[]
+  in_progress: string[]
+  git_state: RelayPackGitState
   key_decisions: string[]
   key_files: RelayPackKeyFile[]
+  failed_paths: RelayPackFailedPath[]
   open_issues: string[]
+  verification: RelayPackVerification
   next_steps: string[]
+  /** Absent on v1 packs and when the model gave no usable confidence. */
+  confidence?: RelayPackConfidence
   suggested_prompt: string
 }
 
@@ -962,6 +999,10 @@ export interface Deposit {
   version: number
   prevId: number | null
   customInstruction: string | null
+  /** mem0-style maintain ops recorded when this version was merged from a
+   * fresh distillation (null when stored without a maintain pass — fresh v1,
+   * or maintain unavailable/failed). Non-indexed; keeps the chain auditable. */
+  lastOps?: DepositMaintainOp[] | null
 }
 
 // ============================================================

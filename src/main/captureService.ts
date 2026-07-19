@@ -18,6 +18,7 @@ import type {
   CapturePlatform,
   ConversationExportBundle,
   Overview,
+  RelaySessionContext,
   SessionDetail,
   SessionSummary,
   SourceStatus,
@@ -245,6 +246,33 @@ export class CaptureService {
 
   recallSessions(query: string, topK: number, queryVector: Float32Array | null): SessionRecallHit[] {
     return this.db.recallSessions(query, { topK, queryVector });
+  }
+
+  /**
+   * P4a relay v2: per-session git fields (work_sessions) plus the full digest
+   * (session_digests.open_questions never reaches the conversation tree, so
+   * the relay pipeline reads it straight from the store).
+   */
+  getRelaySessionContexts(sessionIds: string[]): RelaySessionContext[] {
+    const unique = [...new Set(sessionIds)];
+    return unique.map((id) => {
+      const session = this.db.getWorkSession(id);
+      const digest = session ? this.db.getSessionDigest(id) : null;
+      return {
+        sessionId: id,
+        gitBranch: session?.gitBranch ?? null,
+        gitRemote: session?.gitRemote ?? null,
+        digest: digest
+          ? {
+              oneLiner: digest.oneLiner || null,
+              keyTopics: digest.keyTopics,
+              keyFiles: digest.keyFiles,
+              decisions: digest.decisions,
+              openQuestions: digest.openQuestions,
+            }
+          : null,
+      };
+    });
   }
 
   async syncAll(): Promise<SyncSummary> {

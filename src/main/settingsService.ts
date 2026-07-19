@@ -41,6 +41,10 @@ interface StoredBridgeSettings {
   port?: number;
   clients?: StoredBridgeClient[];
   outbox?: StoredBridgeOutboxItem[];
+  /** Bridge Protocol v1.2: exact chrome-extension://<id> origins allowed to
+   * call the browser-facing endpoints. Empty/absent = no Origin enforcement
+   * (the TOFU confirm dialog remains the gate). */
+  originAllowlist?: string[];
 }
 
 interface StoredSettings {
@@ -157,6 +161,10 @@ export class SettingsService {
 
   getBridgeOutbox(): StoredBridgeOutboxItem[] {
     return (this.settings.bridge?.outbox ?? []).map((item) => ({ ...item }));
+  }
+
+  getBridgeOriginAllowlist(): string[] {
+    return [...(this.settings.bridge?.originAllowlist ?? [])];
   }
 
   async saveBridgeOutbox(items: StoredBridgeOutboxItem[]): Promise<void> {
@@ -500,8 +508,17 @@ export class SettingsService {
             && typeof item.createdAt === 'number',
         ).map((item) => ({ ...item }))
       : undefined;
-    if (port === undefined && clients === undefined && outbox === undefined) return undefined;
-    return { port, clients, outbox };
+    const originAllowlist = Array.isArray(bridge.originAllowlist)
+      ? [...new Set(
+          bridge.originAllowlist
+            .filter((origin): origin is string => typeof origin === 'string' && Boolean(origin.trim()))
+            .map((origin) => origin.trim()),
+        )]
+      : undefined;
+    if (port === undefined && clients === undefined && outbox === undefined && originAllowlist === undefined) {
+      return undefined;
+    }
+    return { port, clients, outbox, originAllowlist };
   }
 
   private async ensureWritableDirectory(directory: string): Promise<void> {

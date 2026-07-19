@@ -22,8 +22,13 @@ import { DailyTab } from "./tabs/daily-tab";
 import { LibraryTab } from "./tabs/library-tab";
 import { NetworkTab } from "./tabs/network-tab";
 import { PromptsTab } from "./tabs/prompts-tab";
-import type { AitiImagery, AitiProfile, DashboardLabels, LearnProfile, PlazaData, StorageApi, UiThemeMode } from "./types";
+import type { AitiImagery, AitiProfile, DashboardLabels, LearnProfile, PlazaData, StorageApi, SummaryBatchState, SummaryCoverage, UiThemeMode } from "./types";
 import type { NotionDatabaseOption, NotionSettings } from "./notion-integration";
+import {
+  advanceSummaryBatch,
+  createSummaryBatchProgress,
+  planSummaryBatch,
+} from "./lib/summaryBatch";
 import {
   connectToNotion,
   disconnectNotion,
@@ -38,6 +43,7 @@ import {
 export type Tab = "library" | "explore" | "network" | "prompts" | "deposits" | "daily";
 type DrawerView = "settings" | "data";
 type ReturnTab = Exclude<Tab, "library">;
+type ExploreSubMode = "ask" | "aiti" | "learn" | "roundtable";
 type DashboardNavRequest = {
   tab?: unknown;
   requestedAt?: unknown;
@@ -45,6 +51,16 @@ type DashboardNavRequest = {
 type ThemeSyncStatus = "idle" | "syncing" | "error";
 
 const DASHBOARD_NAV_REQUEST_KEY = "vesti_dashboard_open_tab";
+/** Explore pill 选择记忆: reopening the app returns to the last sub-mode. */
+const EXPLORE_MODE_STORAGE_KEY = "vesti.explore.mode";
+
+function readStoredExploreMode(): ExploreSubMode {
+  if (typeof window === "undefined") return "ask";
+  const raw = window.localStorage.getItem(EXPLORE_MODE_STORAGE_KEY);
+  return raw === "ask" || raw === "aiti" || raw === "learn" || raw === "roundtable"
+    ? raw
+    : "ask";
+}
 
 const DEFAULT_LABELS: DashboardLabels = {
   tabs: { library: "LIBRARY", explore: "EXPLORE", network: "KNOWLEDGE GRAPH", prompts: "PROMPTS", deposits: "DEPOSITS", daily: "DAILY" },
@@ -339,6 +355,8 @@ const DEFAULT_LABELS: DashboardLabels = {
     multipleConversationsSelected: "{count} conversations selected",
     newChat: "New Chat",
     noConversationsYet: "No conversations yet",
+    libraryEmptyTitle: "Nothing to recall yet",
+    libraryEmptyHint: "Sync your AI sessions first, then come back — answers are recalled across your conversation library and cited with sources.",
     today: "Today",
     yesterday: "Yesterday",
     earlier: "Earlier",
@@ -372,11 +390,11 @@ const DEFAULT_LABELS: DashboardLabels = {
     starterDeck3Description: "Use a starter prompt to get a compact answer, then inspect the source conversations if you need verification.",
     modeStages: {
       agent: [
-        "Planning the route...",
-        "Scanning lightweight library cues...",
-        "Collecting source evidence...",
-        "Compiling context draft...",
-        "Synthesizing a longer answer...",
+        "Understanding your question...",
+        "Recalling relevant sessions...",
+        "Organizing recalled sources...",
+        "Generating the answer from sources...",
+        "Polishing the final answer...",
       ],
       classic: [
         "Understanding your question...",
@@ -756,7 +774,7 @@ const DEFAULT_LABELS: DashboardLabels = {
     modeRoundtable: "Roundtable",
     title: "Your AITI — your thinking strengths",
     subtitle: "Computed locally from your own conversations. A reflection of your strengths, not a verdict.",
-    insufficient: "Your imagery has not taken shape yet — a few more conversations with AI and it will emerge.",
+    insufficient: "Your imagery has not taken shape yet — it needs at least 5 conversation summaries as signal. Generate summaries below, or keep chatting with your AI and it will emerge.",
     sample: "Drawn from {n} of your conversations",
     typeSeparator: " · ",
     strengthsTitle: "Your thinking strengths",
@@ -790,12 +808,21 @@ const DEFAULT_LABELS: DashboardLabels = {
     evidenceBecause: "This is so you, because…",
     evidenceConversation: "Conversation #{id}",
     exportCard: "Export imagery card",
+    coverageSummary: "Summarized {x} of {y} conversations ({z} structured)",
+    coverageNeedMore: "The imagery needs at least 5 structured summaries — {n} more to go.",
+    coverageEmpty: "No conversations yet — sync your AI sessions first, then summaries can be generated.",
+    generateSummaries: "Generate summaries",
+    generatingSummaries: "Generating {done}/{total}…",
+    cancelGeneration: "Stop",
+    summariesResult: "Finished: {done} generated, {failed} failed.",
+    llmMissing: "No model configured — set up an LLM in Settings first, then generate summaries.",
+    allSummarized: "Every conversation already has a structured summary.",
   },
   learn: {
     modeLearn: "Learn",
     title: "What you've been learning",
     subtitle: "Your conversations, organized as a personal curriculum. Computed locally.",
-    insufficient: "Not enough conversations yet — keep chatting and your learning map will fill in.",
+    insufficient: "Not enough conversations yet — with at least 3 captured conversations your learning map starts to grow here. Ask a few questions in the Ask tab first.",
     sample: "From {n} analyzed conversations",
     domainsTitle: "Knowledge domains",
     uncategorized: "Uncategorized",
@@ -803,10 +830,13 @@ const DEFAULT_LABELS: DashboardLabels = {
     glossaryTitle: "Things you've learned",
     openLoopsTitle: "Open loops",
     openLoopsEmpty: "No unresolved threads — nicely closed out.",
+    weakHint: "Still a thin sample — generate summaries for more conversations (see the AITI tab) and this map will fill in.",
   },
   roundtable: {
     title: "AI Roundtable",
     subtitle: "Convene a panel of perspectives on your question, then a moderated synthesis.",
+    comingSoonTitle: "AI Roundtable — coming soon",
+    comingSoonBody: "The plan: convene several AI panelists with distinct perspectives on your question, then have a moderator synthesize the consensus, the disagreements, and a recommendation. The multi-turn orchestration is still being polished — until it is real, we'd rather not show you a fake run.",
     questionPlaceholder: "Ask a judgment-call question to debate…",
     personasLabel: "Panelists (pick up to 3)",
     run: "Convene panel",
@@ -900,7 +930,81 @@ export function VestiDashboard({
   useEffect(() => {
     if (controlledTab) setInternalTab(controlledTab);
   }, [controlledTab]);
-  const [exploreMode, setExploreMode] = useState<"ask" | "aiti" | "learn" | "roundtable">("ask");
+  const [exploreMode, setExploreMode] = useState<ExploreSubMode>(() => readStoredExploreMode());
+  // Explore 子模式记忆: persist the pill choice so a restart lands back on it.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(EXPLORE_MODE_STORAGE_KEY, exploreMode);
+  }, [exploreMode]);
+
+  // AITI 摘要覆盖率 + 立即生成摘要 batch state (undefined coverage → the
+  // host storage doesn't implement the coverage API and the header hides).
+  const summaryCoverageSupported = Boolean(storage.getSummaryCoverage);
+  const [aitiCoverage, setAitiCoverage] = useState<SummaryCoverage | null>(null);
+  const [aitiCoverageFailed, setAitiCoverageFailed] = useState(false);
+  const [llmConfigured, setLlmConfigured] = useState<boolean | undefined>(undefined);
+  const [summaryBatch, setSummaryBatch] = useState<SummaryBatchState | null>(null);
+  const summaryBatchCancelRef = useRef(false);
+
+  const refreshAitiCoverage = useCallback(async () => {
+    if (!storage.getSummaryCoverage) return;
+    try {
+      const coverage = await storage.getSummaryCoverage();
+      setAitiCoverage(coverage);
+      setAitiCoverageFailed(false);
+    } catch {
+      // Hide the header on failure rather than spinning forever.
+      setAitiCoverageFailed(true);
+    }
+    if (storage.getLlmConfigured) {
+      const configured = await storage.getLlmConfigured().catch(() => false);
+      setLlmConfigured(configured);
+    }
+  }, [storage]);
+
+  useEffect(() => {
+    if (exploreMode !== "aiti" || !summaryCoverageSupported) return;
+    void refreshAitiCoverage();
+    // Stay in step with capture syncs (and with our own batch completion,
+    // which fires the same event) while the aiti pane is visible.
+    const handler = () => void refreshAitiCoverage();
+    window.addEventListener("vesti:data-updated", handler);
+    return () => window.removeEventListener("vesti:data-updated", handler);
+  }, [exploreMode, refreshAitiCoverage, summaryCoverageSupported]);
+
+  // 立即生成摘要: strictly sequential (concurrency 1), capped by
+  // planSummaryBatch; failures are counted and the run continues.
+  const handleGenerateSummaries = useCallback(async () => {
+    if (!storage.generateSummary || !aitiCoverage || summaryBatch?.status === "running") return;
+    const ids = planSummaryBatch(aitiCoverage.pendingConversationIds);
+    if (ids.length === 0) return;
+    summaryBatchCancelRef.current = false;
+    let progress = createSummaryBatchProgress(ids.length);
+    setSummaryBatch({ status: "running", ...progress });
+    for (const id of ids) {
+      if (summaryBatchCancelRef.current) break;
+      let outcome: "ok" | "failed" = "ok";
+      try {
+        await storage.generateSummary(id);
+      } catch (error) {
+        console.error("[Explore] Summary generation failed for conversation", id, error);
+        outcome = "failed";
+      }
+      progress = advanceSummaryBatch(progress, outcome);
+      setSummaryBatch({ status: "running", ...progress });
+    }
+    setSummaryBatch({ status: "done", ...progress });
+    // Same recompute trigger as a capture sync: the host recomputes AITI /
+    // Learn from the freshly written summaries when it hears this.
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("vesti:data-updated"));
+    }
+    await refreshAitiCoverage();
+  }, [storage, aitiCoverage, summaryBatch?.status, refreshAitiCoverage]);
+
+  const handleCancelSummaryBatch = useCallback(() => {
+    summaryBatchCancelRef.current = true;
+  }, []);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerView, setDrawerView] = useState<DrawerView>("settings");
@@ -1407,6 +1511,15 @@ export function VestiDashboard({
                     onOpenConversation={handleOpenConversation}
                     storage={storage}
                     sendToLabels={labels.library}
+                    coverage={
+                      summaryCoverageSupported && !aitiCoverageFailed ? aitiCoverage : undefined
+                    }
+                    llmConfigured={llmConfigured}
+                    summaryBatch={summaryBatch}
+                    onGenerateSummaries={
+                      storage.generateSummary ? handleGenerateSummaries : undefined
+                    }
+                    onCancelSummaryBatch={handleCancelSummaryBatch}
                   />
                 </div>
               )}

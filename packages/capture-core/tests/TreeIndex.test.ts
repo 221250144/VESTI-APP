@@ -160,3 +160,148 @@ describe('buildConversationTree', () => {
     });
   });
 });
+
+describe('buildConversationTree — subagent folding (A1)', () => {
+  it('mounts subagent sessions under their parent with aggregate counts', async () => {
+    await withManager(async manager => {
+      manager.upsertWorkSession(makeSession({ id: 'codex:parent', sessionId: 'parent', messageCount: 10 }));
+      manager.upsertWorkSession(makeSession({
+        id: 'codex:child',
+        sessionId: 'child',
+        title: 'Explore agent',
+        messageCount: 4,
+        lastActivityAt: 2500,
+      }));
+      manager.upsertWorkSession(makeSession({
+        id: 'codex:grandchild',
+        sessionId: 'grandchild',
+        title: 'Nested agent',
+        messageCount: 3,
+        lastActivityAt: 2600,
+      }));
+      manager.insertSubagentLink({
+        id: 'link1',
+        parentSessionId: 'codex:parent',
+        childSessionId: 'codex:child',
+        agentId: 'a1',
+        filePath: 'C:\\work\\alpha\\child.jsonl',
+        messageCount: 4,
+      });
+      // Nested: the child is itself a parent of another subagent.
+      manager.insertSubagentLink({
+        id: 'link2',
+        parentSessionId: 'codex:child',
+        childSessionId: 'codex:grandchild',
+        agentId: 'a2',
+        filePath: 'C:\\work\\alpha\\grandchild.jsonl',
+        messageCount: 3,
+      });
+
+      const tree = manager.buildConversationTree();
+      const project = tree.sources[0].projects[0];
+      // Only the main session is listed at the project level.
+      expect(project.sessions.map(session => session.id)).toEqual(['codex:parent']);
+
+      const parent = project.sessions[0];
+      expect(parent.role).toBe('main');
+      expect(parent.childCount).toBe(1);
+      // 4 (child) + 3 (grandchild), own 10 excluded.
+      expect(parent.descendantMessageCount).toBe(7);
+
+      const child = parent.children?.[0];
+      expect(child?.id).toBe('codex:child');
+      expect(child?.role).toBe('subagent');
+      expect(child?.parentSessionId).toBe('codex:parent');
+      expect(child?.childCount).toBe(1);
+      expect(child?.descendantMessageCount).toBe(3);
+      expect(child?.children?.[0].id).toBe('codex:grandchild');
+    });
+  });
+
+  it('degrades subagents that cannot mount to orphan mains', async () => {
+    await withManager(async manager => {
+      // Parent lives in a different project — cross-project mounting is not
+      // allowed, so the child falls back to a standalone main node.
+      manager.upsertWorkSession(makeSession({ id: 'codex:parent', sessionId: 'parent' }));
+      manager.upsertWorkSession(makeSession({
+        id: 'codex:lone',
+        sessionId: 'lone',
+        projectPath: 'C:\\work\\beta',
+      }));
+      manager.insertSubagentLink({
+        id: 'link-orphan',
+        parentSessionId: 'codex:parent',
+        childSessionId: 'codex:lone',
+        agentId: 'a1',
+        filePath: 'C:\\work\\beta\\lone.jsonl',
+        messageCount: 5,
+      });
+      // A link cycle (a→b, b→a) must not recurse; both degrade to mains.
+      manager.upsertWorkSession(makeSession({ id: 'codex:cycleA', sessionId: 'cycleA' }));
+      manager.upsertWorkSession(makeSession({ id: 'codex:cycleB', sessionId: 'cycleB' }));
+      manager.insertSubagentLink({
+        id: 'link-cycle-ab',
+        parentSessionId: 'codex:cycleA',
+        childSessionId: 'codex:cycleB',
+        agentId: 'a2',
+        filePath: 'C:\\work\\alpha\\b.jsonl',
+        messageCount: 1,
+      });
+      manager.insertSubagentLink({
+        id: 'link-cycle-ba',
+        parentSessionId: 'codex:cycleB',
+        childSessionId: 'codex:cycleA',
+        agentId: 'a3',
+        filePath: 'C:\\work\\alpha\\a.jsonl',
+        messageCount: 1,
+      });
+
+      const tree = manager.buildConversationTree();
+      const codex = tree.sources[0];
+      const alpha = codex.projects.find(project => project.pathOrDomain === 'c:/work/alpha');
+      const beta = codex.projects.find(project => project.pathOrDomain === 'c:/work/beta');
+
+      // alpha: the parent stays a main without children; the cycle pair both
+      // degrade to orphan mains (neither mounts under the other).
+      expect(alpha?.sessions.map(session => session.id).sort()).toEqual([
+        'codex:cycleA',
+        'codex:cycleB',
+        'codex:parent',
+      ]);
+      const parent = alpha!.sessions.find(session => session.id === 'codex:parent');
+      expect(parent?.role).toBe('main');
+      expect(parent?.childCount).toBe(0);
+      for (const id of ['codex:cycleA', 'codex:cycleB']) {
+        const node = alpha!.sessions.find(session => session.id === id);
+        expect(node?.role).toBe('main');
+        expect(node?.orphan).toBe(true);
+      }
+
+      // beta: the cross-project child is an orphan main in its own project.
+      expect(beta?.sessions).toHaveLength(1);
+      const orphan = beta!.sessions[0];
+      expect(orphan.id).toBe('codex:lone');
+      expect(orphan.role).toBe('main');
+      expect(orphan.orphan).toBe(true);
+    });
+  });
+
+  it('keeps links unresolved (child_session_id NULL) out of the fold', async () => {
+    await withManager(async manager => {
+      manager.upsertWorkSession(makeSession({ id: 'codex:parent', sessionId: 'parent' }));
+      manager.insertSubagentLink({
+        id: 'link-unresolved',
+        parentSessionId: 'codex:parent',
+        agentId: 'a1',
+        filePath: 'C:\\work\\alpha\\pending.jsonl',
+        messageCount: 0,
+      });
+
+      const tree = manager.buildConversationTree();
+      const parent = tree.sources[0].projects[0].sessions[0];
+      expect(parent.role).toBe('main');
+      expect(parent.childCount).toBe(0);
+      expect(parent.children).toBeUndefined();
+    });
+  });
+});

@@ -3,7 +3,12 @@
 // (desktopStorage) gathers conversations and the conversation tree and passes
 // them in, so everything stays deterministic and unit-testable.
 
-import type { ConversationTree } from "../../shared/contracts";
+import type { AgentRunRequest, ConversationTree } from "../../shared/contracts";
+import {
+  buildDepositMaintainTranscript,
+  parseDepositMaintainPayload,
+  type DepositMaintainOp,
+} from "../../shared/depositMaintain";
 import type { Deposit, DepositScope } from "../db/types";
 
 /** Version pointer for a regenerated deposit: v1 has no predecessor, every
@@ -114,4 +119,67 @@ export function resolveScopeConversationIds(
     data.conversations.map((conversation) => [conversation.id, conversation.updated_at ?? 0])
   );
   return ids.sort((a, b) => (recency.get(b) ?? 0) - (recency.get(a) ?? 0));
+}
+
+// ---- mem0-style maintain merge ---------------------------------------------
+
+/** Minimal agent-run surface the merge pipeline needs (window.vesti.runAgent
+ * in production, a mock in tests). */
+export interface DepositAgentRunner {
+  run(request: AgentRunRequest): Promise<{ content: string }>;
+}
+
+export interface DepositDistillMergeResult {
+  /** Final document to persist as the new version. */
+  contentMarkdown: string;
+  /** Maintain ops when a merge ran; null when the new version is a raw
+   * replacement (fresh v1, or maintain unavailable/failed). */
+  ops: DepositMaintainOp[] | null;
+}
+
+/**
+ * Regeneration pipeline (mem0-style): distill the scope's fresh context, then
+ * — only when a previous version exists — ask the deposit-maintain agent to
+ * merge the fresh distillation into the previous document and record the ops.
+ * Any maintain failure (LLM not configured, bad output) degrades to the raw
+ * distillation with no ops, matching the pre-maintain behavior.
+ */
+export async function distillAndMergeDeposit(
+  runner: DepositAgentRunner,
+  params: {
+    sessionId: string;
+    template: string;
+    customInstruction?: string;
+    transcript: string;
+    previousContent: string | null;
+  }
+): Promise<DepositDistillMergeResult> {
+  const distilled = await runner.run({
+    kind: "distill",
+    sessionId: params.sessionId,
+    template: params.template,
+    question: params.customInstruction,
+    transcriptOverride: params.transcript,
+    persist: false,
+  });
+  const fresh = distilled.content;
+
+  if (!params.previousContent?.trim()) {
+    return { contentMarkdown: fresh, ops: null };
+  }
+
+  try {
+    const maintained = await runner.run({
+      kind: "deposit-maintain",
+      sessionId: params.sessionId,
+      transcriptOverride: buildDepositMaintainTranscript(params.previousContent, fresh),
+      persist: false,
+    });
+    const payload = parseDepositMaintainPayload(maintained.content);
+    return { contentMarkdown: payload.merged_markdown, ops: payload.ops };
+  } catch {
+    // Maintain is best-effort: without it the regeneration still lands as a
+    // plain replacement (no ops recorded).
+    return { contentMarkdown: fresh, ops: null };
+  }
 }

@@ -226,7 +226,7 @@ export interface NotionExportResult {
   url: string;
 }
 
-export type AgentKind = 'summary' | 'explore' | 'digest' | 'classify' | 'relay' | 'extract' | 'distill' | 'daily' | 'persona';
+export type AgentKind = 'summary' | 'explore' | 'digest' | 'classify' | 'relay' | 'extract' | 'distill' | 'deposit-maintain' | 'daily' | 'persona';
 
 /** P4b deposit distillation templates ('custom' carries the user's own
  * instruction in AgentRunRequest.question). */
@@ -287,6 +287,13 @@ export interface ConversationTreeSession {
   keyTopics: string[];
   keyFiles: string[];
   decisions: string[];
+  // A1 subagent folding (optional: absent on renderer-built browser nodes)
+  role?: "main" | "subagent";
+  parentSessionId?: string;
+  orphan?: boolean;
+  childCount?: number;
+  descendantMessageCount?: number;
+  children?: ConversationTreeSession[];
 }
 
 export interface ConversationTreeProject {
@@ -314,6 +321,10 @@ export interface SessionRecallHit {
   score: number;
   snippet: string;
   oneLiner: string | null;
+  // A1 subagent attribution (optional additive fields)
+  hitSource?: "main" | "subagent";
+  attributedSessionId?: string;
+  subagentSessionId?: string;
 }
 
 export const IPC = {
@@ -357,8 +368,19 @@ export const IPC = {
   capsuleDragEnd: 'vesti:capsule-drag-end',
   capsuleContextMenu: 'vesti:capsule-context-menu',
   capsuleStateChanged: 'vesti:capsule-state-changed',
+  capsuleDockStatus: 'vesti:capsule-dock-status',
+  capsuleQuickAsk: 'vesti:capsule-quick-ask',
+  capsuleProjects: 'vesti:capsule-projects',
+  capsuleRelayDraft: 'vesti:capsule-relay-draft',
+  capsuleRelayPolish: 'vesti:capsule-relay-polish',
+  capsuleSearchPrompts: 'vesti:capsule-search-prompts',
+  capsulePromptSnapshotGet: 'vesti:capsule-prompt-snapshot-get',
+  capsulePromptSnapshotSave: 'vesti:capsule-prompt-snapshot-save',
+  capsuleCopyText: 'vesti:capsule-copy-text',
+  capsulePanelHeight: 'vesti:capsule-panel-height',
   extensionBridgeStatus: 'vesti:extension-bridge-status',
   extensionPairCodeCreate: 'vesti:extension-pair-code-create',
+  extensionPairingWindowOpen: 'vesti:extension-pairing-window-open',
   extensionClientDisconnect: 'vesti:extension-client-disconnect',
   extensionBridgeChanged: 'vesti:extension-bridge-changed',
   extensionImportRequest: 'vesti:extension-import-request',
@@ -369,6 +391,7 @@ export const IPC = {
   notionExport: 'vesti:notion-export',
   relayPrepareCli: 'vesti:relay-prepare-cli',
   relayOutboxEnqueue: 'vesti:relay-outbox-enqueue',
+  relaySessionContexts: 'vesti:relay-session-contexts',
 } as const;
 
 // ---- Desktop floating capsule ----
@@ -378,6 +401,103 @@ export interface CapsuleState {
   syncing: boolean;
   conversationCount: number;
   expanded: boolean;
+}
+
+// ---- Capsule dock (P6: layered quick panel) ----
+
+/** A flattened conversation-tree project for the capsule relay scope picker. */
+export interface CapsuleProjectView {
+  platform: string;
+  host: string;
+  projectKey: string;
+  label: string;
+  pathOrDomain: string;
+  /** Top-level sessions in this project (subagents fold under parents). */
+  sessionCount: number;
+  /** Up to 5 most recent sessions, newest first. */
+  recentSessions: CapsuleRelaySessionView[];
+}
+
+export interface CapsuleRelaySessionView {
+  sessionId: string;
+  title: string;
+  oneLiner: string | null;
+  lastActivityAt: number;
+}
+
+/**
+ * Relay scope: a project reference (platform+host+projectKey as returned by
+ * capsuleGetProjects) plus an optional narrowing to explicit session ids.
+ * When sessionIds is non-empty it wins over the project-wide selection.
+ */
+export interface CapsuleRelayDraftRequest {
+  platform: string;
+  host: string;
+  projectKey: string;
+  sessionIds?: string[];
+}
+
+/** Locally-assembled handoff draft (pure template, no LLM required). */
+export interface CapsuleRelayDraft {
+  text: string;
+  sessionCount: number;
+  sessions: CapsuleRelaySessionView[];
+}
+
+/** AI-polished handoff (agent kind 'relay'): paste-ready suggested prompt. */
+export interface CapsuleRelayPolishResult {
+  title: string;
+  suggestedPrompt: string;
+}
+
+export interface CapsuleQuickAskResult {
+  answer: string;
+  /** How many archived sessions were recalled into the answer context. */
+  recalled: number;
+}
+
+/** One prompt-library entry mirrored into the capsule-readable snapshot. */
+export interface CapsulePromptSnapshotEntry {
+  id: string;
+  title: string;
+  description: string;
+  tags: string[];
+  body: string;
+  /** Origin label, e.g. 'manual' / 'extracted' / a platform name. */
+  source: string;
+}
+
+/** ~/.vesti/cache/prompt-snapshot.json — written by the main renderer. */
+export interface CapsulePromptSnapshot {
+  updatedAt: number;
+  prompts: CapsulePromptSnapshotEntry[];
+}
+
+/** Unified prompt hit for the capsule prompt assistant (curated + user). */
+export interface CapsulePromptHit {
+  id: string;
+  title: string;
+  description: string;
+  tags: string[];
+  body: string;
+  origin: 'curated' | 'user';
+  /** Attribution for curated entries (source collection). */
+  source: string;
+}
+
+/** Availability flags + capture-point count for the capsule home screen. */
+export interface CapsuleDockStatus {
+  llmConfigured: boolean;
+  extensionConnected: boolean;
+  /** Capture sources that are enabled and detected as installed. */
+  sourceCount: number;
+}
+
+export interface CapsuleContextMenuLabels {
+  open: string;
+  sync: string;
+  watching: string;
+  hide: string;
 }
 
 /**
@@ -393,8 +513,30 @@ export interface VestiCapsuleApi {
   setExpanded(expanded: boolean): Promise<void>;
   dragMove(screenX: number, screenY: number): void;
   dragEnd(screenX: number, screenY: number): Promise<void>;
-  showContextMenu(): void;
+  showContextMenu(labels?: CapsuleContextMenuLabels): void;
   onStateChanged(listener: (state: CapsuleState) => void): () => void;
+  // ---- P6 dock ----
+  getDockStatus(): Promise<CapsuleDockStatus>;
+  /** Recall-grounded quick question (agent kind 'explore'). */
+  quickAsk(question: string): Promise<CapsuleQuickAskResult>;
+  getProjects(): Promise<CapsuleProjectView[]>;
+  /** Assemble the local (no-LLM) handoff draft for a scope. */
+  buildRelayDraft(request: CapsuleRelayDraftRequest): Promise<CapsuleRelayDraft>;
+  /** AI-polish a draft into a paste-ready prompt (agent kind 'relay'). */
+  relayAiPolish(draft: string): Promise<CapsuleRelayPolishResult>;
+  /** Search curated catalog + user prompt snapshot. */
+  searchPrompts(query: string): Promise<CapsulePromptHit[]>;
+  getPromptSnapshot(): Promise<CapsulePromptSnapshot | null>;
+  /** Main-renderer only: persist the prompt snapshot for the capsule. */
+  savePromptSnapshot(snapshot: CapsulePromptSnapshot): Promise<void>;
+  /** Enqueue a prompt into the extension bridge outbox (browser delivery). */
+  enqueueOutbox(prompt: string): Promise<RelayOutboxEnqueueResult>;
+  /** Write a relay file + build CLI launch commands (shared with P4a). */
+  prepareRelayCli(request: RelayPrepareCliRequest): Promise<RelayPrepareCliResult>;
+  /** Reliable clipboard write from the main process. */
+  copyText(text: string): Promise<void>;
+  /** Temporarily grow the expanded panel (px); null restores the default. */
+  setPanelHeight(height: number | null): Promise<void>;
 }
 
 // ---- VESTI dashboard data bridge (SQLite → renderer mirror) ----
@@ -463,15 +605,27 @@ export interface ExtensionBridgeClientView {
   lastSyncAt: number | null;
 }
 
+/** Bridge Protocol v1.2: TOFU pairing window state shown in settings. */
+export interface ExtensionPairingWindowState {
+  open: boolean;
+  expiresAt: number | null;
+}
+
 export interface ExtensionBridgeStatusView {
   running: boolean;
   port: number;
   error: string | null;
   clients: ExtensionBridgeClientView[];
+  pairingWindow: ExtensionPairingWindowState;
 }
 
 export interface ExtensionPairCodeView {
   code: string;
+  expiresAt: number;
+}
+
+/** Bridge Protocol v1.2: result of manually reopening the pairing window. */
+export interface ExtensionPairingWindowView {
   expiresAt: number;
 }
 
@@ -528,6 +682,27 @@ export interface RelayOutboxEnqueueResult {
   id: number;
 }
 
+/**
+ * Per-session relay context (P4a v2): the git fields from work_sessions plus
+ * the full session digest (including open_questions, which the conversation
+ * tree does not carry). Assembled in main; renderer merges it into the relay
+ * transcript per selected conversation.
+ */
+export interface RelaySessionContextDigest {
+  oneLiner: string | null;
+  keyTopics: string[];
+  keyFiles: string[];
+  decisions: string[];
+  openQuestions: string[];
+}
+
+export interface RelaySessionContext {
+  sessionId: string;
+  gitBranch: string | null;
+  gitRemote: string | null;
+  digest: RelaySessionContextDigest | null;
+}
+
 export interface VestiDesktopApi {
   getOverview(): Promise<Overview>;
   getSessions(): Promise<SessionSummary[]>;
@@ -552,6 +727,7 @@ export interface VestiDesktopApi {
   recallSessions(query: string, topK?: number): Promise<SessionRecallHit[]>;
   getExtensionBridgeStatus(): Promise<ExtensionBridgeStatusView>;
   createExtensionPairCode(): Promise<ExtensionPairCodeView>;
+  openExtensionPairingWindow(): Promise<ExtensionPairingWindowView>;
   disconnectExtensionClient(clientId: string): Promise<boolean>;
   reportExtensionImportResult(result: ExtensionImportResultPayload): Promise<void>;
   onExtensionImportRequest(listener: (payload: ExtensionImportRequestPayload) => void): () => void;
@@ -563,6 +739,7 @@ export interface VestiDesktopApi {
   exportNotionPage(request: NotionExportRequest): Promise<NotionExportResult>;
   prepareRelayCliCommands(request: RelayPrepareCliRequest): Promise<RelayPrepareCliResult>;
   enqueueRelayOutbox(request: RelayOutboxEnqueueRequest): Promise<RelayOutboxEnqueueResult>;
+  getRelaySessionContexts(sessionIds: string[]): Promise<RelaySessionContext[]>;
 }
 
 /**

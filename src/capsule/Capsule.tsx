@@ -1,79 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { CapsuleState, VestiCapsuleApi } from '../shared/contracts';
+import type { CapsuleDockStatus, CapsuleState } from '../shared/contracts';
+import { capsuleApi } from './api';
+import { COPY, type CapsuleLocale } from './copy';
 import { DEFAULT_SKIN_ID, resolveSkin } from './skins';
+import { QuickAsk } from './QuickAsk';
+import { RelayFlow } from './RelayFlow';
+import { PromptAssist } from './PromptAssist';
 
-type Locale = 'zh' | 'en' | 'ja' | 'ko';
+type PanelView = 'home' | 'relay' | 'prompts';
 
-const COPY: Record<Locale, Record<string, string>> = {
-  zh: {
-    dock: 'Vesti Dock',
-    liveOn: '实时采集中',
-    liveOff: '采集已暂停',
-    syncing: '正在同步…',
-    conversations: '已归档会话',
-    syncNow: '立即同步',
-    openMain: '打开主界面',
-    pause: '暂停采集',
-    resume: '恢复采集',
-    hide: '隐藏悬浮球',
-    menuOpen: '打开 Vesti',
-    menuSync: '立即同步',
-    menuWatching: '实时采集',
-    menuHide: '隐藏悬浮球',
-  },
-  en: {
-    dock: 'Vesti Dock',
-    liveOn: 'Live capture on',
-    liveOff: 'Capture paused',
-    syncing: 'Syncing…',
-    conversations: 'Archived sessions',
-    syncNow: 'Sync now',
-    openMain: 'Open Vesti',
-    pause: 'Pause capture',
-    resume: 'Resume capture',
-    hide: 'Hide floating ball',
-    menuOpen: 'Open Vesti',
-    menuSync: 'Sync now',
-    menuWatching: 'Live capture',
-    menuHide: 'Hide floating ball',
-  },
-  ja: {
-    dock: 'Vesti Dock',
-    liveOn: 'リアルタイム収集中',
-    liveOff: '収集を一時停止中',
-    syncing: '同期中…',
-    conversations: 'アーカイブ済み会話',
-    syncNow: '今すぐ同期',
-    openMain: 'メイン画面を開く',
-    pause: '収集を一時停止',
-    resume: '収集を再開',
-    hide: 'フローティングボールを隠す',
-    menuOpen: 'Vesti を開く',
-    menuSync: '今すぐ同期',
-    menuWatching: 'リアルタイム収集',
-    menuHide: 'フローティングボールを隠す',
-  },
-  ko: {
-    dock: 'Vesti Dock',
-    liveOn: '실시간 수집 중',
-    liveOff: '수집 일시 중지됨',
-    syncing: '동기화 중…',
-    conversations: '보관된 대화',
-    syncNow: '지금 동기화',
-    openMain: '메인 화면 열기',
-    pause: '수집 일시 중지',
-    resume: '수집 재개',
-    hide: '플로팅 볼 숨기기',
-    menuOpen: 'Vesti 열기',
-    menuSync: '지금 동기화',
-    menuWatching: '실시간 수집',
-    menuHide: '플로팅 볼 숨기기',
-  },
-};
-
-function capsuleApi(): VestiCapsuleApi | null {
-  return typeof window !== 'undefined' && window.vestiCapsule ? window.vestiCapsule : null;
-}
+/** Temporary panel heights for the layered dock views (px). */
+const FLOW_PANEL_HEIGHT = 560;
+const TOAST_DURATION_MS = 2_400;
 
 const DRAG_THRESHOLD_PX = 5;
 
@@ -84,8 +22,12 @@ export function Capsule() {
     conversationCount: 0,
     expanded: false,
   });
-  const [locale, setLocale] = useState<Locale>('zh');
+  const [locale, setLocale] = useState<CapsuleLocale>('zh');
   const [skinId, setSkinId] = useState<string>(DEFAULT_SKIN_ID);
+  const [view, setView] = useState<PanelView>('home');
+  const [dockStatus, setDockStatus] = useState<CapsuleDockStatus | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragRef = useRef<{
     pointerId: number;
     startX: number;
@@ -120,6 +62,30 @@ export function Capsule() {
     void bridge.getUiPreference('theme').then(value => apply('theme', value));
     void bridge.getUiPreference('owlSkin').then(value => apply('owlSkin', value));
     return bridge.onUiPreferenceChanged(apply);
+  }, []);
+
+  // Collapsing the ball always returns the panel to the home view.
+  useEffect(() => {
+    if (!state.expanded) setView('home');
+  }, [state.expanded]);
+
+  // Dock status (LLM / extension / sources) refreshes each time the panel
+  // opens or a flow exits back home.
+  useEffect(() => {
+    if (!state.expanded) return;
+    void capsuleApi()?.getDockStatus().then(setDockStatus).catch(() => setDockStatus(null));
+  }, [state.expanded, view]);
+
+  // Flow views get a taller window; home restores the default panel height.
+  useEffect(() => {
+    if (!state.expanded) return;
+    void capsuleApi()?.setPanelHeight(view === 'home' ? null : FLOW_PANEL_HEIGHT);
+  }, [state.expanded, view]);
+
+  const showToast = useCallback((message: string) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast(message);
+    toastTimer.current = setTimeout(() => setToast(null), TOAST_DURATION_MS);
   }, []);
 
   const copy = COPY[locale];
@@ -162,10 +128,18 @@ export function Capsule() {
     [state.expanded],
   );
 
-  const handleContextMenu = useCallback((event: React.MouseEvent) => {
-    event.preventDefault();
-    capsuleApi()?.showContextMenu();
-  }, []);
+  const handleContextMenu = useCallback(
+    (event: React.MouseEvent) => {
+      event.preventDefault();
+      capsuleApi()?.showContextMenu({
+        open: copy.menuOpen,
+        sync: copy.menuSync,
+        watching: copy.menuWatching,
+        hide: copy.menuHide,
+      });
+    },
+    [copy],
+  );
 
   if (!state.expanded) {
     return (
@@ -179,12 +153,15 @@ export function Capsule() {
           onPointerUp={handlePointerUp}
           onContextMenu={handleContextMenu}
         >
-          <img src={skin.collapsed} alt="Vesti" draggable={false} />
+          <img src={skin.collapsed} alt="Vesti" draggable={false} data-skin={skin.id} />
           <span className={`status-dot${state.watching ? ' watching' : ''}`} />
         </div>
       </div>
     );
   }
+
+  const llmConfigured = dockStatus?.llmConfigured ?? false;
+  const extensionConnected = dockStatus?.extensionConnected ?? false;
 
   return (
     <div className="capsule-root">
@@ -195,7 +172,7 @@ export function Capsule() {
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
         >
-          <img src={skin.collapsed} alt="Vesti" draggable={false} />
+          <img src={skin.collapsed} alt="Vesti" draggable={false} data-skin={skin.id} />
           <span className="title">{copy.dock}</span>
           <button
             type="button"
@@ -207,57 +184,73 @@ export function Capsule() {
           </button>
         </div>
 
-        <div className="capsule-panel-status">
-          <div className="status-row">
-            <span className={`dot${state.watching ? ' on' : ''}`} />
-            <span>{state.watching ? copy.liveOn : copy.liveOff}</span>
-          </div>
-          <div className="status-row">
-            <span className={`dot${state.syncing ? ' on' : ''}`} />
-            <span>
-              {state.syncing ? copy.syncing : `${copy.conversations}: `}
-              {!state.syncing && <strong>{state.conversationCount}</strong>}
-            </span>
-          </div>
-        </div>
+        {view === 'home' && (
+          <>
+            <div className="capsule-home">
+              <QuickAsk copy={copy} llmConfigured={llmConfigured} onToast={showToast} />
+              <div className="capsule-home-actions">
+                <button
+                  type="button"
+                  className="capsule-action primary"
+                  onClick={() => setView('relay')}
+                >
+                  <span className="icon">⇄</span>
+                  {copy.relay}
+                </button>
+                <button
+                  type="button"
+                  className="capsule-action primary"
+                  onClick={() => setView('prompts')}
+                >
+                  <span className="icon">✦</span>
+                  {copy.prompts}
+                </button>
+              </div>
+            </div>
 
-        <div className="capsule-panel-actions">
-          <button
-            type="button"
-            className="capsule-action primary"
-            disabled={state.syncing}
-            onClick={() => void capsuleApi()?.sync()}
-          >
-            <span className="icon">⟳</span>
-            {copy.syncNow}
-          </button>
-          <button
-            type="button"
-            className="capsule-action"
-            onClick={() => void capsuleApi()?.openMainWindow()}
-          >
-            <span className="icon">⌂</span>
-            {copy.openMain}
-          </button>
-          <button
-            type="button"
-            className="capsule-action"
-            onClick={() => void capsuleApi()?.toggleWatch()}
-          >
-            <span className="icon">{state.watching ? '⏸' : '▶'}</span>
-            {state.watching ? copy.pause : copy.resume}
-          </button>
-        </div>
+            <div className="capsule-statusline">
+              <span className={`dot${state.watching ? ' on' : ''}`} />
+              <span>
+                {copy.statusSources} <strong>{dockStatus?.sourceCount ?? '–'}</strong>
+                {' · '}
+                {copy.conversations} <strong>{state.conversationCount}</strong>
+                {' · '}
+                {state.syncing ? copy.syncing : state.watching ? copy.statusLive : copy.statusPaused}
+              </span>
+            </div>
 
-        <div className="capsule-panel-footer">
-          <button
-            type="button"
-            className="capsule-hide"
-            onClick={() => void capsuleApi()?.hideCapsule()}
-          >
-            {copy.hide}
-          </button>
-        </div>
+            <div className="capsule-panel-footer">
+              <button
+                type="button"
+                className="capsule-hide"
+                onClick={() => void capsuleApi()?.openMainWindow()}
+              >
+                {copy.openMain}
+              </button>
+            </div>
+          </>
+        )}
+
+        {view === 'relay' && (
+          <RelayFlow
+            copy={copy}
+            llmConfigured={llmConfigured}
+            extensionConnected={extensionConnected}
+            onExit={() => setView('home')}
+            onToast={showToast}
+          />
+        )}
+
+        {view === 'prompts' && (
+          <PromptAssist
+            copy={copy}
+            extensionConnected={extensionConnected}
+            onExit={() => setView('home')}
+            onToast={showToast}
+          />
+        )}
+
+        {toast && <div className="capsule-toast">{toast}</div>}
       </div>
     </div>
   );

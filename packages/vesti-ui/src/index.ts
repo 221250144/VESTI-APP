@@ -33,8 +33,24 @@ export {
   buildMessagePreviewText,
   buildMessageSidecarSummaryLines,
 } from "./lib/messagePackage";
-export { serializeRelayPackMarkdown } from "./lib/relayMarkdown";
+export { normalizeRelayPackPayload, serializeRelayPackMarkdown } from "./lib/relayMarkdown";
 export { sanitizeFileBaseName, serializeExtractMarkdown } from "./lib/extractMarkdown";
+export {
+  AITI_MIN_STRUCTURED_SUMMARIES,
+  computeSummaryCoverage,
+} from "./lib/summaryCoverage";
+export {
+  SUMMARY_BATCH_LIMIT,
+  advanceSummaryBatch,
+  createSummaryBatchProgress,
+  isSummaryBatchComplete,
+  planSummaryBatch,
+} from "./lib/summaryBatch";
+export type { SummaryBatchProgress } from "./lib/summaryBatch";
+export type {
+  SummaryCoverageConversation,
+  SummaryCoverageSummary,
+} from "./lib/summaryCoverage";
 export type { PipelineStageState } from "./components/SummaryPipelineProgress";
 export type {
   NotionDatabaseOption,
@@ -78,6 +94,8 @@ export type {
   AitiAxisScore,
   AitiObsession,
   AitiImagery,
+  SummaryCoverage,
+  SummaryBatchState,
   LearnProfile,
   LearnDomain,
   LearnGlossaryEntry,
@@ -90,6 +108,10 @@ export type {
   RelayPack,
   RelayPackPayload,
   RelayPackKeyFile,
+  RelayPackGitState,
+  RelayPackFailedPath,
+  RelayPackVerification,
+  RelayPackConfidence,
   RelayCliCommandView,
   RelayAvailability,
   ExtractCodeSnippet,
@@ -99,6 +121,8 @@ export type {
   Deposit,
   DepositScope,
   DepositTemplate,
+  DepositMaintainOp,
+  DepositMaintainOpName,
   CreateDepositInput,
   GenerateDepositInput,
   DailyLog,

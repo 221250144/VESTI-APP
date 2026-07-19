@@ -23,6 +23,7 @@ import {
 import { startAutoClassifyTrigger } from "./ui/organize/autoClassify";
 import { startUpstreamAutoExport } from "./ui/upstream/autoExport";
 import { startDailyScheduler } from "./ui/daily/dailyScheduler";
+import { startPromptSnapshotSync } from "./ui/sync/promptSnapshot";
 import { getAllSummaries, getTopics, listConversations } from "./ui/db/repository";
 import { computeAiti } from "./ui/aiti/computeAiti";
 import { localizeImagery, resolveImagery } from "./ui/aiti/imagery";
@@ -73,6 +74,7 @@ function Shell() {
     startAutoClassifyTrigger();
     startUpstreamAutoExport();
     startDailyScheduler();
+    startPromptSnapshotSync();
   }, []);
 
   useEffect(() => subscribeCaptureSync(setSyncState), []);

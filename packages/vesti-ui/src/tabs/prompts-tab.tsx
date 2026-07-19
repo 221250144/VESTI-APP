@@ -875,9 +875,26 @@ function PlazaCard({
           {prompt.category}
         </span>
       </div>
+      {prompt.description && (
+        <div className="mt-1 line-clamp-2 text-[11.5px] leading-relaxed text-text-tertiary">
+          {prompt.description}
+        </div>
+      )}
       <div className="mt-1 line-clamp-2 text-[12px] leading-relaxed text-text-secondary">
         {prompt.body}
       </div>
+      {prompt.tags && prompt.tags.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap gap-1">
+          {prompt.tags.slice(0, 4).map((tag) => (
+            <span
+              key={tag}
+              className="rounded-full bg-bg-tertiary px-1.5 py-0.5 text-[10px] text-text-tertiary"
+            >
+              {tag}
+            </span>
+          ))}
+        </div>
+      )}
       <div className="mt-2 flex items-center justify-between gap-2">
         {prompt.sourceUrl ? (
           <a

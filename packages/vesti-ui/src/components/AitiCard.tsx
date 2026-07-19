@@ -1,9 +1,18 @@
 import { useState } from "react";
-import { Download } from "lucide-react";
-import type { AitiAxisScore, AitiImagery, AitiProfile, DashboardLabels, StorageApi } from "../types";
+import { Download, Loader2, Sparkles, Square } from "lucide-react";
+import type {
+  AitiAxisScore,
+  AitiImagery,
+  AitiProfile,
+  DashboardLabels,
+  StorageApi,
+  SummaryBatchState,
+  SummaryCoverage,
+} from "../types";
 import { SendToMenu } from "./SendToMenu";
 import { buildAitiMarkdown } from "../lib/exploreMarkdown";
 import { renderAitiCardImage } from "../lib/aitiCardImage";
+import { AITI_MIN_STRUCTURED_SUMMARIES } from "../lib/summaryCoverage";
 
 // Lightweight, dependency-free SVG radar of the four AITI axes — a consistent
 // accent-styled overview to complement the per-axis sliders. Degrades to null if
@@ -94,6 +103,15 @@ interface AitiCardProps {
   onOpenConversation?: (conversationId: number) => void;
   storage?: StorageApi;
   sendToLabels?: DashboardLabels["library"];
+  /** 摘要覆盖率 header: undefined → host doesn't support the coverage API
+   * (header hidden); null → loading. */
+  coverage?: SummaryCoverage | null;
+  /** false → batch button disabled with the configure-LLM hint. */
+  llmConfigured?: boolean;
+  /** Live batch progress for the 立即生成摘要 run (null → idle). */
+  summaryBatch?: SummaryBatchState | null;
+  onGenerateSummaries?: () => void;
+  onCancelSummaryBatch?: () => void;
 }
 
 export function AitiCard({
@@ -105,6 +123,11 @@ export function AitiCard({
   onOpenConversation,
   storage,
   sendToLabels,
+  coverage,
+  llmConfigured,
+  summaryBatch,
+  onGenerateSummaries,
+  onCancelSummaryBatch,
 }: AitiCardProps) {
   type AxisMeta = {
     label: string;
@@ -147,16 +170,110 @@ export function AitiCard({
   const [emblemBroken, setEmblemBroken] = useState(false);
   const [exporting, setExporting] = useState(false);
 
+  // 摘要覆盖率 header — one slim status row pinned above either state. Only
+  // rendered when the host wired the coverage API (undefined → hidden).
+  const batchRunning = summaryBatch?.status === "running";
+  const coverageHeader =
+    coverage !== undefined ? (
+      <div className="shrink-0 border-b border-border-subtle px-6 py-3">
+        <div className="mx-auto flex max-w-2xl flex-wrap items-center justify-between gap-x-4 gap-y-2">
+          <div className="min-w-0">
+            {coverage === null ? (
+              <p className="flex items-center gap-2 text-[12px] text-text-tertiary">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-accent-primary" strokeWidth={1.75} />
+              </p>
+            ) : coverage.totalConversations === 0 ? (
+              <p className="text-[12px] text-text-tertiary">{labels.coverageEmpty}</p>
+            ) : (
+              <>
+                <p className="text-[12px] text-text-secondary">
+                  {labels.coverageSummary
+                    .replace("{x}", String(coverage.summarizedCount))
+                    .replace("{y}", String(coverage.totalConversations))
+                    .replace("{z}", String(coverage.structuredCount))}
+                </p>
+                {coverage.structuredCount < AITI_MIN_STRUCTURED_SUMMARIES ? (
+                  <p className="mt-0.5 text-[11.5px] text-text-tertiary">
+                    {labels.coverageNeedMore.replace(
+                      "{n}",
+                      String(AITI_MIN_STRUCTURED_SUMMARIES - coverage.structuredCount)
+                    )}
+                  </p>
+                ) : coverage.pendingConversationIds.length === 0 ? (
+                  <p className="mt-0.5 text-[11.5px] text-text-tertiary">{labels.allSummarized}</p>
+                ) : null}
+              </>
+            )}
+          </div>
+          {coverage && coverage.pendingConversationIds.length > 0 && onGenerateSummaries ? (
+            <div className="flex shrink-0 items-center gap-2">
+              {batchRunning && summaryBatch ? (
+                <>
+                  <span className="inline-flex items-center gap-1.5 text-[12px] text-text-secondary">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-accent-primary" strokeWidth={1.75} />
+                    {labels.generatingSummaries
+                      .replace("{done}", String(summaryBatch.done + summaryBatch.failed))
+                      .replace("{total}", String(summaryBatch.total))}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={onCancelSummaryBatch}
+                    className="inline-flex items-center gap-1 rounded-full border border-border-subtle px-3 py-1 text-[12px] text-text-secondary transition-colors hover:text-text-primary"
+                  >
+                    <Square className="h-3 w-3" strokeWidth={1.75} />
+                    {labels.cancelGeneration}
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={onGenerateSummaries}
+                  disabled={llmConfigured === false}
+                  title={llmConfigured === false ? labels.llmMissing : undefined}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-accent-primary px-3 py-1.5 text-[12px] font-medium text-text-inverse transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Sparkles className="h-3.5 w-3.5" strokeWidth={1.75} />
+                  {labels.generateSummaries}
+                </button>
+              )}
+            </div>
+          ) : null}
+          {llmConfigured === false &&
+          coverage &&
+          coverage.pendingConversationIds.length > 0 &&
+          !batchRunning ? (
+            <p className="w-full text-[11.5px] text-text-tertiary">{labels.llmMissing}</p>
+          ) : null}
+          {!batchRunning && summaryBatch?.status === "done" ? (
+            <p className="w-full text-[11.5px] text-text-tertiary">
+              {labels.summariesResult
+                .replace("{done}", String(summaryBatch.done))
+                .replace("{failed}", String(summaryBatch.failed))}
+            </p>
+          ) : null}
+        </div>
+      </div>
+    ) : null;
+
   if (!profile || !profile.available) {
     return (
-      <div className="flex h-full flex-col items-center justify-center p-10 text-center">
-        <h3 className="text-[15px] font-medium text-text-primary">{labels.title}</h3>
-        <p className="mt-2 max-w-md text-[13px] text-text-tertiary">{labels.insufficient}</p>
-        {profile ? (
-          <p className="mt-2 text-[11.5px] text-text-tertiary">
-            {labels.sample.replace("{n}", String(profile.sampleSize))}
-          </p>
-        ) : null}
+      <div className="flex h-full flex-col">
+        {coverageHeader}
+        <div className="flex flex-1 flex-col items-center justify-center p-10 text-center">
+          <div
+            className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-accent-primary-light text-accent-primary"
+            aria-hidden="true"
+          >
+            <Sparkles className="h-5 w-5" strokeWidth={1.75} />
+          </div>
+          <h3 className="text-[15px] font-medium text-text-primary">{labels.title}</h3>
+          <p className="mt-2 max-w-md text-[13px] text-text-tertiary">{labels.insufficient}</p>
+          {profile ? (
+            <p className="mt-2 text-[11.5px] text-text-tertiary">
+              {labels.sample.replace("{n}", String(profile.sampleSize))}
+            </p>
+          ) : null}
+        </div>
       </div>
     );
   }
@@ -203,8 +320,10 @@ export function AitiCard({
   };
 
   return (
-    <div className="h-full overflow-y-auto px-6 py-6">
-      <div className="mx-auto max-w-2xl">
+    <div className="flex h-full flex-col">
+      {coverageHeader}
+      <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
+        <div className="mx-auto max-w-2xl">
         {/* Header */}
         <div className="flex items-start justify-between gap-3">
           <h3 className="text-[15px] font-medium text-text-primary">{labels.title}</h3>
@@ -414,6 +533,7 @@ export function AitiCard({
             </div>
           </div>
         )}
+        </div>
       </div>
     </div>
   );

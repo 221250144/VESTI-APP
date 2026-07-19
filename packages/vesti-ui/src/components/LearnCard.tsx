@@ -1,3 +1,4 @@
+import { BookOpen } from "lucide-react";
 import type { DashboardLabels, LearnProfile, StorageApi } from "../types";
 import { SendToMenu } from "./SendToMenu";
 import { buildLearnMarkdown } from "../lib/exploreMarkdown";
@@ -5,6 +6,10 @@ import { buildLearnMarkdown } from "../lib/exploreMarkdown";
 // "学习 Learn": presentational view of the locally-computed learning map —
 // knowledge domains (with a depth mix), a glossary of things learned, and open
 // loops. The host computes the profile + passes localized labels.
+
+/** Below this many analyzed summaries the map is technically available but
+ * thin — say so and point at generating more (same guidance as AITI). */
+const WEAK_SAMPLE_THRESHOLD = 5;
 
 interface LearnCardProps {
   profile?: LearnProfile;
@@ -18,6 +23,12 @@ export function LearnCard({ profile, labels, onOpenConversation, storage, sendTo
   if (!profile || !profile.available) {
     return (
       <div className="flex h-full flex-col items-center justify-center p-10 text-center">
+        <div
+          className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-accent-primary-light text-accent-primary"
+          aria-hidden="true"
+        >
+          <BookOpen className="h-5 w-5" strokeWidth={1.75} />
+        </div>
         <h3 className="text-[15px] font-medium text-text-primary">{labels.title}</h3>
         <p className="mt-2 max-w-md text-[13px] text-text-tertiary">{labels.insufficient}</p>
       </div>
@@ -41,6 +52,11 @@ export function LearnCard({ profile, labels, onOpenConversation, storage, sendTo
         <p className="mt-1 text-[11.5px] text-text-tertiary">
           {labels.sample.replace("{n}", String(profile.sampleSize))}
         </p>
+        {profile.sampleSize < WEAK_SAMPLE_THRESHOLD ? (
+          <p className="mt-2 rounded-lg border border-border-subtle bg-bg-surface-card px-3 py-2 text-[11.5px] leading-relaxed text-text-tertiary">
+            {labels.weakHint}
+          </p>
+        ) : null}
 
         {/* Domains */}
         {profile.domains.length > 0 && (

@@ -49,6 +49,7 @@ const api: VestiDesktopApi = {
   recallSessions: (query, topK) => ipcRenderer.invoke(IPC.recallSessions, query, topK),
   getExtensionBridgeStatus: () => ipcRenderer.invoke(IPC.extensionBridgeStatus),
   createExtensionPairCode: () => ipcRenderer.invoke(IPC.extensionPairCodeCreate),
+  openExtensionPairingWindow: () => ipcRenderer.invoke(IPC.extensionPairingWindowOpen),
   disconnectExtensionClient: clientId => ipcRenderer.invoke(IPC.extensionClientDisconnect, clientId),
   reportExtensionImportResult: (result: ExtensionImportResultPayload) =>
     ipcRenderer.invoke(IPC.extensionImportResult, result),
@@ -73,6 +74,7 @@ const api: VestiDesktopApi = {
   exportNotionPage: request => ipcRenderer.invoke(IPC.notionExport, request),
   prepareRelayCliCommands: request => ipcRenderer.invoke(IPC.relayPrepareCli, request),
   enqueueRelayOutbox: request => ipcRenderer.invoke(IPC.relayOutboxEnqueue, request),
+  getRelaySessionContexts: sessionIds => ipcRenderer.invoke(IPC.relaySessionContexts, sessionIds),
 };
 
 const uiPrefs: VestiUiPrefsApi = {
@@ -97,12 +99,25 @@ const capsule: VestiCapsuleApi = {
   setExpanded: expanded => ipcRenderer.invoke(IPC.capsuleSetExpanded, expanded),
   dragMove: (screenX, screenY) => ipcRenderer.send(IPC.capsuleDragMove, screenX, screenY),
   dragEnd: (screenX, screenY) => ipcRenderer.invoke(IPC.capsuleDragEnd, screenX, screenY),
-  showContextMenu: () => ipcRenderer.send(IPC.capsuleContextMenu),
+  showContextMenu: labels => ipcRenderer.send(IPC.capsuleContextMenu, labels ?? null),
   onStateChanged: listener => {
     const wrapped = (_event: unknown, state: CapsuleState) => listener(state);
     ipcRenderer.on(IPC.capsuleStateChanged, wrapped);
     return () => ipcRenderer.removeListener(IPC.capsuleStateChanged, wrapped);
   },
+  // ---- P6 dock ----
+  getDockStatus: () => ipcRenderer.invoke(IPC.capsuleDockStatus),
+  quickAsk: question => ipcRenderer.invoke(IPC.capsuleQuickAsk, question),
+  getProjects: () => ipcRenderer.invoke(IPC.capsuleProjects),
+  buildRelayDraft: request => ipcRenderer.invoke(IPC.capsuleRelayDraft, request),
+  relayAiPolish: draft => ipcRenderer.invoke(IPC.capsuleRelayPolish, draft),
+  searchPrompts: query => ipcRenderer.invoke(IPC.capsuleSearchPrompts, query),
+  getPromptSnapshot: () => ipcRenderer.invoke(IPC.capsulePromptSnapshotGet),
+  savePromptSnapshot: snapshot => ipcRenderer.invoke(IPC.capsulePromptSnapshotSave, snapshot),
+  enqueueOutbox: prompt => ipcRenderer.invoke(IPC.relayOutboxEnqueue, { prompt }),
+  prepareRelayCli: request => ipcRenderer.invoke(IPC.relayPrepareCli, request),
+  copyText: text => ipcRenderer.invoke(IPC.capsuleCopyText, text),
+  setPanelHeight: height => ipcRenderer.invoke(IPC.capsulePanelHeight, height),
 };
 
 contextBridge.exposeInMainWorld('vestiCapsule', capsule);

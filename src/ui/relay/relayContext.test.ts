@@ -128,4 +128,50 @@ describe("buildRelayTranscript", () => {
   it("the default budget constant stays under the main-process override cap", () => {
     expect(RELAY_CONTEXT_BUDGET_CHARS).toBeLessThanOrEqual(30_000);
   });
+
+  it("renders the git line when the capture carries git fields", () => {
+    const transcript = buildRelayTranscript([
+      conversation({
+        digest: { oneLiner: "实现登录功能" },
+        git: { branch: "feature/login", remote: "github.com/acme/app" },
+      }),
+    ]);
+    expect(transcript).toContain("Git：feature/login · github.com/acme/app");
+  });
+
+  it("omits the git line when there is no git info", () => {
+    const transcript = buildRelayTranscript([
+      conversation({ digest: { oneLiner: "x" }, git: { branch: null, remote: null } }),
+      conversation({ digest: { oneLiner: "y" } }),
+    ]);
+    expect(transcript).not.toContain("Git：");
+  });
+
+  it("aggregates digest key files across conversations, deduped", () => {
+    const transcript = buildRelayTranscript([
+      conversation({
+        id: 1,
+        digest: { oneLiner: "一", keyFiles: ["src/a.ts", "src/b.ts"] },
+      }),
+      conversation({
+        id: 2,
+        digest: { oneLiner: "二", keyFiles: ["src/b.ts", "src/c.ts"] },
+      }),
+    ]);
+    expect(transcript).toContain("## 关键文件汇总（跨会话去重）");
+    expect(transcript).toContain("src/a.ts、src/b.ts、src/c.ts");
+    // Dedup: src/b.ts appears once in the aggregate line.
+    const aggregateLine = transcript
+      .split("\n")
+      .find((line) => line.includes("src/a.ts"));
+    expect(aggregateLine?.split("src/b.ts")).toHaveLength(2);
+  });
+
+  it("skips the aggregate block when no digest carries key files", () => {
+    const transcript = buildRelayTranscript([
+      conversation({ digest: { oneLiner: "x" } }),
+      conversation({ summary: "没有 digest 的会话" }),
+    ]);
+    expect(transcript).not.toContain("关键文件汇总");
+  });
 });

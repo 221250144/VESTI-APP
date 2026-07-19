@@ -69,6 +69,7 @@ SQLite（better-sqlite3，WAL + 外键）。核心表：
 - project key 派生（`storage/projectRegistry.ts`）：`project_path` 归一化（正斜杠、收敛分隔符、Windows 盘符小写）为空则回退归一化 git remote，再空为 `'unknown'`；`project_key = 'cli_' + sha256(platform|host|basis) 前 16 位`。
 - `project_registry` 由 `upsertWorkSession` 同步维护：`kind='cli_path'`，`label` 取路径末段，`first_seen`/`last_seen` 按 min/max 更新。
 - `TreeIndex.buildConversationTree(db)` 是纯函数：一条 `work_sessions LEFT JOIN session_digests` SQL（`session_type='conversation'`，按最近活跃倒序）+ 内存装配成 来源(platform+host) → 项目 → 会话。无缓存、无事件监听，每次调用重算，registry/digest 缺失时会话仍出现（key 可独立重算，registry 仅补充展示信息）。浏览器来源不进此库，渲染层合并 `browser` 子树（项目键为 `web:<domain>`）。
+- 子代理归属折叠（A1）：出现在 `subagent_links` child 侧的会话标记 `role='subagent'`，挂载到同来源/项目内父会话的 `children` 数组（附 digest 字段，按活跃倒序），项目会话列表只含 main 会话。父节点聚合 `childCount`（直接子代理数）与 `descendantMessageCount`（全部后代消息数，支持子代理嵌套）；父会话缺失、跨项目链接或链接成环的子代理按 main 兜底并标 `orphan: true`。计数口径随之统一：来源/项目计数只算 main，子代理折叠进父节点徽章。`SessionRecall` 同口径：FTS/向量命中子代理时结果归属父会话条目（`hitSource='subagent'` + `attributedSessionId` + `subagentSessionId`），父会话已有直接命中时折叠计分不另列。渲染层 library 列表默认只列 main，父卡片下「N 个子代理」展开条进入子代理会话；父 digest 头部 chips 追加子代理 `key_topics` 去重合并（≤5 条，只读拼装不写库）。
 
 ## digest 管线与降级链
 
@@ -102,3 +103,11 @@ FTS 查询由 Unicode token 加引号 OR 连接生成；`SearchEngine` 另有普
 ## 迁移机制
 
 见 [architecture.md](architecture.md)「数据库迁移机制」。约定摘要：`MIGRATIONS` 只增不改、`up` 幂等、`schema_migrations` 表记录、迁移与记录同事务。当前 v1–v3（`session_type`、`host`、`session_digests` + `project_registry`）。
+
+## 对外召回：vesti-mcp（MCP server）
+
+`packages/vesti-mcp` 把本库的召回能力包装成 stdio MCP server，供 kimi-code / Claude Code / codex 等 agent 注册后自助检索历史会话。要点：
+
+- 只读打开 `~/.vesti/db/vesti.db`（`VESTI_DB_PATH` 可覆盖）；不依赖 capture-core 与 better-sqlite3，改用 Node 内置 `node:sqlite`，规避桌面端 Electron ABI 原生模块的耦合。
+- 三个工具对应三层渐进披露：`vesti_search`（会话级索引条目，复刻 `SessionRecall` 的 FTS5 + RRF 纯 FTS 路径——无 embedding 服务，向量信号自然缺席）→ `vesti_timeline`（turn 大纲）→ `vesti_get_turns`（按 `max_chars` 截断的完整内容）。
+- 注册方式与给 agent 的引导文本见 [packages/vesti-mcp/README.md](../packages/vesti-mcp/README.md)。

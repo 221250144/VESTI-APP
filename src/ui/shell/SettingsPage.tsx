@@ -85,10 +85,16 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     wslRedetect: "重新检测",
     wslDetecting: "检测中…",
     bridgeTitle: "连接 VESTI 扩展",
-    bridgeDesc: "浏览器扩展通过本机回环服务把网页端会话导入 Vesti。生成配对码并在扩展中输入即可完成连接。",
+    bridgeDesc: "浏览器扩展通过本机回环服务把网页端会话导入 Vesti。打开扩展侧栏即可自动连接（首次需确认一次），也可使用配对码手动连接。",
     bridgeRunning: "服务运行中",
     bridgeStopped: "服务未运行",
     bridgeError: "端口冲突,扩展暂不可用",
+    bridgeAutoTitle: "自动连接（推荐）",
+    bridgeAutoDesc: "安装 VESTI 浏览器扩展后，打开扩展侧栏即自动连接；首次连接本设备会弹出一次确认，之后长期免交互。配对窗口关闭时扩展无法发起连接。",
+    bridgeOpenWindow: "打开配对窗口",
+    bridgeWindowOpen: "配对窗口开启中",
+    bridgeWindowClosed: "配对窗口已关闭，打开后扩展才能自动连接。",
+    bridgeManualTitle: "使用配对码连接（兜底）",
     bridgeGenerate: "生成配对码",
     bridgeCodeHint: "在浏览器扩展中输入此配对码",
     bridgeCodeExpired: "配对码已过期,请重新生成。",
@@ -247,10 +253,16 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     wslRedetect: "Re-detect",
     wslDetecting: "Detecting…",
     bridgeTitle: "Connect the VESTI extension",
-    bridgeDesc: "The browser extension imports web conversations into Vesti over a loopback service. Generate a pair code and enter it in the extension to connect.",
+    bridgeDesc: "The browser extension imports web conversations into Vesti over a loopback service. Open the extension side panel to auto-connect (one-time confirmation), or use a pair code.",
     bridgeRunning: "Service running",
     bridgeStopped: "Service stopped",
     bridgeError: "Port conflict; extension bridge unavailable",
+    bridgeAutoTitle: "Auto-connect (recommended)",
+    bridgeAutoDesc: "With the VESTI browser extension installed, open its side panel to connect automatically. This device shows a one-time confirmation on first connect, then stays hands-free. The extension can only connect while the pairing window is open.",
+    bridgeOpenWindow: "Open pairing window",
+    bridgeWindowOpen: "Pairing window open",
+    bridgeWindowClosed: "Pairing window closed. Open it so the extension can auto-connect.",
+    bridgeManualTitle: "Connect with a pair code (fallback)",
     bridgeGenerate: "Generate pair code",
     bridgeCodeHint: "Enter this code in the browser extension",
     bridgeCodeExpired: "Code expired. Generate a new one.",
@@ -580,12 +592,17 @@ export function SettingsPage({
     };
   }, [load]);
 
-  // 1s ticker for the pair-code countdown.
+  // 1s ticker for the pair-code and pairing-window countdowns.
+  const pairingWindowOpen = Boolean(
+    bridge?.pairingWindow.open
+    && bridge.pairingWindow.expiresAt !== null
+    && bridge.pairingWindow.expiresAt > now,
+  );
   useEffect(() => {
-    if (!pairCode) return;
+    if (!pairCode && !pairingWindowOpen) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [pairCode]);
+  }, [pairCode, pairingWindowOpen]);
 
   // Auto-classify (P2a): run state + persisted review queue.
   useEffect(() => {
@@ -627,6 +644,12 @@ export function SettingsPage({
 
   async function generatePairCode() {
     setPairCode(await window.vesti.createExtensionPairCode());
+    setNow(Date.now());
+  }
+
+  async function openPairingWindow() {
+    await window.vesti.openExtensionPairingWindow();
+    setBridge(await window.vesti.getExtensionBridgeStatus());
     setNow(Date.now());
   }
 
@@ -993,24 +1016,47 @@ export function SettingsPage({
                 ? copy.bridgeError
                 : copy.bridgeStopped}
           </div>
-          <div className="flex flex-wrap items-center gap-3">
-            <button type="button" className={buttonSecondary} onClick={() => void generatePairCode()}>
-              {copy.bridgeGenerate}
-            </button>
-            {pairCode && (pairCode.expiresAt > now ? (
-              <div className="flex items-baseline gap-3">
-                <span className="font-mono text-[22px] font-semibold tracking-[0.3em] text-text-primary">
-                  {pairCode.code}
+          <div className="mb-4 rounded-xl border border-border-subtle bg-bg-primary px-4 py-3">
+            <div className="mb-1 text-[13px] font-sans font-medium text-text-primary">{copy.bridgeAutoTitle}</div>
+            <p className="mb-3 text-[12px] font-sans text-text-tertiary">{copy.bridgeAutoDesc}</p>
+            <div className="flex flex-wrap items-center gap-3">
+              <button type="button" className={buttonSecondary} onClick={() => void openPairingWindow()}>
+                {copy.bridgeOpenWindow}
+              </button>
+              {pairingWindowOpen && bridge?.pairingWindow.expiresAt ? (
+                <span className="flex items-center gap-2 text-[12px] font-sans text-text-secondary">
+                  <span className="inline-block h-2 w-2 rounded-full bg-success" />
+                  {copy.bridgeWindowOpen} · {Math.floor((bridge.pairingWindow.expiresAt - now) / 60000)}:
+                  {String(Math.floor(((bridge.pairingWindow.expiresAt - now) % 60000) / 1000)).padStart(2, "0")}
                 </span>
-                <span className="text-[12px] font-sans text-text-tertiary">
-                  {copy.bridgeCodeHint} · {Math.floor((pairCode.expiresAt - now) / 60000)}:
-                  {String(Math.floor(((pairCode.expiresAt - now) % 60000) / 1000)).padStart(2, "0")}
-                </span>
-              </div>
-            ) : (
-              <span className="text-[12px] font-sans text-text-tertiary">{copy.bridgeCodeExpired}</span>
-            ))}
+              ) : (
+                <span className="text-[12px] font-sans text-text-tertiary">{copy.bridgeWindowClosed}</span>
+              )}
+            </div>
           </div>
+          <details className="mb-4">
+            <summary className="cursor-pointer select-none text-[12px] font-sans font-medium text-text-secondary">
+              {copy.bridgeManualTitle}
+            </summary>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <button type="button" className={buttonSecondary} onClick={() => void generatePairCode()}>
+                {copy.bridgeGenerate}
+              </button>
+              {pairCode && (pairCode.expiresAt > now ? (
+                <div className="flex items-baseline gap-3">
+                  <span className="font-mono text-[22px] font-semibold tracking-[0.3em] text-text-primary">
+                    {pairCode.code}
+                  </span>
+                  <span className="text-[12px] font-sans text-text-tertiary">
+                    {copy.bridgeCodeHint} · {Math.floor((pairCode.expiresAt - now) / 60000)}:
+                    {String(Math.floor(((pairCode.expiresAt - now) % 60000) / 1000)).padStart(2, "0")}
+                  </span>
+                </div>
+              ) : (
+                <span className="text-[12px] font-sans text-text-tertiary">{copy.bridgeCodeExpired}</span>
+              ))}
+            </div>
+          </details>
           <div className="mt-4">
             <div className="mb-2 text-[12px] font-sans font-medium text-text-secondary">{copy.bridgeClients}</div>
             {!bridge || bridge.clients.length === 0 ? (

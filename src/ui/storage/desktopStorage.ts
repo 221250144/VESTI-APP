@@ -29,7 +29,7 @@ import type {
   StorageApi,
   WeeklyReport,
 } from "@vesti/ui";
-import { serializeRelayPackMarkdown } from "@vesti/ui";
+import { computeSummaryCoverage, serializeRelayPackMarkdown } from "@vesti/ui";
 import type { SessionRecallHit, VestiDesktopApi } from "../../shared/contracts";
 import { db } from "../db/schema";
 import type { ConversationRecord } from "../db/schema";
@@ -94,6 +94,10 @@ import {
   updatePrompt,
 } from "../db/promptRepository";
 import type { ConversationSummaryV2, SummaryRecord } from "../db/types";
+import {
+  parseConversationSummaryV2,
+  renderSummaryPlainText,
+} from "../aiti/parseSummary";
 import { buildMessageFallbackDisplayText } from "../db/utils/messageContentPackage";
 import {
   exportConversationToNotion,
@@ -110,6 +114,7 @@ import {
   type RelayContextConversation,
 } from "../relay/relayContext";
 import {
+  distillAndMergeDeposit,
   nextDepositVersion,
   resolveScopeConversationIds,
   type ScopeResolutionData,
@@ -427,12 +432,17 @@ async function generateSummaryImpl(conversationId: number): Promise<ChatSummaryD
   }
 
   const result = await api.runAgent({ kind: "summary", sessionId: info.cliId });
+  // The summary agent answers with ConversationSummaryV2 JSON (validated +
+  // normalized by the parser); prose output degrades to the legacy
+  // plain-text fallback write instead of failing.
+  const structured = parseConversationSummaryV2(result.content);
   const saved = await saveSummary({
     conversationId,
-    content: result.content,
-    structured: null,
-    format: "fallback_plain_text",
-    status: "fallback",
+    content: structured ? renderSummaryPlainText(structured) : result.content,
+    structured: structured ?? null,
+    format: structured ? "structured_v1" : "fallback_plain_text",
+    status: structured ? "ok" : "fallback",
+    ...(structured ? { schemaVersion: "conversation_summary.v2" as const } : {}),
     modelId: result.modelId,
     createdAt: result.createdAt || Date.now(),
     sourceUpdatedAt: info.updatedAt,
@@ -449,7 +459,10 @@ const NO_CONTEXT_ANSWER =
  * src/ui/sync/conversationDigests.ts (shared with the P4c daily pipeline). */
 
 /** Map recalled CLI sessions back to renderer conversation records, keeping
- * the recall ranking and normalizing scores to [0, 1] for the sources UI. */
+ * the recall ranking and normalizing scores to [0, 1] for the sources UI.
+ * A1: a hit that surfaced through a subagent session maps to the parent's
+ * conversation record and is flagged fromSubagent for the "（来自子代理）"
+ * badge; duplicate parent entries are folded (first/best-ranked wins). */
 async function recallSources(hits: SessionRecallHit[]): Promise<RagSources> {
   const records = (await db.conversations.toArray()) as Array<
     ConversationRecord & LocalTerminalFields
@@ -460,14 +473,17 @@ async function recallSources(hits: SessionRecallHit[]): Promise<RagSources> {
   }
   const maxScore = Math.max(...hits.map((hit) => hit.score), Number.EPSILON);
   const sources: RagSources = [];
+  const seenConversationIds = new Set<number>();
   for (const hit of hits) {
-    const record = conversationByCliId.get(hit.sessionId);
-    if (record?.id === undefined) continue;
+    const record = conversationByCliId.get(hit.attributedSessionId ?? hit.sessionId);
+    if (record?.id === undefined || seenConversationIds.has(record.id)) continue;
+    seenConversationIds.add(record.id);
     sources.push({
       id: record.id,
       title: record.title || hit.title,
       platform: record.platform,
       similarity: hit.score / maxScore,
+      ...(hit.hitSource === "subagent" ? { fromSubagent: true } : {}),
     });
   }
   return sources;
@@ -520,15 +536,57 @@ async function gatherRelayContexts(
     throw new Error("所选会话不存在，请刷新列表后重试");
   }
 
+  // P4a v2: per-session git fields + the full digest (open_questions) live in
+  // the capture store and never reach the cached tree — pull them via IPC.
+  const cliIdByConversationId = new Map<number, string>();
+  for (const record of ordered) {
+    const cliId = (record as LocalTerminalFields)._cli_id;
+    if (typeof record.id === "number" && typeof cliId === "string") {
+      cliIdByConversationId.set(record.id, cliId);
+    }
+  }
+  const api = vestiApi();
+  const sessionContexts = api && cliIdByConversationId.size > 0
+    ? await api
+        .getRelaySessionContexts([...cliIdByConversationId.values()])
+        .catch(() => [])
+    : [];
+  const sessionContextByCliId = new Map(
+    sessionContexts.map((context) => [context.sessionId, context])
+  );
+
   const contexts: RelayContextConversation[] = [];
   for (const record of ordered) {
     const id = record.id as number;
     const messages = await listMessages(id).catch(() => []);
+    const cliId = cliIdByConversationId.get(id);
+    const sessionContext = cliId ? sessionContextByCliId.get(cliId) : undefined;
+    const treeDigest = digestById.get(id) ?? null;
+    const fullDigest = sessionContext?.digest ?? null;
+    // Tree digest wins on the fields it carries; open_questions only exists
+    // in the capture-store digest.
+    const digest =
+      treeDigest || fullDigest
+        ? {
+            oneLiner: treeDigest?.oneLiner ?? fullDigest?.oneLiner ?? null,
+            keyTopics: treeDigest?.keyTopics ?? fullDigest?.keyTopics ?? [],
+            keyFiles: treeDigest?.keyFiles?.length
+              ? treeDigest.keyFiles
+              : fullDigest?.keyFiles ?? [],
+            decisions: treeDigest?.decisions?.length
+              ? treeDigest.decisions
+              : fullDigest?.decisions ?? [],
+            openQuestions: fullDigest?.openQuestions ?? [],
+          }
+        : null;
     contexts.push({
       id,
       title: record.title,
       platform: record.platform,
-      digest: digestById.get(id) ?? null,
+      digest,
+      git: sessionContext
+        ? { branch: sessionContext.gitBranch, remote: sessionContext.gitRemote }
+        : null,
       summary: summaryById.get(id)?.content ?? null,
       snippet: record.snippet ?? null,
       messages: messages
@@ -726,26 +784,31 @@ async function generateDepositImpl(input: GenerateDepositInput): Promise<Deposit
 
   const contexts = await gatherRelayContexts(conversationIds);
   const transcript = buildRelayTranscript(contexts);
-  const result = await api.runAgent({
-    kind: "distill",
-    sessionId: `distill:${Date.now()}`,
-    template: input.template,
-    question: input.customInstruction?.trim() || undefined,
-    transcriptOverride: transcript,
-    persist: false,
-  });
 
-  // Regeneration chains onto the previous head as version+1.
+  // Regeneration chains onto the previous head as version+1. With a previous
+  // version the fresh distillation is merged mem0-style (ops recorded on the
+  // new row); without one the distillation is stored as-is.
   const previous = input.previousId ? await getDeposit(input.previousId) : null;
+  const merged = await distillAndMergeDeposit(
+    { run: (request) => api.runAgent(request) },
+    {
+      sessionId: `distill:${Date.now()}`,
+      template: input.template,
+      customInstruction: input.customInstruction?.trim() || undefined,
+      transcript,
+      previousContent: previous?.contentMarkdown ?? null,
+    }
+  );
   const { version, prevId } = nextDepositVersion(previous);
   return createDeposit({
     template: input.template,
     title: `${DEPOSIT_TEMPLATE_LABELS[input.template]} · ${describeDepositScope(input.scope)}`,
     scope: input.scope,
-    contentMarkdown: result.content,
+    contentMarkdown: merged.contentMarkdown,
     version,
     prevId,
     customInstruction: input.customInstruction?.trim() || null,
+    lastOps: merged.ops,
   });
 }
 
@@ -991,6 +1054,32 @@ export const desktopStorage: StorageApi = {
     return summaryRecordToChatSummaryData(record, info?.title);
   },
   generateSummary: (conversationId) => generateSummaryImpl(conversationId),
+  // AITI 摘要覆盖率: drives the coverage header + 立即生成摘要 batch queue
+  // on the aiti pane (pure computation lives in @vesti/ui lib/summaryCoverage).
+  getSummaryCoverage: async () => {
+    const [records, summaries] = await Promise.all([
+      db.conversations.toArray(),
+      getAllSummaries(),
+    ]);
+    return computeSummaryCoverage(
+      (records as Array<ConversationRecord & LocalTerminalFields>).map((record) => ({
+        id: record.id,
+        is_archived: record.is_archived,
+        is_trash: record.is_trash,
+        updatedAt: record.updated_at,
+        cliId: typeof record._cli_id === "string" ? record._cli_id : null,
+      })),
+      summaries
+    );
+  },
+  getLlmConfigured: async () => {
+    const api = vestiApi();
+    if (!api) return false;
+    const settingsView = await api.getSettings().catch(() => null);
+    return settingsView
+      ? settingsView.llm.mode === "demo_proxy" || settingsView.llm.apiKeyConfigured
+      : false;
+  },
   getConversationDigests: () => listConversationDigests(),
 
   // P3 upstream export (SendToMenu): whole conversations re-serialize from

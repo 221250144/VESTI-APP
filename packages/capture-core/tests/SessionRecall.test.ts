@@ -229,3 +229,73 @@ describe('recallSessions', () => {
     });
   });
 });
+
+describe('recallSessions — subagent attribution (A1)', () => {
+  function link(manager: DatabaseManager, parentId: string, childId: string): void {
+    manager.insertSubagentLink({
+      id: `link:${childId}`,
+      parentSessionId: parentId,
+      childSessionId: childId,
+      agentId: 'agent-1',
+      filePath: 'C:\\work\\alpha\\sub.jsonl',
+      messageCount: 1,
+    });
+  }
+
+  it('attributes a subagent hit to its parent session entry', async () => {
+    await withManager(async manager => {
+      manager.upsertWorkSession(makeSession('codex:main', 'Parent session'));
+      manager.upsertWorkSession(makeSession('codex:sub', 'Subagent session'));
+      link(manager, 'codex:main', 'codex:sub');
+      manager.insertSessionMessages([
+        makeMessage('m1', 'codex:main', 'ordinary chatter about nothing relevant'),
+        makeMessage('m2', 'codex:sub', 'the fluxgate calibrator benchmark results'),
+      ]);
+
+      const hits = manager.recallSessions('fluxgate', { topK: 5 });
+      expect(hits).toHaveLength(1);
+      const hit = hits[0];
+      // The parent entry surfaces even though only the subagent matched.
+      expect(hit.sessionId).toBe('codex:main');
+      expect(hit.title).toBe('Parent session');
+      expect(hit.hitSource).toBe('subagent');
+      expect(hit.attributedSessionId).toBe('codex:main');
+      expect(hit.subagentSessionId).toBe('codex:sub');
+      expect(hit.snippet.toLowerCase()).toContain('fluxgate');
+    });
+  });
+
+  it('folds a subagent hit into an already-recalled parent (single entry)', async () => {
+    await withManager(async manager => {
+      manager.upsertWorkSession(makeSession('codex:main', 'Parent session'));
+      manager.upsertWorkSession(makeSession('codex:sub', 'Subagent session'));
+      link(manager, 'codex:main', 'codex:sub');
+      manager.insertSessionMessages([
+        makeMessage('m1', 'codex:main', 'quicksilver in the main transcript'),
+        makeMessage('m2', 'codex:sub', 'quicksilver measured by the subagent'),
+      ]);
+
+      const hits = manager.recallSessions('quicksilver', { topK: 5 });
+      // Both matched, but the child folds into the parent: one entry only.
+      expect(hits).toHaveLength(1);
+      expect(hits[0].sessionId).toBe('codex:main');
+      expect(hits[0].hitSource).toBe('main');
+      expect(hits[0].subagentSessionId).toBeUndefined();
+    });
+  });
+
+  it('marks plain main-session hits as hitSource main', async () => {
+    await withManager(async manager => {
+      manager.upsertWorkSession(makeSession('codex:solo', 'Solo session'));
+      manager.insertSessionMessages([
+        makeMessage('m1', 'codex:solo', 'lonesome pine on the hill'),
+      ]);
+
+      const hits = manager.recallSessions('lonesome', { topK: 5 });
+      expect(hits).toHaveLength(1);
+      expect(hits[0].sessionId).toBe('codex:solo');
+      expect(hits[0].hitSource).toBe('main');
+      expect(hits[0].attributedSessionId).toBeUndefined();
+    });
+  });
+});

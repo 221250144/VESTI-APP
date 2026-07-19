@@ -14,7 +14,7 @@ import {
   Terminal,
   X,
 } from "lucide-react";
-import { serializeRelayPackMarkdown } from "../../lib/relayMarkdown";
+import { normalizeRelayPackPayload, serializeRelayPackMarkdown } from "../../lib/relayMarkdown";
 import type {
   RelayAvailability,
   RelayCliCommandView,
@@ -133,7 +133,9 @@ export function RelayPanel({ pack, onClose, storage, labels }: RelayPanelProps) 
     }
   };
 
-  const payload = pack.pack;
+  // Stored v1 packs lack the schema-v2 fields; normalize once per render so
+  // every section below reads one shape.
+  const payload = normalizeRelayPackPayload(pack.pack);
   const injectDisabled =
     availability !== null && !availability.extensionConnected;
 
@@ -189,12 +191,69 @@ export function RelayPanel({ pack, onClose, storage, labels }: RelayPanelProps) 
             </p>
           </section>
 
-          <section>
-            {sectionTitle(l("sectionState", "Current state"))}
-            <p className="whitespace-pre-wrap text-vesti-base font-sans text-text-primary">
-              {payload.current_state}
-            </p>
-          </section>
+          {payload.current_state ? (
+            <section>
+              {sectionTitle(l("sectionState", "Current state"))}
+              <p className="whitespace-pre-wrap text-vesti-base font-sans text-text-primary">
+                {payload.current_state}
+              </p>
+            </section>
+          ) : null}
+
+          {payload.completed.length > 0 ? (
+            <section>
+              {sectionTitle(l("sectionCompleted", "Completed"))}
+              <ul className="list-disc space-y-1 pl-5 text-vesti-base font-sans text-text-primary">
+                {payload.completed.map((item, index) => (
+                  <li key={index}>{item}</li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+
+          {payload.in_progress.length > 0 ? (
+            <section>
+              {sectionTitle(l("sectionInProgress", "In progress"))}
+              <ul className="list-disc space-y-1 pl-5 text-vesti-base font-sans text-text-primary">
+                {payload.in_progress.map((item, index) => (
+                  <li key={index}>{item}</li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+
+          {payload.git_state.branch ||
+          payload.git_state.dirty_files.length > 0 ||
+          payload.git_state.last_commits.length > 0 ? (
+            <section>
+              {sectionTitle(l("sectionGit", "Git state"))}
+              <ul className="list-disc space-y-1 pl-5 text-vesti-base font-sans text-text-primary">
+                {payload.git_state.branch ? (
+                  <li>
+                    {l("gitBranch", "Branch")}: <span className="font-mono text-[13px]">{payload.git_state.branch}</span>
+                  </li>
+                ) : null}
+                {payload.git_state.dirty_files.length > 0 ? (
+                  <li>
+                    {l("gitDirty", "Uncommitted changes")}:{" "}
+                    <span className="font-mono text-[13px]">
+                      {payload.git_state.dirty_files.join(", ")}
+                    </span>
+                  </li>
+                ) : null}
+                {payload.git_state.last_commits.length > 0 ? (
+                  <li>
+                    {l("gitCommits", "Recent commits")}:
+                    <ul className="mt-0.5 list-disc space-y-0.5 pl-5 text-text-secondary">
+                      {payload.git_state.last_commits.map((commit, index) => (
+                        <li key={index}>{commit}</li>
+                      ))}
+                    </ul>
+                  </li>
+                ) : null}
+              </ul>
+            </section>
+          ) : null}
 
           {payload.key_decisions.length > 0 ? (
             <section>
@@ -238,6 +297,25 @@ export function RelayPanel({ pack, onClose, storage, labels }: RelayPanelProps) 
             </section>
           ) : null}
 
+          {payload.failed_paths.length > 0 ? (
+            <section>
+              {sectionTitle(l("sectionFailedPaths", "Failed paths"))}
+              <ul className="list-disc space-y-1 pl-5 text-vesti-base font-sans text-text-primary">
+                {payload.failed_paths.map((path, index) => (
+                  <li key={index}>
+                    {path.approach}
+                    {path.why_failed ? (
+                      <span className="text-text-secondary">
+                        {" — "}
+                        {l("failedWhy", "Why it failed")}: {path.why_failed}
+                      </span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+
           {payload.open_issues.length > 0 ? (
             <section>
               {sectionTitle(l("sectionIssues", "Open issues"))}
@@ -249,6 +327,32 @@ export function RelayPanel({ pack, onClose, storage, labels }: RelayPanelProps) 
             </section>
           ) : null}
 
+          {payload.verification.commands.length > 0 ||
+          payload.verification.last_results.length > 0 ? (
+            <section>
+              {sectionTitle(l("sectionVerification", "Verification"))}
+              {payload.verification.commands.length > 0 ? (
+                <div className="space-y-1">
+                  {payload.verification.commands.map((command, index) => (
+                    <code
+                      key={index}
+                      className="block rounded-md border border-border-subtle bg-bg-surface-card px-2 py-1 font-mono text-[12px] text-text-primary"
+                    >
+                      {command}
+                    </code>
+                  ))}
+                </div>
+              ) : null}
+              {payload.verification.last_results.length > 0 ? (
+                <ul className="mt-1.5 list-disc space-y-1 pl-5 text-vesti-sm font-sans text-text-secondary">
+                  {payload.verification.last_results.map((result, index) => (
+                    <li key={index}>{result}</li>
+                  ))}
+                </ul>
+              ) : null}
+            </section>
+          ) : null}
+
           {payload.next_steps.length > 0 ? (
             <section>
               {sectionTitle(l("sectionNext", "Next steps"))}
@@ -257,6 +361,31 @@ export function RelayPanel({ pack, onClose, storage, labels }: RelayPanelProps) 
                   <li key={index}>{step}</li>
                 ))}
               </ol>
+            </section>
+          ) : null}
+
+          {payload.confidence ? (
+            <section>
+              {sectionTitle(l("sectionConfidence", "Confidence"))}
+              <div className="flex flex-wrap items-center gap-2">
+                <span
+                  className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-vesti-sm font-sans font-medium ${
+                    payload.confidence.overall >= 0.8
+                      ? "bg-accent-primary-light text-accent-primary"
+                      : payload.confidence.overall >= 0.5
+                        ? "bg-bg-surface-card text-text-secondary"
+                        : "bg-bg-surface-card text-danger"
+                  }`}
+                >
+                  {Math.round(payload.confidence.overall * 100)}%
+                </span>
+                {payload.confidence.low_areas.length > 0 ? (
+                  <span className="text-vesti-sm font-sans text-text-tertiary">
+                    {l("confidenceLowAreas", "Low-confidence areas")}:{" "}
+                    {payload.confidence.low_areas.join("、")}
+                  </span>
+                ) : null}
+              </div>
             </section>
           ) : null}
 

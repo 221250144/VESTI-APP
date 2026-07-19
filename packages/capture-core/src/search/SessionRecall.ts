@@ -31,6 +31,17 @@ export interface SessionRecallHit {
   score: number;
   snippet: string;
   oneLiner: string | null;
+  /**
+   * 'subagent' when this entry exists (partly) because a subagent session of
+   * the displayed session matched. Main sessions fold their subagents' hits
+   * in; a subagent is listed on its own only when its parent session is not
+   * in the database.
+   */
+  hitSource?: 'main' | 'subagent';
+  /** Parent session the hit is attributed to (== sessionId when attributed). */
+  attributedSessionId?: string;
+  /** The subagent session that produced the hit, when hitSource='subagent'. */
+  subagentSessionId?: string;
 }
 
 /** Word tokens usable for FTS MATCH and snippet locating. */
@@ -116,6 +127,11 @@ function rankVectorHits(db: Database, queryVector: Float32Array, limit: number):
  * Recall the top-K sessions for a query. FTS hit lists are fused with the
  * (optional) digest-embedding ranking via RRF; sessions are returned with a
  * snippet from their best-ranked message hit.
+ *
+ * Subagent attribution (A1): a hit on a subagent session is attributed to its
+ * parent session (subagent_links) — the parent entry absorbs the subagent's
+ * score and snippet and is marked hitSource='subagent' with the child's id.
+ * A subagent is listed on its own only when its parent session is missing.
  */
 export function recallSessions(db: Database, query: string, options: SessionRecallOptions = {}): SessionRecallHit[] {
   const topK = options.topK ?? 5;
@@ -155,10 +171,17 @@ export function recallSessions(db: Database, query: string, options: SessionReca
       scores.set(sessionId, (scores.get(sessionId) ?? 0) + 1 / (RRF_K + index + 1));
     });
   }
-  const ranked = [...scores.entries()].sort(
-    (a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0),
-  ).slice(0, topK);
-  if (ranked.length === 0) return [];
+
+  // child session id → parent session id, for hit attribution.
+  const parentByChild = new Map<string, string>();
+  for (const row of db.prepare(`
+    SELECT parent_session_id, child_session_id FROM subagent_links
+    WHERE child_session_id IS NOT NULL
+  `).all() as Array<{ parent_session_id: string; child_session_id: string }>) {
+    if (!parentByChild.has(row.child_session_id)) {
+      parentByChild.set(row.child_session_id, row.parent_session_id);
+    }
+  }
 
   const metaStmt = db.prepare(`
     SELECT ws.id, ws.title, ws.platform, sd.one_liner
@@ -166,23 +189,72 @@ export function recallSessions(db: Database, query: string, options: SessionReca
     LEFT JOIN session_digests sd ON sd.session_id = ws.id
     WHERE ws.id = ?
   `);
+  type MetaRow = { id: string; title: string; platform: string; one_liner: string | null };
+  const metaCache = new Map<string, MetaRow | null>();
+  const metaOf = (sessionId: string): MetaRow | null => {
+    if (!metaCache.has(sessionId)) {
+      metaCache.set(sessionId, (metaStmt.get(sessionId) as MetaRow | undefined) ?? null);
+    }
+    return metaCache.get(sessionId) ?? null;
+  };
 
-  return ranked.map(([sessionId, score]) => {
-    const meta = metaStmt.get(sessionId) as { id: string; title: string; platform: string; one_liner: string | null } | undefined;
+  // Fold subagent scores into their parent entry. The display id is the
+  // parent when it exists in the database, otherwise the subagent itself.
+  interface Attribution {
+    displayId: string;
+    score: number;
+    /** Best-scoring contributor, for snippet selection. */
+    bestContributorId: string;
+    bestContributorScore: number;
+    directHit: boolean;
+  }
+  const byDisplay = new Map<string, Attribution>();
+  for (const [sessionId, score] of scores) {
+    const parentId = parentByChild.get(sessionId);
+    const isSubagent = parentId !== undefined && metaOf(parentId) !== null;
+    const displayId = isSubagent ? parentId : sessionId;
+    let entry = byDisplay.get(displayId);
+    if (!entry) {
+      entry = { displayId, score: 0, bestContributorId: sessionId, bestContributorScore: 0, directHit: false };
+      byDisplay.set(displayId, entry);
+    }
+    entry.score += score;
+    if (score > entry.bestContributorScore) {
+      entry.bestContributorScore = score;
+      entry.bestContributorId = sessionId;
+    }
+    if (!isSubagent) {
+      entry.directHit = true;
+    }
+  }
+
+  const ranked = [...byDisplay.values()].sort(
+    (a, b) => b.score - a.score || (a.displayId < b.displayId ? -1 : a.displayId > b.displayId ? 1 : 0),
+  ).slice(0, topK);
+  if (ranked.length === 0) return [];
+
+  return ranked.map((entry) => {
+    const meta = metaOf(entry.displayId);
     // FTS may hit a thinking/tool column whose content_text is empty; a blank
     // snippet is worse than no snippet — fall back to the digest one-liner,
-    // then to the session title.
-    const hit = snippetBySession.get(sessionId);
+    // then to the session title. The snippet comes from the best contributor,
+    // which may be the subagent whose hit surfaced this parent entry.
+    const hit = snippetBySession.get(entry.bestContributorId);
     const snippet = hit && hit.trim()
       ? hit
       : meta?.one_liner?.trim() || meta?.title || '';
+    const attributed = !entry.directHit;
     return {
-      sessionId,
+      sessionId: entry.displayId,
       title: meta?.title ?? 'Untitled',
       platform: meta?.platform ?? '',
-      score,
+      score: entry.score,
       snippet,
       oneLiner: meta?.one_liner ?? null,
+      hitSource: attributed ? 'subagent' : 'main',
+      ...(attributed
+        ? { attributedSessionId: entry.displayId, subagentSessionId: entry.bestContributorId }
+        : {}),
     };
   });
 }

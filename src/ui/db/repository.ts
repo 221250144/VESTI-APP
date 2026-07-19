@@ -21,6 +21,7 @@ import type {
   DashboardStats,
   DataOverviewSnapshot,
   Deposit,
+  DepositMaintainOp,
   DepositScope,
   DepositTemplate,
   ExploreAgentMeta,
@@ -3091,9 +3092,14 @@ function toRelayPack(record: RelayPackRecord & { id: number }): RelayPack {
     title: record.title,
     goal: "",
     current_state: "",
+    completed: [],
+    in_progress: [],
+    git_state: { dirty_files: [], last_commits: [] },
     key_decisions: [],
     key_files: [],
+    failed_paths: [],
     open_issues: [],
+    verification: { commands: [], last_results: [] },
     next_steps: [],
     suggested_prompt: record.suggested_prompt
   }
@@ -3102,6 +3108,8 @@ function toRelayPack(record: RelayPackRecord & { id: number }): RelayPack {
     createdAt: record.created_at,
     title: record.title,
     conversationIds: parseRelayPackJson<number[]>(record.conversation_ids, []),
+    // Stored v1 packs lack the v2 fields; the render layer normalizes them
+    // (@vesti/ui normalizeRelayPackPayload).
     pack: parseRelayPackJson<RelayPackPayload>(record.pack, emptyPack),
     suggestedPrompt: record.suggested_prompt,
     source: "manual"
@@ -3164,6 +3172,9 @@ export interface CreateDepositInput {
   version?: number
   prevId?: number | null
   customInstruction?: string | null
+  /** mem0-style maintain ops behind this version (null when stored without a
+   * maintain pass). Persisted as a non-indexed JSON string. */
+  lastOps?: DepositMaintainOp[] | null
 }
 
 const DEPOSIT_TEMPLATES: readonly DepositTemplate[] = [
@@ -3187,6 +3198,35 @@ function normalizeDepositScope(value: unknown): DepositScope {
   return { kind: "selection", conversationIds: [] }
 }
 
+function parseDepositLastOps(value: string | null | undefined): DepositMaintainOp[] | null {
+  if (!value) return null
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (!Array.isArray(parsed)) return null
+    const ops: DepositMaintainOp[] = []
+    for (const item of parsed) {
+      if (!item || typeof item !== "object") return null
+      const entry = item as Partial<DepositMaintainOp>
+      if (
+        (entry.op !== "ADD" && entry.op !== "UPDATE" && entry.op !== "DELETE" && entry.op !== "NOOP") ||
+        typeof entry.section !== "string"
+      ) {
+        return null
+      }
+      ops.push({
+        op: entry.op,
+        section: entry.section,
+        old_text: typeof entry.old_text === "string" ? entry.old_text : undefined,
+        new_text: typeof entry.new_text === "string" ? entry.new_text : undefined,
+        reason: typeof entry.reason === "string" ? entry.reason : ""
+      })
+    }
+    return ops
+  } catch {
+    return null
+  }
+}
+
 function toDeposit(record: DepositRecord & { id: number }): Deposit {
   return {
     id: record.id,
@@ -3198,7 +3238,8 @@ function toDeposit(record: DepositRecord & { id: number }): Deposit {
     contentMarkdown: record.content_markdown,
     version: Number.isFinite(record.version) && record.version > 0 ? Math.floor(record.version) : 1,
     prevId: typeof record.prev_id === "number" ? record.prev_id : null,
-    customInstruction: record.custom_instruction ?? null
+    customInstruction: record.custom_instruction ?? null,
+    lastOps: parseDepositLastOps(record.last_ops)
   }
 }
 
@@ -3215,7 +3256,8 @@ export async function createDeposit(input: CreateDepositInput): Promise<Deposit>
     content_markdown: input.contentMarkdown,
     version: input.version ?? 1,
     prev_id: input.prevId ?? null,
-    custom_instruction: input.customInstruction ?? null
+    custom_instruction: input.customInstruction ?? null,
+    last_ops: input.lastOps?.length ? JSON.stringify(input.lastOps) : null
   })
   const record = await db.deposits.get(id)
   if (!record || record.id === undefined) {

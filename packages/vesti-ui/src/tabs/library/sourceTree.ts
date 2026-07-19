@@ -7,7 +7,7 @@
 // work-session id, identical to the tree's session id); browser rows map by
 // URL hostname to the tree's `web:<domain>` project keys.
 
-import type { Conversation, ConversationTree, Topic } from "../../types";
+import type { Conversation, ConversationTree, ConversationTreeSession, Topic } from "../../types";
 
 /** Capture-lineage fields the desktop shell stamps on Dexie records. They are
  * absent (undefined) in the extension build. */
@@ -82,6 +82,10 @@ export type ConversationTreeLookup = {
   bySessionId: Map<string, { source: SourceRef; projectKey: string }>;
   /** normalized project path/domain → project placement (fallback join) */
   byProjectPath: Map<string, { source: SourceRef; projectKey: string }>;
+  /** subagent session id → parent session id (A1; children nested in the tree) */
+  subagentParentByChildId: Map<string, string>;
+  /** main session id → its subagent child nodes (A1) */
+  subagentsByParentId: Map<string, ConversationTreeSession[]>;
 };
 
 export function buildConversationTreeLookup(
@@ -89,6 +93,8 @@ export function buildConversationTreeLookup(
 ): ConversationTreeLookup {
   const bySessionId = new Map<string, { source: SourceRef; projectKey: string }>();
   const byProjectPath = new Map<string, { source: SourceRef; projectKey: string }>();
+  const subagentParentByChildId = new Map<string, string>();
+  const subagentsByParentId = new Map<string, ConversationTreeSession[]>();
   for (const source of tree?.sources ?? []) {
     const ref: SourceRef = { platform: source.platform, host: source.host };
     for (const project of source.projects) {
@@ -97,14 +103,64 @@ export function buildConversationTreeLookup(
       if (pathKey && !byProjectPath.has(pathKey)) {
         byProjectPath.set(pathKey, placement);
       }
-      for (const session of project.sessions) {
+      const indexSession = (
+        session: ConversationTreeSession,
+        parentId?: string,
+      ) => {
         if (!bySessionId.has(session.id)) {
           bySessionId.set(session.id, placement);
         }
-      }
+        if (parentId) {
+          if (!subagentParentByChildId.has(session.id)) {
+            subagentParentByChildId.set(session.id, parentId);
+          }
+          const siblings = subagentsByParentId.get(parentId) ?? [];
+          siblings.push(session);
+          subagentsByParentId.set(parentId, siblings);
+        }
+        for (const child of session.children ?? []) indexSession(child, session.id);
+      };
+      for (const session of project.sessions) indexSession(session);
     }
   }
-  return { bySessionId, byProjectPath };
+  return { bySessionId, byProjectPath, subagentParentByChildId, subagentsByParentId };
+}
+
+/** A1: true when the conversation is a captured subagent session (folded
+ * under its parent in the tree, the counts and the default library list). */
+export function isSubagentConversation<T extends object>(
+  conversation: T & { _cli_id?: unknown },
+  lookup: ConversationTreeLookup,
+): boolean {
+  return (
+    typeof conversation._cli_id === "string" &&
+    lookup.subagentParentByChildId.has(conversation._cli_id)
+  );
+}
+
+/** A1: merge the key_topics of a session's subagent descendants (deduped,
+ * first-seen order, capped) for the parent digest header. Read-only. */
+export function collectSubagentTopics(
+  children: ConversationTreeSession[] | undefined,
+  limit = 5,
+): string[] {
+  const topics: string[] = [];
+  const seen = new Set<string>();
+  const walk = (nodes: ConversationTreeSession[]) => {
+    for (const node of nodes) {
+      for (const topic of node.keyTopics) {
+        if (topics.length >= limit) return;
+        if (!seen.has(topic)) {
+          seen.add(topic);
+          topics.push(topic);
+        }
+      }
+      if (topics.length < limit) walk(node.children ?? []);
+      if (topics.length >= limit) return;
+    }
+  };
+  walk(children ?? []);
+  return topics;
 }
 
 // ---- Conversation → tree placement ------------------------------------------
@@ -168,7 +224,8 @@ export function collectTopicSubtreeIds(topics: Topic[], topicId: number): Set<nu
  * Filter the library conversation list by a source-tree selection. Topic
  * selections include the whole topic subtree (matching the aggregated counts)
  * and stay scoped to the enclosing project, so the list matches the counts
- * shown in the tree.
+ * shown in the tree. A1: subagent sessions are folded under their parent and
+ * never listed here — they surface through the parent card's subagent strip.
  */
 export function filterConversationsBySelection<T extends Conversation>(
   conversations: T[],
@@ -182,6 +239,7 @@ export function filterConversationsBySelection<T extends Conversation>(
       ? collectTopicSubtreeIds(topics, selection.topicId)
       : null;
   return conversations.filter((conversation) => {
+    if (isSubagentConversation(conversation, lookup)) return false;
     const placement = resolveConversationPlacement(conversation, lookup);
     if (!placement) return false;
     if (!sameSource(placement.source, selection.source)) return false;
@@ -249,7 +307,8 @@ function pruneTopicTree(
  * Build the aggregated nav model: per source/project conversation counts plus
  * the per-project pruned topics tree. Conversations in the trash or archive
  * are excluded (same rule as the topic counts in the data provider). Projects
- * and sources with no matching conversations are omitted.
+ * and sources with no matching conversations are omitted. A1: subagent
+ * sessions fold into their parent — only main sessions count.
  */
 export function buildSourceTreeModel(args: {
   tree: ConversationTree | null;
@@ -264,6 +323,7 @@ export function buildSourceTreeModel(args: {
   const aggregates = new Map<string, Map<string, ProjectAggregate>>();
   for (const conversation of conversations) {
     if (conversation.is_trash || conversation.is_archived) continue;
+    if (isSubagentConversation(conversation, lookup)) continue;
     const placement = resolveConversationPlacement(conversation, lookup);
     if (!placement) continue;
     const sKey = sourceKey(placement.source);

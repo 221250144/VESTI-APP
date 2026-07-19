@@ -64,6 +64,8 @@ export interface RelatedConversation {
   title: string;
   platform: Platform;
   similarity: number;
+  /** A1: the recall hit surfaced through a subagent of this conversation. */
+  fromSubagent?: boolean;
 }
 
 export type ExploreMode = "agent" | "classic";
@@ -482,6 +484,12 @@ export type StorageApi = {
   ) => Promise<RoundtableResult>;
   getSummary?: (conversationId: number) => Promise<ChatSummaryData | null>;
   generateSummary?: (conversationId: number) => Promise<ChatSummaryData>;
+  /** AITI coverage: how many live conversations already have a (structured)
+   * summary, and which ones are still pending. Drives the 摘要覆盖率 header. */
+  getSummaryCoverage?: () => Promise<SummaryCoverage>;
+  /** True when an LLM is configured (demo proxy or BYOK key) so summary
+   * generation can run; false disables the batch button with a hint. */
+  getLlmConfigured?: () => Promise<boolean>;
   /** Bulk digest fetch for the library list/detail views (P1.5). */
   getConversationDigests?: () => Promise<ConversationDigest[]>;
   /** Desktop conversation tree for the source-tree nav (P2b). */
@@ -724,21 +732,52 @@ export interface ConversationDigest {
 // ---- P4a AI relay (handoff packs) -----------------------------------------
 // Mirror of the desktop db relay types (src/ui/db/types.ts). The pack payload
 // keeps the relay agent's snake_case JSON contract verbatim so a stored pack
-// round-trips losslessly.
+// round-trips losslessly. Schema v2 fields are additive; stored v1 packs lack
+// them and are normalized at render time (normalizeRelayPackPayload).
 export interface RelayPackKeyFile {
   path: string;
   why: string;
   last_state: string;
 }
 
+export interface RelayPackGitState {
+  branch?: string;
+  dirty_files: string[];
+  last_commits: string[];
+}
+
+export interface RelayPackFailedPath {
+  approach: string;
+  why_failed: string;
+}
+
+export interface RelayPackVerification {
+  commands: string[];
+  last_results: string[];
+}
+
+export interface RelayPackConfidence {
+  /** 0-1 overall confidence. */
+  overall: number;
+  low_areas: string[];
+}
+
 export interface RelayPackPayload {
   title: string;
   goal: string;
+  /** v1 free-text state; v2 packs carry completed/in_progress instead. */
   current_state: string;
+  completed: string[];
+  in_progress: string[];
+  git_state: RelayPackGitState;
   key_decisions: string[];
   key_files: RelayPackKeyFile[];
+  failed_paths: RelayPackFailedPath[];
   open_issues: string[];
+  verification: RelayPackVerification;
   next_steps: string[];
+  /** Absent on v1 packs and when the model gave no usable confidence. */
+  confidence?: RelayPackConfidence;
   suggested_prompt: string;
 }
 
@@ -807,6 +846,17 @@ export type DepositScope =
   | { kind: "timerange"; start: number; end: number }
   | { kind: "selection"; conversationIds: number[] };
 
+/** mem0-style deposit maintain op (mirror of src/shared/depositMaintain.ts). */
+export type DepositMaintainOpName = "ADD" | "UPDATE" | "DELETE" | "NOOP";
+
+export interface DepositMaintainOp {
+  op: DepositMaintainOpName;
+  section: string;
+  old_text?: string;
+  new_text?: string;
+  reason: string;
+}
+
 export interface Deposit {
   id: number;
   createdAt: number;
@@ -818,6 +868,9 @@ export interface Deposit {
   version: number;
   prevId: number | null;
   customInstruction: string | null;
+  /** Maintain ops recorded when this version was merged from a fresh
+   * distillation; null/undefined when stored without a maintain pass. */
+  lastOps?: DepositMaintainOp[] | null;
 }
 
 export interface CreateDepositInput {
@@ -828,6 +881,8 @@ export interface CreateDepositInput {
   version?: number;
   prevId?: number | null;
   customInstruction?: string | null;
+  /** mem0-style maintain ops behind this version (null without a maintain pass). */
+  lastOps?: DepositMaintainOp[] | null;
 }
 
 /** Distill generation request: resolve the scope, run the distill agent and
@@ -893,6 +948,13 @@ export interface ConversationTreeSession {
   keyTopics: string[];
   keyFiles: string[];
   decisions: string[];
+  // A1 subagent folding (optional: absent on renderer-built browser nodes)
+  role?: "main" | "subagent";
+  parentSessionId?: string;
+  orphan?: boolean;
+  childCount?: number;
+  descendantMessageCount?: number;
+  children?: ConversationTreeSession[];
 }
 
 export interface ConversationTreeProject {
@@ -1131,6 +1193,11 @@ export interface ExploreLabels {
   };
   // Helper returns / summaries
   inRange: string;
+  /** A1: badge on recall sources that surfaced through a subagent session. */
+  fromSubagent?: string;
+  /** Empty-KB guidance in the ask starter deck (no conversations to recall). */
+  libraryEmptyTitle?: string;
+  libraryEmptyHint?: string;
   unknown: string;
   unavailable: string;
   noToolCalls: string;
@@ -1735,6 +1802,24 @@ export interface DashboardLabels {
     evidenceConversation: string;
     /** P5: export-share-image button. */
     exportCard: string;
+    /** 摘要覆盖率 header: "{x}" summarized / "{y}" total / "{z}" structured. */
+    coverageSummary: string;
+    /** Explanation under the coverage line when structured < 5; "{n}" = gap. */
+    coverageNeedMore: string;
+    /** Coverage line shown when there are no conversations at all. */
+    coverageEmpty: string;
+    /** 立即生成摘要 batch button. */
+    generateSummaries: string;
+    /** Batch progress: "{done}" finished of "{total}". */
+    generatingSummaries: string;
+    /** Cancel an in-flight batch run. */
+    cancelGeneration: string;
+    /** Batch result: "{done}" generated, "{failed}" failed. */
+    summariesResult: string;
+    /** Disabled-button hint when no LLM is configured. */
+    llmMissing: string;
+    /** Pending queue is empty — everything already has a structured summary. */
+    allSummarized: string;
   };
   learn: {
     modeLearn: string;
@@ -1748,10 +1833,17 @@ export interface DashboardLabels {
     glossaryTitle: string;
     openLoopsTitle: string;
     openLoopsEmpty: string;
+    /** Weak-data hint shown when the map is available but built from few
+     * summaries — points at generating more (same guidance as AITI). */
+    weakHint: string;
   };
   roundtable: {
     title: string;
     subtitle: string;
+    /** 诚实降级: shown instead of the fake run until the multi-turn
+     * orchestration is real. */
+    comingSoonTitle: string;
+    comingSoonBody: string;
     questionPlaceholder: string;
     personasLabel: string;
     run: string;
@@ -1779,6 +1871,10 @@ export interface PlazaPrompt {
   title: string;
   body: string;
   category: string;
+  /** Optional one-liner: what the prompt is for / when to use it. */
+  description?: string;
+  /** Optional keywords shown as small chips. */
+  tags?: string[];
   source: string;
   sourceUrl?: string;
   featured?: boolean;
@@ -1814,6 +1910,28 @@ export interface AitiProfile {
   sampleSize: number;
   axes: AitiAxisScore[];
   obsessions: AitiObsession[];
+}
+
+/** AITI 摘要覆盖率 — computed host-side from Dexie conversations + summaries
+ * (see lib/summaryCoverage.ts for the pure computation). */
+export interface SummaryCoverage {
+  /** live conversations (not archived / trashed) */
+  totalConversations: number;
+  /** live conversations with at least one summary row */
+  summarizedCount: number;
+  /** live conversations whose latest summary is structured (feeds AITI) */
+  structuredCount: number;
+  /** live, summarizable conversations still lacking a structured summary,
+   * newest first */
+  pendingConversationIds: number[];
+}
+
+/** Progress of one 立即生成摘要 batch run (concurrency 1, capped). */
+export interface SummaryBatchState {
+  status: "running" | "done";
+  total: number;
+  done: number;
+  failed: number;
 }
 
 /**
