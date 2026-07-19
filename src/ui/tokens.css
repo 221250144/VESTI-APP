@@ -639,7 +639,7 @@
 
   .tag-paper {
     border: 1px solid hsl(var(--border-subtle));
-    background-color: rgba(255, 255, 255, 0.6);
+    background-color: hsl(var(--bg-primary) / 0.72);
   }
 
   .appearance-shell {
@@ -957,7 +957,7 @@
   }
 
   .model-access-switch[data-state="checked"] .model-access-switch-thumb {
-    background-color: #fff;
+    background-color: hsl(var(--text-inverse));
   }
 
   .dark .model-access-switch {

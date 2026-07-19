@@ -86,6 +86,9 @@ export function Capsule() {
   });
   const [locale, setLocale] = useState<Locale>('zh');
   const [skinId, setSkinId] = useState<string>(DEFAULT_SKIN_ID);
+  const [dragging, setDragging] = useState(false);
+  const dragFrameRef = useRef<number | null>(null);
+  const pendingPointRef = useRef<{ x: number; y: number } | null>(null);
   const dragRef = useRef<{
     pointerId: number;
     startX: number;
@@ -127,12 +130,16 @@ export function Capsule() {
 
   const handlePointerDown = useCallback((event: React.PointerEvent) => {
     if (event.button !== 0) return;
+    if ((event.target as HTMLElement).closest('button')) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
     dragRef.current = {
       pointerId: event.pointerId,
       startX: event.screenX,
       startY: event.screenY,
       dragging: false,
     };
+    capsuleApi()?.dragStart(event.screenX, event.screenY);
   }, []);
 
   const handlePointerMove = useCallback((event: React.PointerEvent) => {
@@ -142,9 +149,18 @@ export function Capsule() {
     const dy = event.screenY - drag.startY;
     if (!drag.dragging && Math.hypot(dx, dy) >= DRAG_THRESHOLD_PX) {
       drag.dragging = true;
+      setDragging(true);
     }
     if (drag.dragging) {
-      capsuleApi()?.dragMove(event.screenX, event.screenY);
+      pendingPointRef.current = { x: event.screenX, y: event.screenY };
+      if (dragFrameRef.current === null) {
+        dragFrameRef.current = window.requestAnimationFrame(() => {
+          dragFrameRef.current = null;
+          const point = pendingPointRef.current;
+          pendingPointRef.current = null;
+          if (point) capsuleApi()?.dragMove(point.x, point.y);
+        });
+      }
     }
   }, []);
 
@@ -153,30 +169,60 @@ export function Capsule() {
       const drag = dragRef.current;
       dragRef.current = null;
       if (!drag || drag.pointerId !== event.pointerId) return;
+      if (dragFrameRef.current !== null) {
+        window.cancelAnimationFrame(dragFrameRef.current);
+        dragFrameRef.current = null;
+      }
+      pendingPointRef.current = null;
+      setDragging(false);
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
       if (drag.dragging) {
+        capsuleApi()?.dragMove(event.screenX, event.screenY);
         void capsuleApi()?.dragEnd(event.screenX, event.screenY);
       } else {
+        capsuleApi()?.dragCancel();
         void capsuleApi()?.setExpanded(!state.expanded);
       }
     },
     [state.expanded],
   );
 
+  const handlePointerCancel = useCallback((event: React.PointerEvent) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    if (dragFrameRef.current !== null) {
+      window.cancelAnimationFrame(dragFrameRef.current);
+      dragFrameRef.current = null;
+    }
+    pendingPointRef.current = null;
+    setDragging(false);
+    capsuleApi()?.dragCancel();
+  }, []);
+
   const handleContextMenu = useCallback((event: React.MouseEvent) => {
     event.preventDefault();
-    capsuleApi()?.showContextMenu();
-  }, []);
+    capsuleApi()?.showContextMenu({
+      open: copy.menuOpen,
+      sync: copy.menuSync,
+      watching: copy.menuWatching,
+      hide: copy.menuHide,
+    });
+  }, [copy]);
 
   if (!state.expanded) {
     return (
       <div className="capsule-root">
         <div
-          className={`capsule-ball${state.syncing ? ' syncing' : ''}`}
+          className={`capsule-ball${state.syncing ? ' syncing' : ''}${dragging ? ' dragging' : ''}`}
           role="button"
           aria-label={copy.dock}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
           onContextMenu={handleContextMenu}
         >
           <img src={skin.collapsed} alt="Vesti" draggable={false} />
@@ -190,10 +236,11 @@ export function Capsule() {
     <div className="capsule-root">
       <div className="capsule-panel" onContextMenu={handleContextMenu}>
         <div
-          className="capsule-panel-header"
+          className={`capsule-panel-header${dragging ? ' dragging' : ''}`}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
         >
           <img src={skin.collapsed} alt="Vesti" draggable={false} />
           <span className="title">{copy.dock}</span>

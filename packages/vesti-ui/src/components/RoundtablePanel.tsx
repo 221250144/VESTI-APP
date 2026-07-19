@@ -143,7 +143,7 @@ export function RoundtablePanel({ storage, labels, sendToLabels }: RoundtablePan
             type="button"
             onClick={() => void run()}
             disabled={loading || selected.length === 0}
-            className="inline-flex items-center gap-2 rounded-lg bg-accent-primary px-4 py-2 text-[13px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+            className="inline-flex items-center gap-2 rounded-lg bg-accent-primary px-4 py-2 text-[13px] font-medium text-text-inverse transition-opacity hover:opacity-90 disabled:opacity-50"
           >
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
             {loading ? labels.running : labels.run}

@@ -95,9 +95,11 @@ const capsule: VestiCapsuleApi = {
   openMainWindow: () => ipcRenderer.invoke(IPC.capsuleOpenMain),
   hideCapsule: () => ipcRenderer.invoke(IPC.capsuleHide),
   setExpanded: expanded => ipcRenderer.invoke(IPC.capsuleSetExpanded, expanded),
+  dragStart: (screenX, screenY) => ipcRenderer.send(IPC.capsuleDragStart, screenX, screenY),
+  dragCancel: () => ipcRenderer.send(IPC.capsuleDragCancel),
   dragMove: (screenX, screenY) => ipcRenderer.send(IPC.capsuleDragMove, screenX, screenY),
   dragEnd: (screenX, screenY) => ipcRenderer.invoke(IPC.capsuleDragEnd, screenX, screenY),
-  showContextMenu: () => ipcRenderer.send(IPC.capsuleContextMenu),
+  showContextMenu: labels => ipcRenderer.send(IPC.capsuleContextMenu, labels),
   onStateChanged: listener => {
     const wrapped = (_event: unknown, state: CapsuleState) => listener(state);
     ipcRenderer.on(IPC.capsuleStateChanged, wrapped);

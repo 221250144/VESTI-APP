@@ -46,6 +46,24 @@ export interface SessionDetail {
   messages: SessionMessage[];
 }
 
+export interface UsageBreakdown {
+  conversations: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+export interface OverviewAnalytics {
+  cacheTokens: number;
+  platformBreakdown: Record<string, number>;
+  platformTokenBreakdown: Record<string, UsageBreakdown>;
+  modelBreakdown: Record<string, number>;
+  modelTokenBreakdown: Record<string, UsageBreakdown>;
+  dailyActivity: Array<{ date: string; conversations: number; messages: number }>;
+  dailyTokenUsage: Array<{ date: string; inputTokens: number; outputTokens: number }>;
+  topProjects: Array<{ path: string; conversations: number }>;
+  toolCategoryBreakdown: Record<string, number>;
+}
+
 export interface Overview {
   sources: SourceStatus[];
   sessions: SessionSummary[];
@@ -56,6 +74,7 @@ export interface Overview {
     outputTokens: number;
     storageSize: number;
   };
+  analytics: OverviewAnalytics;
   watching: boolean;
   syncing: boolean;
 }
@@ -86,7 +105,7 @@ export interface WslStatusView {
 
 export type LlmAccessMode = 'demo_proxy' | 'custom_byok';
 export type ProxyMode = 'system' | 'direct' | 'custom';
-export type AgentOutputLanguage = 'zh-CN' | 'en-US';
+export type AgentOutputLanguage = 'zh-CN' | 'en-US' | 'ja-JP' | 'ko-KR';
 
 export interface GeneralSettings {
   launchAtLogin: boolean;
@@ -129,6 +148,8 @@ export interface UpstreamSettingsView {
   obsidianVaultPath: string;
   /** Auto-export newly synced conversations into the vault after each sync. */
   obsidianAutoExport: boolean;
+  /** Capture-time watermark used to keep enabling auto-export from replaying all history. */
+  obsidianAutoExportSince: number | null;
   /** Notion parent page_id or database_id (dashes optional). */
   notionParentId: string;
   /** Resolved at verify time so exports know which parent shape to send. */
@@ -353,6 +374,8 @@ export const IPC = {
   capsuleOpenMain: 'vesti:capsule-open-main',
   capsuleHide: 'vesti:capsule-hide',
   capsuleSetExpanded: 'vesti:capsule-set-expanded',
+  capsuleDragStart: 'vesti:capsule-drag-start',
+  capsuleDragCancel: 'vesti:capsule-drag-cancel',
   capsuleDragMove: 'vesti:capsule-drag-move',
   capsuleDragEnd: 'vesti:capsule-drag-end',
   capsuleContextMenu: 'vesti:capsule-context-menu',
@@ -380,6 +403,13 @@ export interface CapsuleState {
   expanded: boolean;
 }
 
+export interface CapsuleContextMenuLabels {
+  open: string;
+  sync: string;
+  watching: string;
+  hide: string;
+}
+
 /**
  * API surface for the floating capsule window, exposed as
  * window.vestiCapsule.
@@ -391,9 +421,11 @@ export interface VestiCapsuleApi {
   openMainWindow(): Promise<void>;
   hideCapsule(): Promise<void>;
   setExpanded(expanded: boolean): Promise<void>;
+  dragStart(screenX: number, screenY: number): void;
+  dragCancel(): void;
   dragMove(screenX: number, screenY: number): void;
   dragEnd(screenX: number, screenY: number): Promise<void>;
-  showContextMenu(): void;
+  showContextMenu(labels: CapsuleContextMenuLabels): void;
   onStateChanged(listener: (state: CapsuleState) => void): () => void;
 }
 

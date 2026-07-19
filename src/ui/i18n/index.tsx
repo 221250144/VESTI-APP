@@ -6,6 +6,7 @@ import type { TranslationsType } from "./translations/en";
 import { zhTranslations } from "./translations/zh";
 import { jaTranslations } from "./translations/ja";
 import { koTranslations } from "./translations/ko";
+import { jaDesktopCompletion, koDesktopCompletion } from "./translations/desktopCompletions";
 import { withEnglishFallback } from "./mergeTranslations";
 import { detectAndSetLanguage, setLanguage, subscribeLanguageSettings } from "../services/languageSettingsService";
 
@@ -19,8 +20,8 @@ export type Translations = TranslationsType;
 const translationsByLocale: Record<SupportedLocale, Translations> = {
   en: enTranslations,
   zh: withEnglishFallback(zhTranslations),
-  ja: withEnglishFallback(jaTranslations),
-  ko: withEnglishFallback(koTranslations),
+  ja: withEnglishFallback(jaTranslations, jaDesktopCompletion),
+  ko: withEnglishFallback(koTranslations, koDesktopCompletion),
 };
 
 interface I18nContextValue {

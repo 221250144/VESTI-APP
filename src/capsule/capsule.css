@@ -97,8 +97,16 @@ body,
   justify-content: center;
   cursor: pointer;
   user-select: none;
+  touch-action: none;
   animation: capsule-enter 200ms ease-out;
   transition: transform 160ms ease-out;
+}
+
+.capsule-ball.dragging,
+.capsule-ball.dragging:hover,
+.capsule-ball.dragging:active {
+  cursor: grabbing;
+  transform: none;
 }
 
 .capsule-ball:hover {
@@ -178,6 +186,11 @@ body,
   padding: 14px 14px 10px;
   cursor: grab;
   user-select: none;
+  touch-action: none;
+}
+
+.capsule-panel-header.dragging {
+  cursor: grabbing;
 }
 
 .capsule-panel-header img {

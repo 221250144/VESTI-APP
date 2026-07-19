@@ -36,9 +36,12 @@ export function getAgentKindDefinition(kind: string): AgentKindDefinition {
 }
 
 function promptAffixes(preferences: RuntimeAgentSettings): { language: string; custom: string } {
-  const language = preferences.outputLanguage === 'en-US'
-    ? 'Respond in clear English Markdown.'
-    : '使用清晰、简洁的中文 Markdown。';
+  const language = {
+    'zh-CN': '使用清晰、简洁的中文 Markdown。',
+    'en-US': 'Respond in clear English Markdown.',
+    'ja-JP': '明確で簡潔な日本語の Markdown で回答してください。',
+    'ko-KR': '명확하고 간결한 한국어 Markdown으로 답변하세요.',
+  }[preferences.outputLanguage];
   const custom = preferences.customInstructions
     ? `\n用户的长期分析偏好：${preferences.customInstructions}`
     : '';
@@ -121,16 +124,17 @@ export function parseDigestPayload(raw: string): DigestPayload {
 }
 
 registerAgentKind('digest', {
-  buildPrompt({ transcript }) {
+  buildPrompt({ transcript, preferences }) {
+    const { language } = promptAffixes(preferences);
     return [
       {
         role: 'system',
-        content: '你是 Vesti 的会话索引助手。只依据提供的会话内容，输出严格 JSON（不要 Markdown 代码围栏、不要任何额外文字）。',
+        content: `你是 Vesti 的会话索引助手。只依据提供的会话内容，输出严格 JSON（不要 Markdown 代码围栏、不要任何额外文字）。${language}`,
       },
       {
         role: 'user',
         content: [
-          '请为下面的会话生成索引摘要，使用简洁的中文，输出一个 JSON 对象，字段如下：',
+          '请为下面的会话生成索引摘要，内容字段使用设置中指定的输出语言，输出一个 JSON 对象，字段如下：',
           '{"one_liner": "一句话概括会话主题（50 字以内）", "key_topics": ["关键主题，至多 6 个"], "key_files": ["涉及的关键文件路径，至多 6 个"], "decisions": ["已做出的决定，至多 6 条"], "open_questions": ["未解决的问题，至多 6 条"]}',
           '没有内容的字段输出空数组。只输出 JSON 本身。',
           '',
@@ -267,16 +271,17 @@ export function parseRelayPayload(raw: string): RelayPackPayload {
 }
 
 registerAgentKind('relay', {
-  buildPrompt({ transcript }) {
+  buildPrompt({ transcript, preferences }) {
+    const { language } = promptAffixes(preferences);
     return [
       {
         role: 'system',
-        content: '你是 Vesti 的会话交接助手。只依据提供的会话浓缩上下文做归纳，不补造事实；输出严格 JSON（不要 Markdown 代码围栏、不要任何额外文字）。',
+        content: `你是 Vesti 的会话交接助手。只依据提供的会话浓缩上下文做归纳，不补造事实；输出严格 JSON（不要 Markdown 代码围栏、不要任何额外文字）。${language}`,
       },
       {
         role: 'user',
         content: [
-          '下面是若干个相关会话的浓缩上下文（索引摘要 + 最近关键消息）。请把它们归纳成一份“交接包”，让另一个 AI 能接着继续这项工作。使用简洁的中文，输出一个 JSON 对象，字段如下：',
+          '下面是若干个相关会话的浓缩上下文（索引摘要 + 最近关键消息）。请把它们归纳成一份“交接包”，让另一个 AI 能接着继续这项工作。内容字段使用设置中指定的输出语言，输出一个 JSON 对象，字段如下：',
           '{"title": "交接包标题（30 字以内）", "goal": "这项工作要达成的目标", "current_state": "目前已完成什么、进行到哪一步", "key_decisions": ["已做出的关键决定及理由，至多 8 条"], "key_files": [{"path": "关键文件路径", "why": "为什么重要", "last_state": "该文件目前的改动状态"}，至多 8 个], "open_issues": ["尚未解决的问题，至多 8 条"], "next_steps": ["建议的下一步，按优先级排序，至多 8 条"], "suggested_prompt": "一段可直接粘贴到任意 AI 新会话开头的自包含中文交接提示词：包含背景、目标、现状、关键文件和待办，800 字以内"}',
           '没有内容的数组字段输出空数组。只输出 JSON 本身。',
           '',
@@ -291,11 +296,12 @@ registerAgentKind('relay', {
 });
 
 registerAgentKind('classify', {
-  buildPrompt({ transcript }) {
+  buildPrompt({ transcript, preferences }) {
+    const { language } = promptAffixes(preferences);
     return [
       {
         role: 'system',
-        content: '你是 Vesti 的会话分类助手。只依据提供的会话信息与现有主题树，输出严格 JSON（不要 Markdown 代码围栏、不要任何额外文字）。',
+        content: `你是 Vesti 的会话分类助手。只依据提供的会话信息与现有主题树，输出严格 JSON（不要 Markdown 代码围栏、不要任何额外文字）。${language}`,
       },
       {
         role: 'user',
@@ -409,16 +415,17 @@ export function parseExtractPayload(raw: string): ExtractPayload {
 }
 
 registerAgentKind('extract', {
-  buildPrompt({ transcript }) {
+  buildPrompt({ transcript, preferences }) {
+    const { language } = promptAffixes(preferences);
     return [
       {
         role: 'system',
-        content: '你是 Vesti 的知识提取助手。只依据提供的会话浓缩上下文做提炼，不补造事实；输出严格 JSON（不要 Markdown 代码围栏、不要任何额外文字）。',
+        content: `你是 Vesti 的知识提取助手。只依据提供的会话浓缩上下文做提炼，不补造事实；输出严格 JSON（不要 Markdown 代码围栏、不要任何额外文字）。${language}`,
       },
       {
         role: 'user',
         content: [
-          '下面是若干个相关会话的浓缩上下文（索引摘要 + 最近关键消息）。请提炼其中值得沉淀的知识资产，使用简洁的中文，输出一个 JSON 对象，字段如下：',
+          '下面是若干个相关会话的浓缩上下文（索引摘要 + 最近关键消息）。请提炼其中值得沉淀的知识资产，内容字段使用设置中指定的输出语言，输出一个 JSON 对象，字段如下：',
           '{"knowledge_points": ["值得记住的知识点、结论或经验，至多 12 条"], "code_snippets": [{"language": "语言", "code": "值得收藏的代码片段", "why": "为什么值得收藏"}，至多 8 个], "decisions": [{"title": "决策标题", "context": "背景与约束", "decision": "做出的决定", "consequences": "影响与后续"}，至多 6 条], "prompts": ["可复用的提示词，至多 8 条"]}',
           '没有内容的数组字段输出空数组。只输出 JSON 本身。',
           '',

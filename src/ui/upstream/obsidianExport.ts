@@ -288,8 +288,13 @@ export async function exportConversationsToObsidian(
  * failed (failures stay visible in Settings until a manual re-export).
  */
 export async function exportPendingConversationsToObsidian(): Promise<BatchExportResult> {
+  const settings = await window.vesti.getSettings();
   const { vaultPath } = await getConfiguredObsidianVault();
-  const pending = (await listExportableRecords()).filter(isPendingObsidianExport);
+  const since = settings.upstream.obsidianAutoExportSince;
+  const pending = (await listExportableRecords()).filter((record) =>
+    isPendingObsidianExport(record)
+      && (since === null || record.first_captured_at >= since - 1_000),
+  );
   return exportRecords(pending, vaultPath, { recordState: true });
 }
 
