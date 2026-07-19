@@ -17,6 +17,7 @@ import { AgentService } from './main/agentService';
 import { CaptureService } from './main/captureService';
 import { CapsuleWindowService } from './main/capsuleWindowService';
 import { DigestService } from './main/digestService';
+import { ProjectMemoryService } from './main/projectMemoryService';
 import { EmbeddingService } from './main/embeddingService';
 import { ExtensionBridgeService, MAX_OUTBOX_PROMPT_CHARS } from './main/extensionBridgeService';
 import { NotionService } from './main/notionService';
@@ -44,6 +45,8 @@ import {
   type CapturePlatform,
   type CapsuleContextMenuLabels,
   type CapsuleProjectView,
+  type CapsulePromptContinueResult,
+  type CapsulePromptImproveResult,
   type CapsulePromptSnapshot,
   type CapsuleRelayDraft,
   type CapsuleRelaySessionView,
@@ -69,6 +72,7 @@ let settings: SettingsService;
 let agent: AgentService;
 let embedding: EmbeddingService;
 let digest: DigestService;
+let projectMemory: ProjectMemoryService;
 let notion: NotionService;
 const uiPrefs = new UiPrefsService();
 let capsule: CapsuleWindowService;
@@ -211,7 +215,7 @@ function validSessionId(value: unknown): value is string {
 function validAgentRequest(value: unknown): value is AgentRunRequest {
   if (!value || typeof value !== 'object') return false;
   const request = value as Partial<AgentRunRequest>;
-  return (request.kind === 'summary' || request.kind === 'explore' || request.kind === 'digest' || request.kind === 'classify' || request.kind === 'relay' || request.kind === 'extract' || request.kind === 'distill' || request.kind === 'deposit-maintain' || request.kind === 'daily' || request.kind === 'persona')
+  return (request.kind === 'summary' || request.kind === 'explore' || request.kind === 'digest' || request.kind === 'classify' || request.kind === 'relay' || request.kind === 'extract' || request.kind === 'distill' || request.kind === 'deposit-maintain' || request.kind === 'daily' || request.kind === 'persona' || request.kind === 'roundtable-turn' || request.kind === 'roundtable-synthesis' || request.kind === 'prompt-improve' || request.kind === 'prompt-continue')
     && validSessionId(request.sessionId)
     && (request.question === undefined || typeof request.question === 'string')
     && (request.template === undefined || (typeof request.template === 'string' && request.template.length <= 64))
@@ -642,6 +646,15 @@ function registerIpc(): void {
     }
     return capture.getRelaySessionContexts(sessionIds);
   });
+  ipcMain.handle(IPC.relayFileTouches, (_event, sessionIds: unknown) => {
+    // Subagent sessions ride along with selected parents, so the id list can
+    // legitimately exceed the raw selection size — allow a wider fan-out.
+    if (!Array.isArray(sessionIds) || sessionIds.length > 200
+      || !sessionIds.every(validSessionId)) {
+      throw new Error('文件锚点请求无效');
+    }
+    return capture.getRelayFileTouches(sessionIds);
+  });
   ipcMain.handle(IPC.clearAgentResults, async () => {
     await agent.clearResults();
   });
@@ -659,6 +672,19 @@ function registerIpc(): void {
   ipcMain.handle(IPC.agentResults, () => agent.listResults());
   ipcMain.handle(IPC.exportConversations, () => capture.exportConversations());
   ipcMain.handle(IPC.conversationTree, () => capture.getConversationTree());
+  ipcMain.handle(IPC.projectStates, () => capture.listProjectStates());
+  ipcMain.handle(IPC.projectBrief, (_event, projectKey: unknown) => {
+    if (typeof projectKey !== 'string' || !projectKey.trim()) throw new Error('Invalid project key');
+    return capture.getProjectBrief(projectKey.trim());
+  });
+  ipcMain.handle(IPC.fileTimeline, (_event, query: unknown) => {
+    const input = (query ?? {}) as { projectKey?: unknown; filePath?: unknown };
+    if (typeof input.filePath !== 'string' || !input.filePath.trim()) throw new Error('Invalid file path');
+    return capture.getFileTimeline({
+      projectKey: typeof input.projectKey === 'string' && input.projectKey.trim() ? input.projectKey : undefined,
+      filePath: input.filePath.trim(),
+    });
+  });
   ipcMain.handle(IPC.recallSessions, async (_event, query: unknown, topK: unknown) => {
     if (typeof query !== 'string' || !query.trim()) throw new Error('Invalid recall query');
     const limit = typeof topK === 'number' && Number.isInteger(topK) && topK >= 1 && topK <= 20 ? topK : 5;
@@ -792,6 +818,33 @@ function registerIpc(): void {
       limit: CAPSULE_SEARCH_LIMIT,
     });
   });
+  // Capsule prompt assistant: AI refine / continue for the picked prompt.
+  // Both run through agentService with persist:false — nothing is logged.
+  ipcMain.handle(IPC.capsulePromptImprove, async (_event, body: unknown) => {
+    if (typeof body !== 'string' || !body.trim() || body.length > 8_000) {
+      throw new Error('提示词内容无效');
+    }
+    const result = await agent.run({
+      kind: 'prompt-improve',
+      sessionId: `capsule-prompt:${Date.now()}`,
+      transcriptOverride: body.trim(),
+      persist: false,
+    }, { persist: false });
+    // parse() in the kind definition already validated the strict JSON shape.
+    return JSON.parse(result.content) as CapsulePromptImproveResult;
+  });
+  ipcMain.handle(IPC.capsulePromptContinue, async (_event, body: unknown) => {
+    if (typeof body !== 'string' || !body.trim() || body.length > 8_000) {
+      throw new Error('提示词内容无效');
+    }
+    const result = await agent.run({
+      kind: 'prompt-continue',
+      sessionId: `capsule-prompt:${Date.now()}`,
+      transcriptOverride: body.trim(),
+      persist: false,
+    }, { persist: false });
+    return { continued: result.content } satisfies CapsulePromptContinueResult;
+  });
   ipcMain.handle(IPC.capsulePromptSnapshotGet, () => readPromptSnapshot());
   ipcMain.handle(IPC.capsulePromptSnapshotSave, (_event, value: unknown) => writePromptSnapshot(value));
   ipcMain.handle(IPC.capsuleCopyText, (_event, text: unknown) => {
@@ -894,10 +947,15 @@ app.whenReady().then(async () => {
   await capture.initialize(broadcastChange, settings.dataDirectory, settings.capture.enabledPlatforms);
   agent = new AgentService(capture, settings);
   embedding = new EmbeddingService(settings);
-  digest = new DigestService(capture, agent, embedding);
+  digest = new DigestService(capture, agent, embedding, () => settings.isLlmConfigured());
   notion = new NotionService(settings);
-  capture.setSyncCompletedListener(() => digest.requestScan());
+  projectMemory = new ProjectMemoryService(capture, agent);
+  capture.setSyncCompletedListener(() => {
+    digest.requestScan();
+    projectMemory.requestScan();
+  });
   digest.start();
+  projectMemory.requestScan();
   extensionBridge = new ExtensionBridgeService({
     appVersion: app.getVersion(),
     port: settings.getBridgePort(),

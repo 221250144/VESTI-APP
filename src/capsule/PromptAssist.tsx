@@ -6,6 +6,7 @@ import type { CapsuleCopy } from './copy';
 interface PromptAssistProps {
   copy: CapsuleCopy;
   extensionConnected: boolean;
+  llmConfigured: boolean;
   onExit: () => void;
   onToast: (message: string) => void;
 }
@@ -14,17 +15,29 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
+/** Result of an AI refine/continue run on the selected prompt. */
+type RefineState =
+  | { phase: 'idle' }
+  | { phase: 'running'; mode: 'improve' | 'continue' }
+  | { phase: 'done'; mode: 'improve'; improved: string; notes: string[] }
+  | { phase: 'done'; mode: 'continue'; continued: string };
+
 /**
  * 提示词助手: searches the curated catalog + the user's prompt-library
  * snapshot (read via IPC — the capsule never loads Dexie) and offers copy /
- * send-to-browser delivery for the picked prompt.
+ * send-to-browser delivery for the picked prompt, plus AI improve / continue
+ * (agent kinds 'prompt-improve' / 'prompt-continue', persist:false).
  */
-export function PromptAssist({ copy, extensionConnected, onExit, onToast }: PromptAssistProps) {
+export function PromptAssist({ copy, extensionConnected, llmConfigured, onExit, onToast }: PromptAssistProps) {
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<CapsulePromptHit[] | null>(null);
   const [snapshotMissing, setSnapshotMissing] = useState(false);
   const [selected, setSelected] = useState<CapsulePromptHit | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The body the footer actions act on — replaced when the user adopts an AI
+  // refine/continue result ("use this version").
+  const [workingBody, setWorkingBody] = useState<string | null>(null);
+  const [refine, setRefine] = useState<RefineState>({ phase: 'idle' });
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -48,6 +61,15 @@ export function PromptAssist({ copy, extensionConnected, onExit, onToast }: Prom
     };
   }, [query]);
 
+  const selectHit = (hit: CapsulePromptHit | null) => {
+    setSelected(hit);
+    setWorkingBody(null);
+    setRefine({ phase: 'idle' });
+    setError(null);
+  };
+
+  const currentBody = workingBody ?? selected?.body ?? '';
+
   const sendToBrowser = async (body: string) => {
     const api = capsuleApi();
     if (!api || !extensionConnected) return;
@@ -60,11 +82,38 @@ export function PromptAssist({ copy, extensionConnected, onExit, onToast }: Prom
     }
   };
 
+  const copyBody = (body: string) => {
+    void capsuleApi()?.copyText(body).then(() => onToast(copy.copied));
+  };
+
+  const runRefine = async (mode: 'improve' | 'continue') => {
+    const api = capsuleApi();
+    if (!api || !llmConfigured || refine.phase === 'running' || !currentBody.trim()) return;
+    setError(null);
+    setRefine({ phase: 'running', mode });
+    try {
+      if (mode === 'improve') {
+        const result = await api.improvePrompt(currentBody);
+        setRefine({ phase: 'done', mode, improved: result.improved, notes: result.notes });
+      } else {
+        const result = await api.continuePrompt(currentBody);
+        setRefine({ phase: 'done', mode, continued: result.continued });
+      }
+    } catch (cause) {
+      setRefine({ phase: 'idle' });
+      setError(errorMessage(cause, copy.actionFailed));
+    }
+  };
+
+  const refineResultText = refine.phase === 'done'
+    ? (refine.mode === 'improve' ? refine.improved : refine.continued)
+    : '';
+
   return (
     <div className="capsule-flow">
       <div className="capsule-flow-header">
         {selected ? (
-          <button type="button" className="flow-back" onClick={() => setSelected(null)}>
+          <button type="button" className="flow-back" onClick={() => selectHit(null)}>
             ‹ {copy.back}
           </button>
         ) : (
@@ -80,27 +129,90 @@ export function PromptAssist({ copy, extensionConnected, onExit, onToast }: Prom
           <div className="capsule-flow-body">
             <div className="prompt-detail-title">{selected.title}</div>
             {selected.description && <div className="prompt-detail-desc">{selected.description}</div>}
-            <pre className="relay-preview prompt-body">{selected.body}</pre>
+            {refine.phase === 'done' ? (
+              <>
+                <pre className="relay-preview prompt-body">{refineResultText}</pre>
+                {refine.mode === 'improve' && refine.notes.length > 0 && (
+                  <div className="prompt-refine-notes">
+                    <div className="prompt-refine-notes-title">{copy.promptImproveNotes}</div>
+                    {refine.notes.map((note, index) => (
+                      <div key={index} className="prompt-refine-note">· {note}</div>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : refine.phase === 'running' ? (
+              <div className="capsule-empty">
+                {refine.mode === 'improve' ? copy.promptImproving : copy.promptContinuing}
+              </div>
+            ) : (
+              <pre className="relay-preview prompt-body">{currentBody}</pre>
+            )}
           </div>
           <div className="capsule-flow-footer">
-            <button
-              type="button"
-              className="capsule-action"
-              disabled={!extensionConnected}
-              title={extensionConnected ? undefined : copy.browserNotConnected}
-              onClick={() => void sendToBrowser(selected.body)}
-            >
-              {copy.sendToBrowser}
-            </button>
-            <button
-              type="button"
-              className="capsule-action primary"
-              onClick={() => {
-                void capsuleApi()?.copyText(selected.body).then(() => onToast(copy.copied));
-              }}
-            >
-              {copy.deliverCopy}
-            </button>
+            {refine.phase === 'done' ? (
+              <>
+                <button
+                  type="button"
+                  className="capsule-action"
+                  onClick={() => copyBody(refineResultText)}
+                >
+                  {copy.deliverCopy}
+                </button>
+                <button
+                  type="button"
+                  className="capsule-action primary"
+                  onClick={() => {
+                    setWorkingBody(refineResultText);
+                    setRefine({ phase: 'idle' });
+                  }}
+                >
+                  {copy.promptUseResult}
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  className="capsule-action"
+                  disabled={!extensionConnected || refine.phase === 'running'}
+                  title={extensionConnected ? undefined : copy.browserNotConnected}
+                  onClick={() => void sendToBrowser(currentBody)}
+                >
+                  {copy.sendToBrowser}
+                </button>
+                <button
+                  type="button"
+                  className="capsule-action"
+                  disabled={refine.phase === 'running'}
+                  onClick={() => copyBody(currentBody)}
+                >
+                  {copy.deliverCopy}
+                </button>
+                <button
+                  type="button"
+                  className="capsule-action"
+                  disabled={!llmConfigured || refine.phase === 'running'}
+                  title={llmConfigured ? undefined : copy.promptLlmRequired}
+                  onClick={() => void runRefine('improve')}
+                >
+                  {refine.phase === 'running' && refine.mode === 'improve'
+                    ? copy.promptImproving
+                    : copy.promptImprove}
+                </button>
+                <button
+                  type="button"
+                  className="capsule-action"
+                  disabled={!llmConfigured || refine.phase === 'running'}
+                  title={llmConfigured ? undefined : copy.promptLlmRequired}
+                  onClick={() => void runRefine('continue')}
+                >
+                  {refine.phase === 'running' && refine.mode === 'continue'
+                    ? copy.promptContinuing
+                    : copy.promptContinue}
+                </button>
+              </>
+            )}
           </div>
         </>
       ) : (
@@ -130,7 +242,7 @@ export function PromptAssist({ copy, extensionConnected, onExit, onToast }: Prom
                     key={`${hit.origin}:${hit.id}`}
                     type="button"
                     className="prompt-row"
-                    onClick={() => setSelected(hit)}
+                    onClick={() => selectHit(hit)}
                   >
                     <span className="prompt-row-head">
                       <span className="prompt-title">{hit.title}</span>

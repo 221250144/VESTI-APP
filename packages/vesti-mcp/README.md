@@ -2,13 +2,14 @@
 
 Read-only MCP server that lets AI coding agents (kimi-code, Claude Code, codex, …) search the conversation memory that VESTI has captured locally (`~/.vesti/db/vesti.db`).
 
-The agent registers this package as a local stdio MCP server, then recalls past sessions through **three progressive-disclosure layers** — cheap index first, full content only at the end:
+The agent registers this package as a local stdio MCP server, then recalls past sessions through **three progressive-disclosure layers** — cheap index first, full content only at the end — plus a **project-level memory** tool:
 
 | Layer | Tool | Cost | What it returns |
 | --- | --- | --- | --- |
 | 1 | `vesti_search(query, topK=8)` | ~100 tokens/entry | Session index entries: `session_id`, title, platform, project path, time, digest `one_liner`, `key_topics`, hit snippet |
 | 2 | `vesti_timeline(session_id, around_turn?)` | ~30 tokens/turn | Turn outline of one session: seq, time, one-line user intent, tool-call count, tokens |
 | 3 | `vesti_get_turns(session_id, turn_ids \| range, max_chars=8000)` | bounded by `max_chars` | Full user/assistant message text + tool-call summaries for the selected turns; sets `truncated: true` when the budget cuts output |
+| — | `vesti_project_brief(project)` | one card + one doc | Project memory: L0 deterministic "current state card" (one-liner, most-active files, open questions) + L2 LLM-maintained project brief (state / architecture / decision log / open questions). Project name is fuzzy-matched. |
 
 Recall is FTS5-based (over `messages_fts` + `sessions_fts`, RRF-fused — the same ranking as capture-core's `SessionRecall`). Digest embeddings are only fused when an embedding service supplies a query vector; the MCP server has none, so it degrades to pure FTS exactly as `SessionRecall` does without a vector.
 
@@ -17,7 +18,7 @@ Recall is FTS5-based (over `messages_fts` + `sessions_fts`, RRF-fused — the sa
 - **Node ≥ 23.4** (uses the built-in `node:sqlite` module). On Node 22.x it also works if you pass `--experimental-sqlite` to node (see configs below).
 - A VESTI database at `~/.vesti/db/vesti.db` (created by the VESTI desktop app or CLI capture). Override with the `VESTI_DB_PATH` environment variable.
 
-The server opens the database **read-only** and never writes to it. Because it uses `node:sqlite` instead of better-sqlite3, it is immune to the Electron-vs-Node ABI mismatch of the desktop app's native module.
+The server never modifies captured content. Its single write is `session_digests.access_count + 1` for the digests `vesti_search` surfaces (memory v2 L1 access tracking); on a pre-v4 database without that column the bump is skipped silently. Because it uses `node:sqlite` instead of better-sqlite3, it is immune to the Electron-vs-Node ABI mismatch of the desktop app's native module.
 
 ## Build
 
@@ -89,9 +90,10 @@ context may help (previous decisions, "how did we solve X", older errors):
 2. `vesti_timeline` on the best session_id → turn outline; locate the passage.
 3. `vesti_get_turns` with only the turn seq numbers you need → full content.
 
-Never call vesti_get_turns without narrowing via search + timeline first; it
-is the expensive layer and truncates at max_chars anyway. All data is local
-and read-only.
+When starting work in a project, `vesti_project_brief` gives its current
+state card and maintained brief in one call. Never call vesti_get_turns
+without narrowing via search + timeline first; it is the expensive layer and
+truncates at max_chars anyway. All data is local.
 ```
 
 ## Output contract (examples)
@@ -113,11 +115,19 @@ and read-only.
       "one_liner": "Made the sqlite migration runner transactional",
       "key_topics": ["sqlite", "migrations", "transactions"],
       "snippet": "…wrap every migration step in a transaction…",
-      "score": 0.032254
+      "score": 0.032254,
+      "confidence": "high"
     }
   ]
 }
 ```
+
+`confidence` is the abstention signal: `'low'` when the hit's best message
+literally covers less than half of the matchable query tokens (or the query
+has none — e.g. only tokens shorter than 3 characters under the trigram
+tokenizer). Treat a `'low'` top entry as "probably not in the archive"
+instead of quoting its snippet. Scores are RRF-fused and recency-decayed
+(newer sessions rank higher, all else equal).
 
 `vesti_timeline({ session_id: "ws-aaa-001" })` →
 
@@ -159,9 +169,9 @@ and read-only.
 
 ## Layout
 
-- `src/db.ts` — db path resolution (`VESTI_DB_PATH` → `~/.vesti/db/vesti.db`) and read-only open
+- `src/db.ts` — db path resolution (`VESTI_DB_PATH` → `~/.vesti/db/vesti.db`) and database open (write policy: only digest access-count bumps)
 - `src/recall.ts` — FTS5 + RRF recall (port of capture-core `SessionRecall`, pure-FTS path)
-- `src/tools.ts` — the three layer implementations
+- `src/tools.ts` — the three layer implementations + `vesti_project_brief`
 - `src/server.ts` — MCP wiring on the official `@modelcontextprotocol/sdk` (low-level `Server`, hand-written JSON Schemas, no zod)
 - `src/cli.ts` — stdio entry (`bin: vesti-mcp`)
 - `tests/` — vitest: tool contracts against a temp fixture db + protocol handshake over in-memory transports

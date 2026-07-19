@@ -9,7 +9,11 @@ import {
   sessionMessagesToVestiMessages,
   workSessionToVestiConversation,
   type ConversationTree,
+  type FileTimelineEvent,
+  type ProjectBrief,
+  type ProjectState,
   type SessionDigest,
+  type SessionDigestStats,
   type SessionRecallHit,
   type SyncResult,
   type WslDetection,
@@ -19,6 +23,7 @@ import type {
   ConversationExportBundle,
   Overview,
   RelaySessionContext,
+  RelayFileTouchRow,
   SessionDetail,
   SessionSummary,
   SourceStatus,
@@ -236,6 +241,14 @@ export class CaptureService {
     return this.db.listSessionsNeedingDigest(digestVersion);
   }
 
+  listDegradedDigestCandidates(): SessionDigest[] {
+    return this.db.listDegradedDigestCandidates();
+  }
+
+  getSessionDigestStats(): SessionDigestStats {
+    return this.db.getSessionDigestStats();
+  }
+
   upsertSessionDigest(digest: SessionDigest): void {
     this.db.upsertSessionDigest(digest);
   }
@@ -246,6 +259,44 @@ export class CaptureService {
 
   recallSessions(query: string, topK: number, queryVector: Float32Array | null): SessionRecallHit[] {
     return this.db.recallSessions(query, { topK, queryVector });
+  }
+
+  // ---- Memory v2: fork lineage + L0 project_state + L2 project_briefs ----
+
+  refreshForkLineage(): number {
+    return this.db.refreshForkLineage();
+  }
+
+  rebuildProjectStates(): number {
+    return this.db.rebuildProjectStates();
+  }
+
+  listProjectStates(): ProjectState[] {
+    return this.db.listProjectStates();
+  }
+
+  getProjectState(projectKey: string): ProjectState | null {
+    return this.db.getProjectState(projectKey);
+  }
+
+  getProjectBrief(projectKey: string): ProjectBrief | null {
+    return this.db.getProjectBrief(projectKey);
+  }
+
+  upsertProjectBrief(brief: ProjectBrief): void {
+    this.db.upsertProjectBrief(brief);
+  }
+
+  listSessionDigestsForProject(projectKey: string): SessionDigest[] {
+    return this.db.listSessionDigestsForProject(projectKey);
+  }
+
+  projectLabel(projectKey: string): string {
+    return this.db.getProjectLabel(projectKey) || projectKey;
+  }
+
+  getFileTimeline(query: { projectKey?: string; filePath: string; limit?: number }): FileTimelineEvent[] {
+    return this.db.getFileTimeline(query);
   }
 
   /**
@@ -273,6 +324,14 @@ export class CaptureService {
           : null,
       };
     });
+  }
+
+  /**
+   * P4a relay quality: raw file-tool touch rows for the deterministic
+   * key-file extraction (aggregated renderer-side into anchored lists).
+   */
+  getRelayFileTouches(sessionIds: string[]): RelayFileTouchRow[] {
+    return this.db.listFileToolTouches(sessionIds);
   }
 
   async syncAll(): Promise<SyncSummary> {

@@ -32,6 +32,10 @@
     "dompurify": "^3.3.1",
     "katex": "^0.16.38",
     "marked": "^17.0.3",
+    "qrcode": "^1.5.4",
     "yaml": "^2.8.3"
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.6"
   }
 }

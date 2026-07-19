@@ -480,7 +480,12 @@ export type StorageApi = {
   runRoundtable?: (
     question: string,
     personaIds: RoundtablePersonaId[],
-    opts?: { lang?: "zh" | "en" }
+    opts?: {
+      lang?: "zh" | "en";
+      /** Fired after each seat finishes (in seat order) so the panel can show
+       * per-seat progress instead of one long spinner. */
+      onSeatComplete?: (turn: RoundtableSeatTurn) => void;
+    }
   ) => Promise<RoundtableResult>;
   getSummary?: (conversationId: number) => Promise<ChatSummaryData | null>;
   generateSummary?: (conversationId: number) => Promise<ChatSummaryData>;
@@ -494,6 +499,15 @@ export type StorageApi = {
   getConversationDigests?: () => Promise<ConversationDigest[]>;
   /** Desktop conversation tree for the source-tree nav (P2b). */
   getConversationTree?: () => Promise<ConversationTree | null>;
+  /** Memory v2: all L0 project state cards (desktop capture only). */
+  getProjectStates?: () => Promise<ProjectStateView[]>;
+  /** Memory v2: one project's L2 brief (null until generated). */
+  getProjectBrief?: (projectKey: string) => Promise<ProjectBriefView | null>;
+  /** Memory v2: deterministic per-file touch timeline. */
+  getFileTimeline?: (query: {
+    projectKey?: string;
+    filePath: string;
+  }) => Promise<FileTimelineEventView[]>;
   /** Soft-trash conversations in bulk (P2b organizer). Returns the number
    * actually updated. Soft trash keeps the record (and its capture lineage)
    * so capture re-syncs reconcile cleanly. */
@@ -605,6 +619,16 @@ export type StorageApi = {
     scope?: "all" | "recent";
     limit?: number;
   }) => Promise<PromptExtractionResult>;
+  /**
+   * Interactive scan of the whole conversation library (agent CLI sessions +
+   * browser conversations) for reusable prompt patterns. Unlike
+   * extractPromptsFromLibrary (which archives silently), this returns reviewable
+   * candidates; the caller decides which ones to adopt into the prompts table.
+   */
+  scanPromptLibrary?: (options?: {
+    sessionLimit?: number;
+    onProgress?: (progress: PromptScanProgress) => void;
+  }) => Promise<PromptScanResult>;
   completePrompt?: (payload: {
     draft: string;
     platform?: Platform;
@@ -678,6 +702,51 @@ export interface PromptExtractionResult {
   skipped: number;
   candidates: number;
   usedLlm: boolean;
+}
+
+// ---- Conversation-library prompt scan (interactive review flow) ------------
+
+/** A conversation a scanned prompt candidate was seen in. */
+export interface PromptScanSourceRef {
+  /** 'agent' = local CLI session; 'browser' = extension-captured web chat. */
+  origin: "agent" | "browser";
+  conversationId: string;
+  title: string;
+}
+
+/** One clustered prompt pattern surfaced by the library scan. */
+export interface PromptScanCandidate {
+  /** Stable cluster key (template identity), safe as a React key. */
+  key: string;
+  title: string;
+  body: string;
+  /** Total occurrences across every scanned conversation. */
+  count: number;
+  /** Distinct conversations the pattern appears in. */
+  sourceCount: number;
+  sources: PromptScanSourceRef[];
+  score: number;
+  tags: string[];
+  category: string | null;
+  /** True when an identical body already lives in the prompts table. */
+  alreadyInLibrary: boolean;
+}
+
+export interface PromptScanProgress {
+  done: number;
+  total: number;
+}
+
+export interface PromptScanResult {
+  candidates: PromptScanCandidate[];
+  /** Conversations actually scanned (agent sessions + browser chats). */
+  scannedConversations: number;
+  /** User inputs considered before filtering. */
+  scannedInputs: number;
+  /** True when an LLM refined the candidate titles. */
+  usedLlm: boolean;
+  /** True when the scan hit a cap and older conversations were skipped. */
+  truncated: boolean;
 }
 
 export interface PromptCompletionResult {
@@ -762,6 +831,22 @@ export interface RelayPackConfidence {
   low_areas: string[];
 }
 
+/**
+ * Deterministically extracted key-file anchor (P4a quality): aggregated from
+ * the captured tool_executions of the source sessions and attached to the
+ * pack after the relay agent answers. The panel badges every key_files row
+ * against this list — anchored rows link back to their source conversations,
+ * the rest render as to-be-verified.
+ */
+export interface RelayPackExtractedFile {
+  path: string;
+  touches: number;
+  /** Epoch ms of the most recent captured touch. */
+  lastTouchedAt: number;
+  /** Conversation ids (subset of RelayPack.conversationIds) that touched it. */
+  conversationIds: number[];
+}
+
 export interface RelayPackPayload {
   title: string;
   goal: string;
@@ -778,6 +863,9 @@ export interface RelayPackPayload {
   next_steps: string[];
   /** Absent on v1 packs and when the model gave no usable confidence. */
   confidence?: RelayPackConfidence;
+  /** Program-extracted file anchors (absent on packs generated before the
+   * deterministic extraction existed, or when no tool data was captured). */
+  extracted_key_files?: RelayPackExtractedFile[];
   suggested_prompt: string;
 }
 
@@ -955,6 +1043,51 @@ export interface ConversationTreeSession {
   childCount?: number;
   descendantMessageCount?: number;
   children?: ConversationTreeSession[];
+  // Memory v2 fork lineage (optional, additive)
+  forkedFrom?: string | null;
+  uniqueMessageCount?: number;
+  duplicatedMessageCount?: number;
+}
+
+// ---- Memory v2: L0 project state + L2 project briefs ------------------------
+// Field-for-field mirrors of src/shared/contracts.ts. Optional in StorageApi:
+// only the desktop app with a capture pipeline implements them.
+
+export interface ProjectActiveFileView {
+  path: string;
+  touches: number;
+  lastTouched: string;
+}
+
+/** L0: deterministic per-project "current state card". */
+export interface ProjectStateView {
+  projectKey: string;
+  oneLiner: string;
+  activeFiles: ProjectActiveFileView[];
+  openQuestions: string[];
+  sessionCount: number;
+  lastActive: string;
+  updatedAt: string;
+}
+
+/** L2: LLM-maintained cross-session project brief. */
+export interface ProjectBriefView {
+  projectKey: string;
+  contentMarkdown: string;
+  version: number;
+  /** JSON array of the last deposit-maintain ops (for MaintainOpsBadge). */
+  lastOps: string;
+  updatedAt: string;
+}
+
+export interface FileTimelineEventView {
+  sessionId: string;
+  sessionTitle: string;
+  platform: string;
+  toolName: string;
+  toolCategory: string;
+  isError: boolean;
+  timestamp: number;
 }
 
 export interface ConversationTreeProject {
@@ -1750,6 +1883,26 @@ export interface DashboardLabels {
     selectedCount: string;
     deleteSelected: string;
     clearSelection: string;
+    // Conversation-library scan (interactive review panel)
+    scanLibrary: string;
+    scanning: string;
+    scanTooltip: string;
+    scanProgress: string;
+    scanResultsTitle: string;
+    scanSummary: string;
+    scanEmpty: string;
+    scanFailed: string;
+    scanPrivacy: string;
+    scanTruncated: string;
+    scanUsedCount: string;
+    scanSourceCount: string;
+    scanAdopt: string;
+    scanAdopted: string;
+    scanIgnore: string;
+    scanInLibrary: string;
+    scanOriginAgent: string;
+    scanOriginBrowser: string;
+    scanClose: string;
   };
   /** P4b deposits area labels (loose record, same idiom as the library
    * relay/organize groups: components carry English fallbacks inline). */
@@ -1796,6 +1949,10 @@ export interface DashboardLabels {
     imageryFaint: string;
     /** P5: caption above the LLM persona footnote. */
     personaNoteLabel: string;
+    /** P5: eyebrow heading of the four-axis radar (思维图) section. */
+    mindMapTitle: string;
+    /** P5: caption beside the repo QR in the card footer / export image. */
+    repoQrCaption: string;
     /** P5: lead-in for the per-axis evidence chips. */
     evidenceBecause: string;
     /** P5: evidence chip fallback text, "{id}" = conversation id. */
@@ -1825,29 +1982,50 @@ export interface DashboardLabels {
     modeLearn: string;
     title: string;
     subtitle: string;
+    /** One-sentence "这是什么": what the map is and where it comes from. */
+    intro: string;
+    /** Data provenance line: "{n}" analyzed summaries, "{m}" topics covered. */
+    sourceLine: string;
     insufficient: string;
     sample: string;
     domainsTitle: string;
     uncategorized: string;
     domainConversations: string;
+    /** Caption above a domain's representative-conversation jump chips. */
+    representativesTitle: string;
+    /** "继续深入": jump to Ask with a prefilled follow-up on this domain. */
+    deepen: string;
+    /** Prefilled Ask question template; "{topic}" = domain name. */
+    deepenPrompt: string;
     glossaryTitle: string;
     openLoopsTitle: string;
     openLoopsEmpty: string;
     /** Weak-data hint shown when the map is available but built from few
      * summaries — points at generating more (same guidance as AITI). */
     weakHint: string;
+    /** Button inside the weak hint / empty state: jump to AITI to generate
+     * more summaries. */
+    weakAction: string;
+    /** Shown while the host is still computing the profile. */
+    loading: string;
   };
   roundtable: {
     title: string;
     subtitle: string;
-    /** 诚实降级: shown instead of the fake run until the multi-turn
-     * orchestration is real. */
+    /** 诚实降级: kept for hosts that still want a static placeholder; the
+     * implemented panel no longer renders these. */
     comingSoonTitle: string;
     comingSoonBody: string;
     questionPlaceholder: string;
     personasLabel: string;
     run: string;
+    /** Run-button label once a result is on screen ("重新讨论"). */
+    rerun: string;
     running: string;
+    /** Per-seat progress while deliberating: "{done}" of "{total}" seats. */
+    seatsProgress: string;
+    /** Shown while the moderator synthesis call is in flight. */
+    synthesisRunning: string;
     latencyHint: string;
     needQuestion: string;
     seatsTitle: string;
@@ -1857,6 +2035,14 @@ export interface DashboardLabels {
     recommendation: string;
     openQuestions: string;
     empty: string;
+    /** Disabled-state guidance when no LLM is configured. */
+    llmMissing: string;
+    /** A seat whose turn failed (inline in its card). */
+    seatFailed: string;
+    /** Note that the run was archived into the Ask history. */
+    savedHint: string;
+    /** Grounding note when recall context fed the panel: "{n}" conversations. */
+    groundedHint: string;
     personaSkeptic: string;
     personaOptimist: string;
     personaPragmatist: string;
@@ -1961,6 +2147,9 @@ export interface LearnDomain {
   deep: number;
   moderate: number;
   superficial: number;
+  /** Up to 3 conversations that best represent this domain (deepest first,
+   * then most recent) — the evidence-chain jump targets. */
+  representatives: Array<{ conversationId: number; title: string }>;
 }
 export interface LearnGlossaryEntry {
   term: string;

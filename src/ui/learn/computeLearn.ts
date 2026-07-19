@@ -15,8 +15,14 @@ import type {
 const MIN_LEARN_SAMPLE = 3;
 const MAX_GLOSSARY = 24;
 const MAX_OPEN_LOOPS = 14;
+/** Representative conversations surfaced per domain (evidence-chain jumps). */
+const MAX_DOMAIN_REPS = 3;
 
 type Depth = "superficial" | "moderate" | "deep";
+
+/** Ranking weight for "how representative is this conversation": a deep dive
+ * beats a superficial skim; unsummarized conversations rank last. */
+const DEPTH_RANK: Record<Depth, number> = { deep: 3, moderate: 2, superficial: 1 };
 
 function latestSummaryByConversation(summaries: SummaryRecord[]): Map<number, SummaryRecord> {
   const byConv = new Map<number, SummaryRecord>();
@@ -50,9 +56,18 @@ export function computeLearn(
 
   const domainAgg = new Map<
     string,
-    { topicId: number | null; name: string; count: number; deep: number; moderate: number; superficial: number }
+    {
+      topicId: number | null;
+      name: string;
+      count: number;
+      deep: number;
+      moderate: number;
+      superficial: number;
+      reps: Array<{ id: number; title: string; rank: number; updatedAt: number }>;
+    }
   >();
   for (const conv of liveConvs) {
+    if (typeof conv.id !== "number") continue;
     const topicId = typeof conv.topic_id === "number" ? conv.topic_id : null;
     const key = topicId === null ? "null" : String(topicId);
     let entry = domainAgg.get(key);
@@ -64,12 +79,19 @@ export function computeLearn(
         deep: 0,
         moderate: 0,
         superficial: 0,
+        reps: [],
       };
       domainAgg.set(key, entry);
     }
     entry.count += 1;
     const d = depthOf(summaryByConv.get(conv.id));
     if (d) entry[d] += 1;
+    entry.reps.push({
+      id: conv.id,
+      title: conv.title,
+      rank: d ? DEPTH_RANK[d] : 0,
+      updatedAt: conv.updated_at ?? 0,
+    });
   }
   const domains: LearnDomain[] = Array.from(domainAgg.values())
     .sort((a, b) => b.count - a.count)
@@ -80,6 +102,10 @@ export function computeLearn(
       deep: e.deep,
       moderate: e.moderate,
       superficial: e.superficial,
+      representatives: e.reps
+        .sort((a, b) => b.rank - a.rank || b.updatedAt - a.updatedAt)
+        .slice(0, MAX_DOMAIN_REPS)
+        .map((r) => ({ conversationId: r.id, title: r.title })),
     }));
 
   // ---- Glossary: key_insights terms across summaries (deduped + ranked) ----

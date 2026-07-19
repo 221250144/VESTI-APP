@@ -19,6 +19,7 @@ import {
   ChevronDown,
   ExternalLink,
   Expand,
+  FolderTree,
   Hash,
   Lightbulb,
   List,
@@ -37,7 +38,11 @@ import {
   RefreshCw,
   Trash2,
   X,
+  FileText,
+  GitFork,
 } from "lucide-react";
+import DOMPurify from "dompurify";
+import { marked } from "marked";
 import type {
   Annotation,
   Conversation,
@@ -54,6 +59,9 @@ import type {
   ObsidianImportFileEntry,
   ObsidianImportSummary,
   UiThemeMode,
+  DepositMaintainOp,
+  FileTimelineEventView,
+  ProjectBriefView,
 } from "../types";
 import { useLibraryData } from "../contexts/library-data";
 import { getPlatformBadgeStyle, getPlatformLabel } from "../constants/platform";
@@ -76,9 +84,12 @@ import { buildReaderTimestampFooterModel } from "../lib/reader-timestamps";
 import { serializeSelectionFragmentToMarkdown } from "../lib/selection-markdown";
 import { SourceTreeNav } from "./library/SourceTreeNav";
 import { ExtractPanel } from "./library/ExtractPanel";
+import { MaintainOpsBadge } from "./deposits-tab";
 import { OrganizePanel } from "./library/OrganizePanel";
 import { RelayHistoryPanel } from "./library/RelayHistoryPanel";
 import { RelayPanel } from "./library/RelayPanel";
+import { RelayProjectPicker } from "./library/RelayProjectPicker";
+import { buildRelaySelectorModel } from "./library/relaySelector";
 import {
   buildConversationTreeLookup,
   buildSourceTreeModel,
@@ -548,6 +559,7 @@ export function LibraryTab({
     refresh,
     digestByConversationId,
     conversationTree,
+    projectStateByKey,
   } = useLibraryData();
   const getRelatedConversations = storage.getRelatedConversations;
   const getMessages = storage.getMessages;
@@ -580,6 +592,47 @@ export function LibraryTab({
   const [sourceSelection, setSourceSelection] = useState<SourceSelection | null>(
     null,
   );
+  // Memory v2: L2 project brief overlay + per-file timeline popover.
+  const [briefProjectKey, setBriefProjectKey] = useState<string | null>(null);
+  const [briefData, setBriefData] = useState<ProjectBriefView | null>(null);
+  const [briefLoading, setBriefLoading] = useState(false);
+  const [briefOpsOpen, setBriefOpsOpen] = useState(false);
+  const [fileTimeline, setFileTimeline] = useState<{
+    filePath: string;
+    events: FileTimelineEventView[];
+    loading: boolean;
+  } | null>(null);
+
+  const openProjectBrief = useCallback(
+    (projectKey: string) => {
+      setBriefProjectKey(projectKey);
+      setBriefData(null);
+      setBriefOpsOpen(false);
+      if (!storage.getProjectBrief) return;
+      setBriefLoading(true);
+      void storage
+        .getProjectBrief(projectKey)
+        .then((brief) => setBriefData(brief))
+        .catch(() => setBriefData(null))
+        .finally(() => setBriefLoading(false));
+    },
+    [storage],
+  );
+
+  const openFileTimeline = useCallback(
+    (filePath: string) => {
+      setFileTimeline({ filePath, events: [], loading: true });
+      if (!storage.getFileTimeline) {
+        setFileTimeline({ filePath, events: [], loading: false });
+        return;
+      }
+      void storage
+        .getFileTimeline({ filePath })
+        .then((events) => setFileTimeline({ filePath, events, loading: false }))
+        .catch(() => setFileTimeline({ filePath, events: [], loading: false }));
+    },
+    [storage],
+  );
   const [organizeOpen, setOrganizeOpen] = useState(false);
   const [topicPickerForId, setTopicPickerForId] = useState<number | null>(null);
   // P4a relay: multi-select mode for handoff-pack generation. Kept separate
@@ -591,6 +644,7 @@ export function LibraryTab({
     useState<RelayAvailability | null>(null);
   const [relayPack, setRelayPack] = useState<RelayPack | null>(null);
   const [relayHistoryOpen, setRelayHistoryOpen] = useState(false);
+  const [relayPickerOpen, setRelayPickerOpen] = useState(false);
   const [relayNotice, setRelayNotice] = useState<string | null>(null);
   // P4b knowledge extract: same multi-select pool as the relay flow; the
   // result opens in its own panel and saves into the deposits area on demand.
@@ -1584,7 +1638,8 @@ export function LibraryTab({
     : baseConversations;
 
   // P2b: aggregated nav model + the extra filter dimension (source/project/
-  // topic) applied on top of the existing filters.
+  // topic) applied on top of the existing filters. Memory v2: L0 cards are
+  // attached to project nodes for the hover card + brief entry.
   const sourceTreeModel = useMemo(
     () =>
       buildSourceTreeModel({
@@ -1592,8 +1647,9 @@ export function LibraryTab({
         conversations,
         topics,
         lookup: treeLookup,
+        projectStates: projectStateByKey,
       }),
-    [conversationTree, conversations, topics, treeLookup],
+    [conversationTree, conversations, topics, treeLookup, projectStateByKey],
   );
   const flattenedTopics = useMemo(() => {
     const walk = (
@@ -2365,6 +2421,17 @@ export function LibraryTab({
         : [...current, conversationId],
     );
   };
+
+  // P4a quality: platform → folder → conversation picker mirroring the agent
+  // platforms' on-disk session layout; an alternative entry into the same
+  // selection pool (built only while the select mode is active).
+  const relaySelectorModel = useMemo(
+    () =>
+      relaySelectMode
+        ? buildRelaySelectorModel({ tree: conversationTree, conversations })
+        : [],
+    [relaySelectMode, conversationTree, conversations],
+  );
 
   const handleRelayGenerate = async () => {
     if (!storage.generateRelayPack || relaySelectedIds.length === 0) return;
@@ -3570,6 +3637,11 @@ export function LibraryTab({
                   notesCount={notes.length}
                   notesActive={viewMode === "notes"}
                   onSelectNotes={handleSourceTreeNotes}
+                  onOpenBrief={
+                    storage.getProjectBrief || storage.getProjectStates
+                      ? openProjectBrief
+                      : undefined
+                  }
                   labels={{
                     sectionLabel:
                       (labels.sourceTree?.sectionLabel as string) ?? "Sources",
@@ -3578,6 +3650,14 @@ export function LibraryTab({
                       (labels.myNotes ?? "My Notes"),
                     browser: (labels.sourceTree?.browser as string) ?? "Browser",
                     wslBadge: (labels.sourceTree?.wslBadge as string) ?? "WSL",
+                    projectBrief:
+                      (labels.sourceTree?.projectBrief as string) ?? "项目简报",
+                    activeFiles:
+                      (labels.sourceTree?.activeFiles as string) ??
+                      "Active files (30d)",
+                    openQuestions:
+                      (labels.sourceTree?.openQuestions as string) ??
+                      "Open questions",
                   }}
                 />
                 <div className="flex items-center justify-between px-2 py-2">
@@ -3772,6 +3852,18 @@ export function LibraryTab({
                             String(relaySelectedIds.length),
                           )}
                         </span>
+                        <button
+                          type="button"
+                          onClick={() => setRelayPickerOpen(true)}
+                          className="inline-flex items-center gap-1 rounded-md border border-border-subtle px-2 py-1 text-vesti-sm font-sans text-text-secondary transition-colors hover:bg-bg-surface-card-hover"
+                          title={relayL(
+                            "pickerHint",
+                            "Agent platform → folder → conversation. Subagents follow their parent session.",
+                          )}
+                        >
+                          <FolderTree strokeWidth={1.75} className="h-3.5 w-3.5" />
+                          {relayL("pickerOpen", "Select by project")}
+                        </button>
                         <div className="ml-auto flex items-center gap-1.5">
                           <button
                             type="button"
@@ -4072,6 +4164,22 @@ export function LibraryTab({
                                 >
                                   {getPlatformLabel(conv.platform)}
                                 </span>
+                                {typeof convCliId === "string" &&
+                                  treeLookup.forkedFromBySessionId.has(convCliId) && (
+                                    <span
+                                      title={(() => {
+                                        const node = treeLookup.sessionNodeById.get(convCliId);
+                                        const duplicated = node?.duplicatedMessageCount ?? 0;
+                                        return duplicated > 0
+                                          ? `${labels.forkBadge ?? "Forked session"} · ${duplicated} ${labels.forkDuplicated ?? "pre-fork messages counted once"}`
+                                          : (labels.forkBadge ?? "Forked session");
+                                      })()}
+                                      className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[11px] font-sans leading-none text-text-tertiary bg-bg-secondary"
+                                    >
+                                      <GitFork strokeWidth={1.75} className="h-3 w-3" />
+                                      {labels.forkBadge ?? "fork"}
+                                    </span>
+                                  )}
                                 {normalizeTags(conv.tags)
                                   .slice(0, 2)
                                   .map((tag) => (
@@ -4463,7 +4571,15 @@ export function LibraryTab({
                             </span>
                           )}
                           {selectedDigest.keyFiles.slice(0, 6).map((file) => (
-                            <MetaChip key={`digest-file:${file}`}>{file}</MetaChip>
+                            <button
+                              key={`digest-file:${file}`}
+                              type="button"
+                              onClick={() => openFileTimeline(file)}
+                              title={labels.fileTimelineHint ?? "View the touch timeline of this file"}
+                              className="transition-opacity hover:opacity-70"
+                            >
+                              <MetaChip>{file}</MetaChip>
+                            </button>
                           ))}
                           {selectedDigest.decisions.length > 0 && (
                             <span className="text-[11px] font-sans uppercase tracking-[0.08em] text-text-tertiary">
@@ -5709,7 +5825,25 @@ export function LibraryTab({
             onClose={() => setRelayPack(null)}
             storage={storage}
             labels={relayLabels}
+            onOpenConversation={(conversationId) => {
+              setRelayPack(null);
+              void selectConversation(conversationId, {
+                closeNavigation: isSplitActive,
+              });
+            }}
           />
+          {relayPickerOpen ? (
+            <RelayProjectPicker
+              model={relaySelectorModel}
+              selectedIds={relaySelectedIds}
+              onApply={(ids) => {
+                setRelaySelectedIds(ids);
+                setRelayPickerOpen(false);
+              }}
+              onClose={() => setRelayPickerOpen(false)}
+              labels={relayLabels}
+            />
+          ) : null}
           <ExtractPanel
             result={extractResult}
             onClose={() => setExtractResult(null)}
@@ -5726,6 +5860,142 @@ export function LibraryTab({
               setRelayPack(pack);
             }}
           />
+          {/* Memory v2: L2 project brief overlay */}
+          {briefProjectKey ? (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-6"
+              onClick={() => setBriefProjectKey(null)}
+            >
+              <div
+                className="flex max-h-full w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border-subtle bg-bg-app shadow-xl"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="flex items-center gap-2 border-b border-border-subtle px-4 py-3">
+                  <FileText
+                    strokeWidth={1.75}
+                    className="h-4 w-4 text-text-secondary"
+                  />
+                  <span className="min-w-0 flex-1 truncate text-sm font-sans font-medium text-text-primary">
+                    {(labels.sourceTree?.projectBrief as string) ?? "项目简报"}
+                    {briefData ? ` · v${briefData.version}` : ""}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setBriefProjectKey(null)}
+                    aria-label={labels.close ?? "Close"}
+                    className="flex h-7 w-7 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-bg-surface-card hover:text-text-secondary"
+                  >
+                    <X strokeWidth={1.75} className="h-4 w-4" />
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto px-5 py-4">
+                  {briefLoading ? (
+                    <p className="text-sm font-sans text-text-tertiary">…</p>
+                  ) : briefData?.contentMarkdown ? (
+                    <>
+                      <div
+                        className="prose prose-slate dark:prose-invert max-w-none text-sm prose-headings:text-text-primary prose-p:leading-relaxed prose-p:text-text-primary prose-li:leading-relaxed prose-li:text-text-primary prose-strong:text-text-primary prose-code:text-text-primary prose-a:text-accent-primary prose-blockquote:text-text-secondary"
+                        dangerouslySetInnerHTML={{
+                          __html: DOMPurify.sanitize(
+                            marked.parse(briefData.contentMarkdown, {
+                              gfm: true,
+                              breaks: false,
+                            }) as string,
+                          ),
+                        }}
+                      />
+                      {(() => {
+                        let ops: DepositMaintainOp[] = [];
+                        try {
+                          const parsed = JSON.parse(briefData.lastOps || "[]");
+                          if (Array.isArray(parsed)) ops = parsed;
+                        } catch {
+                          ops = [];
+                        }
+                        return ops.length > 0 ? (
+                          <MaintainOpsBadge
+                            ops={ops}
+                            open={briefOpsOpen}
+                            onToggle={() => setBriefOpsOpen((prev) => !prev)}
+                            l={(_key, fallback) => fallback}
+                          />
+                        ) : null;
+                      })()}
+                      <p className="mt-3 text-vesti-xs font-sans text-text-tertiary">
+                        {labels.briefUpdatedAt ?? "Updated"}: {briefData.updatedAt.slice(0, 16).replace("T", " ")}
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-sm font-sans text-text-tertiary">
+                      {labels.briefEmpty ??
+                        "该项目还没有生成简报——完成一次同步与摘要后会自动生成。"}
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {/* Memory v2: deterministic per-file touch timeline */}
+          {fileTimeline ? (
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-6"
+              onClick={() => setFileTimeline(null)}
+            >
+              <div
+                className="flex max-h-full w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-border-subtle bg-bg-app shadow-xl"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="flex items-center gap-2 border-b border-border-subtle px-4 py-3">
+                  <Clock
+                    strokeWidth={1.75}
+                    className="h-4 w-4 text-text-secondary"
+                  />
+                  <span className="min-w-0 flex-1 truncate text-sm font-sans font-medium text-text-primary">
+                    {fileTimeline.filePath}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setFileTimeline(null)}
+                    aria-label={labels.close ?? "Close"}
+                    className="flex h-7 w-7 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-bg-surface-card hover:text-text-secondary"
+                  >
+                    <X strokeWidth={1.75} className="h-4 w-4" />
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto px-5 py-4">
+                  {fileTimeline.loading ? (
+                    <p className="text-sm font-sans text-text-tertiary">…</p>
+                  ) : fileTimeline.events.length === 0 ? (
+                    <p className="text-sm font-sans text-text-tertiary">
+                      {labels.fileTimelineEmpty ?? "没有找到该文件的触碰记录。"}
+                    </p>
+                  ) : (
+                    <ul className="space-y-2">
+                      {fileTimeline.events.map((event, index) => (
+                        <li
+                          key={`${event.sessionId}:${index}`}
+                          className="flex items-baseline gap-2 text-vesti-sm font-sans"
+                        >
+                          <span className="shrink-0 text-text-tertiary">
+                            {new Date(event.timestamp)
+                              .toISOString()
+                              .slice(0, 16)
+                              .replace("T", " ")}
+                          </span>
+                          <span className="shrink-0 rounded bg-bg-surface-card px-1.5 py-0.5 text-vesti-xs text-text-secondary">
+                            {event.toolName}
+                          </span>
+                          <span className="min-w-0 flex-1 truncate text-text-primary">
+                            {event.sessionTitle}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            </div>
+          ) : null}
         </div>
       </LibrarySplitContext.Provider>
     </div>

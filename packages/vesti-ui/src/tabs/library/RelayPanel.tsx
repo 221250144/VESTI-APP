@@ -7,6 +7,7 @@
 
 import { useEffect, useState } from "react";
 import {
+  Anchor,
   Check,
   Copy,
   Download,
@@ -14,7 +15,11 @@ import {
   Terminal,
   X,
 } from "lucide-react";
-import { normalizeRelayPackPayload, serializeRelayPackMarkdown } from "../../lib/relayMarkdown";
+import {
+  findExtractedFileAnchor,
+  normalizeRelayPackPayload,
+  serializeRelayPackMarkdown,
+} from "../../lib/relayMarkdown";
 import type {
   RelayAvailability,
   RelayCliCommandView,
@@ -29,11 +34,14 @@ type RelayPanelProps = {
   storage: StorageApi;
   /** labels.relay group (Record<string,string>); English fallbacks inline. */
   labels: Record<string, string>;
+  /** Jump to a source conversation (anchor badges on program-extracted
+   * key files); the badges render as plain text when absent. */
+  onOpenConversation?: (conversationId: number) => void;
 };
 
 type Notice = { tone: "success" | "error"; message: string } | null;
 
-export function RelayPanel({ pack, onClose, storage, labels }: RelayPanelProps) {
+export function RelayPanel({ pack, onClose, storage, labels, onOpenConversation }: RelayPanelProps) {
   const l = (key: string, fallback: string) => labels[key] ?? fallback;
   const [availability, setAvailability] = useState<RelayAvailability | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -138,6 +146,62 @@ export function RelayPanel({ pack, onClose, storage, labels }: RelayPanelProps) 
   const payload = normalizeRelayPackPayload(pack.pack);
   const injectDisabled =
     availability !== null && !availability.extensionConnected;
+
+  // Key-files provenance badge (P4a quality): rows matching a program-
+  // extracted anchor get a source-conversation link; rows the model added on
+  // its own (or packs generated before extraction existed) read "to verify".
+  const keyFileProvenanceBadge = (path: string) => {
+    const anchor = findExtractedFileAnchor(path, payload.extracted_key_files);
+    if (!anchor) {
+      return (
+        <span className="mt-1 block">
+          <span className="inline-flex items-center rounded-full bg-bg-surface-card px-1.5 py-0.5 text-[11px] font-sans text-text-tertiary">
+            {l("fileUnverified", "To verify")}
+          </span>
+        </span>
+      );
+    }
+    const lastTouched = anchor.lastTouchedAt > 0
+      ? new Date(anchor.lastTouchedAt).toLocaleDateString()
+      : "";
+    return (
+      <span className="mt-1 flex flex-wrap items-center gap-1">
+        <span
+          className="inline-flex items-center gap-0.5 rounded-full bg-accent-primary-light px-1.5 py-0.5 text-[11px] font-sans text-accent-primary"
+          title={l("fileAnchoredTitle", "Program-extracted from captured tool calls · last touched {date}")
+            .replace("{date}", lastTouched)}
+        >
+          <Anchor strokeWidth={1.75} className="h-3 w-3" />
+          {l("fileAnchored", "Anchored")} ×{anchor.touches}
+        </span>
+        {anchor.conversationIds.map((conversationId) => {
+          const index = pack.conversationIds.indexOf(conversationId);
+          const label = l("fileAnchorSession", "Session {n}").replace(
+            "{n}",
+            String(index >= 0 ? index + 1 : "?")
+          );
+          return onOpenConversation ? (
+            <button
+              key={conversationId}
+              type="button"
+              onClick={() => onOpenConversation(conversationId)}
+              className="rounded-full border border-border-subtle px-1.5 py-0.5 text-[11px] font-sans text-text-secondary transition-colors hover:bg-bg-surface-card hover:text-accent-primary"
+              title={l("fileAnchorJump", "Open the source conversation")}
+            >
+              {label}
+            </button>
+          ) : (
+            <span
+              key={conversationId}
+              className="rounded-full border border-border-subtle px-1.5 py-0.5 text-[11px] font-sans text-text-tertiary"
+            >
+              {label}
+            </span>
+          );
+        })}
+      </span>
+    );
+  };
 
   const sectionTitle = (text: string) => (
     <h3 className="mb-1.5 text-vesti-sm font-sans font-medium uppercase tracking-wide text-text-tertiary">
@@ -286,6 +350,7 @@ export function RelayPanel({ pack, onClose, storage, labels }: RelayPanelProps) 
                       >
                         <td className="max-w-40 break-all px-2 py-1.5 font-mono text-[12px] text-text-primary">
                           {file.path}
+                          {keyFileProvenanceBadge(file.path)}
                         </td>
                         <td className="px-2 py-1.5 text-text-secondary">{file.why}</td>
                         <td className="px-2 py-1.5 text-text-secondary">{file.last_state}</td>

@@ -38,16 +38,17 @@ describe('MCP handshake', () => {
     expect(client.getServerCapabilities()?.tools).toBeDefined();
   });
 
-  it('lists the three progressive-disclosure tools with usage guidance', async () => {
+  it('lists the three progressive-disclosure tools plus the project-brief tool', async () => {
     const { tools } = await client.listTools();
-    expect(tools.map(t => t.name)).toEqual(['vesti_search', 'vesti_timeline', 'vesti_get_turns']);
-    for (const tool of tools) {
+    expect(tools.map(t => t.name)).toEqual(['vesti_search', 'vesti_timeline', 'vesti_get_turns', 'vesti_project_brief']);
+    for (const tool of tools.slice(0, 3)) {
       expect(tool.description).toMatch(/Layer [123] of 3/);
       expect(tool.inputSchema.type).toBe('object');
     }
     expect(tools[0].inputSchema.required).toContain('query');
     expect(tools[1].inputSchema.required).toContain('session_id');
     expect(tools[2].inputSchema.required).toContain('session_id');
+    expect(tools[3].inputSchema.required).toContain('project');
   });
 
   it('serves vesti_search → vesti_timeline → vesti_get_turns end to end', async () => {

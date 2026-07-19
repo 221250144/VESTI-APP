@@ -43,6 +43,11 @@ function isTrivial(text: string): boolean {
   return TRIVIAL_PATTERNS.some((pattern) => pattern.test(collapsed));
 }
 
+/** Shared trivial-turn check (extractor + conversation-library scanner). */
+export function isTrivialPromptText(text: string): boolean {
+  return isTrivial(text);
+}
+
 /**
  * Produce scored, de-duplicated prompt candidates from a single conversation's
  * messages. Only `user` turns are considered.

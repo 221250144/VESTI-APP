@@ -226,7 +226,7 @@ export interface NotionExportResult {
   url: string;
 }
 
-export type AgentKind = 'summary' | 'explore' | 'digest' | 'classify' | 'relay' | 'extract' | 'distill' | 'deposit-maintain' | 'daily' | 'persona';
+export type AgentKind = 'summary' | 'explore' | 'digest' | 'classify' | 'relay' | 'extract' | 'distill' | 'deposit-maintain' | 'daily' | 'persona' | 'roundtable-turn' | 'roundtable-synthesis' | 'prompt-improve' | 'prompt-continue';
 
 /** P4b deposit distillation templates ('custom' carries the user's own
  * instruction in AgentRunRequest.question). */
@@ -294,6 +294,10 @@ export interface ConversationTreeSession {
   childCount?: number;
   descendantMessageCount?: number;
   children?: ConversationTreeSession[];
+  // Memory v2 fork lineage (optional, additive)
+  forkedFrom?: string | null;
+  uniqueMessageCount?: number;
+  duplicatedMessageCount?: number;
 }
 
 export interface ConversationTreeProject {
@@ -312,6 +316,47 @@ export interface ConversationTreeSource {
 export interface ConversationTree {
   generatedAt: string;
   sources: ConversationTreeSource[];
+}
+
+// ---- Memory v2: L0 project state + L2 project briefs ----
+// Field-for-field mirrors of capture-core's ProjectState / ProjectBrief /
+// FileTimelineEvent (renderer must not import the Node-only capture core).
+
+export interface ProjectActiveFileView {
+  path: string;
+  touches: number;
+  lastTouched: string;
+}
+
+/** L0: deterministic per-project "current state card". */
+export interface ProjectStateView {
+  projectKey: string;
+  oneLiner: string;
+  activeFiles: ProjectActiveFileView[];
+  openQuestions: string[];
+  sessionCount: number;
+  lastActive: string;
+  updatedAt: string;
+}
+
+/** L2: LLM-maintained cross-session project brief. */
+export interface ProjectBriefView {
+  projectKey: string;
+  contentMarkdown: string;
+  version: number;
+  /** JSON array of the last deposit-maintain ops (for MaintainOpsBadge). */
+  lastOps: string;
+  updatedAt: string;
+}
+
+export interface FileTimelineEventView {
+  sessionId: string;
+  sessionTitle: string;
+  platform: string;
+  toolName: string;
+  toolCategory: string;
+  isError: boolean;
+  timestamp: number;
 }
 
 export interface SessionRecallHit {
@@ -355,6 +400,9 @@ export const IPC = {
   exportConversations: 'vesti:export-conversations',
   conversationTree: 'vesti:conversation-tree',
   recallSessions: 'vesti:recall-sessions',
+  projectStates: 'vesti:project-states',
+  projectBrief: 'vesti:project-brief',
+  fileTimeline: 'vesti:file-timeline',
   uiPrefGet: 'vesti:ui-pref-get',
   uiPrefSet: 'vesti:ui-pref-set',
   uiPrefChanged: 'vesti:ui-pref-changed',
@@ -378,6 +426,8 @@ export const IPC = {
   capsulePromptSnapshotSave: 'vesti:capsule-prompt-snapshot-save',
   capsuleCopyText: 'vesti:capsule-copy-text',
   capsulePanelHeight: 'vesti:capsule-panel-height',
+  capsulePromptImprove: 'vesti:capsule-prompt-improve',
+  capsulePromptContinue: 'vesti:capsule-prompt-continue',
   extensionBridgeStatus: 'vesti:extension-bridge-status',
   extensionPairCodeCreate: 'vesti:extension-pair-code-create',
   extensionPairingWindowOpen: 'vesti:extension-pairing-window-open',
@@ -392,6 +442,7 @@ export const IPC = {
   relayPrepareCli: 'vesti:relay-prepare-cli',
   relayOutboxEnqueue: 'vesti:relay-outbox-enqueue',
   relaySessionContexts: 'vesti:relay-session-contexts',
+  relayFileTouches: 'vesti:relay-file-touches',
 } as const;
 
 // ---- Desktop floating capsule ----
@@ -454,6 +505,17 @@ export interface CapsuleQuickAskResult {
   answer: string;
   /** How many archived sessions were recalled into the answer context. */
   recalled: number;
+}
+
+/** AI-refined prompt (agent kind 'prompt-improve'): new body + change notes. */
+export interface CapsulePromptImproveResult {
+  improved: string;
+  notes: string[];
+}
+
+/** AI-continued prompt (agent kind 'prompt-continue'): full continued text. */
+export interface CapsulePromptContinueResult {
+  continued: string;
 }
 
 /** One prompt-library entry mirrored into the capsule-readable snapshot. */
@@ -526,6 +588,10 @@ export interface VestiCapsuleApi {
   relayAiPolish(draft: string): Promise<CapsuleRelayPolishResult>;
   /** Search curated catalog + user prompt snapshot. */
   searchPrompts(query: string): Promise<CapsulePromptHit[]>;
+  /** AI-refine a prompt body (agent kind 'prompt-improve', persist:false). */
+  improvePrompt(body: string): Promise<CapsulePromptImproveResult>;
+  /** AI-continue a prompt body (agent kind 'prompt-continue', persist:false). */
+  continuePrompt(body: string): Promise<CapsulePromptContinueResult>;
   getPromptSnapshot(): Promise<CapsulePromptSnapshot | null>;
   /** Main-renderer only: persist the prompt snapshot for the capsule. */
   savePromptSnapshot(snapshot: CapsulePromptSnapshot): Promise<void>;
@@ -703,6 +769,21 @@ export interface RelaySessionContext {
   digest: RelaySessionContextDigest | null;
 }
 
+/**
+ * Raw file-tool touch row (P4a relay quality): one captured read/write/edit
+ * tool execution. The renderer aggregates these deterministically into the
+ * anchored key-file list injected into the relay transcript, so the handoff
+ * pack's file section is grounded on captured executions rather than model
+ * recollection.
+ */
+export interface RelayFileTouchRow {
+  sessionId: string;
+  toolName: string;
+  toolCategory: string;
+  inputSummary: string | null;
+  timestamp: number;
+}
+
 export interface VestiDesktopApi {
   getOverview(): Promise<Overview>;
   getSessions(): Promise<SessionSummary[]>;
@@ -725,6 +806,9 @@ export interface VestiDesktopApi {
   exportConversations(): Promise<ConversationExportBundle[]>;
   getConversationTree(): Promise<ConversationTree>;
   recallSessions(query: string, topK?: number): Promise<SessionRecallHit[]>;
+  getProjectStates(): Promise<ProjectStateView[]>;
+  getProjectBrief(projectKey: string): Promise<ProjectBriefView | null>;
+  getFileTimeline(query: { projectKey?: string; filePath: string }): Promise<FileTimelineEventView[]>;
   getExtensionBridgeStatus(): Promise<ExtensionBridgeStatusView>;
   createExtensionPairCode(): Promise<ExtensionPairCodeView>;
   openExtensionPairingWindow(): Promise<ExtensionPairingWindowView>;
@@ -740,6 +824,7 @@ export interface VestiDesktopApi {
   prepareRelayCliCommands(request: RelayPrepareCliRequest): Promise<RelayPrepareCliResult>;
   enqueueRelayOutbox(request: RelayOutboxEnqueueRequest): Promise<RelayOutboxEnqueueResult>;
   getRelaySessionContexts(sessionIds: string[]): Promise<RelaySessionContext[]>;
+  getRelayFileTouches(sessionIds: string[]): Promise<RelayFileTouchRow[]>;
 }
 
 /**

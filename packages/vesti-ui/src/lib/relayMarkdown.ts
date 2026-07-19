@@ -11,6 +11,7 @@
 import type {
   RelayPack,
   RelayPackConfidence,
+  RelayPackExtractedFile,
   RelayPackFailedPath,
   RelayPackGitState,
   RelayPackKeyFile,
@@ -120,6 +121,50 @@ function normalizeConfidence(value: unknown): RelayPackConfidence | undefined {
   };
 }
 
+function asNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function asIdList(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (item): item is number => typeof item === "number" && Number.isInteger(item) && item > 0
+  );
+}
+
+function normalizeExtractedFiles(value: unknown): RelayPackExtractedFile[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+    .map((item) => ({
+      path: asString(item.path),
+      touches: asNumber(item.touches),
+      lastTouchedAt: asNumber(item.lastTouchedAt),
+      conversationIds: asIdList(item.conversationIds),
+    }))
+    .filter((file) => file.path);
+}
+
+/**
+ * Separator/case-folded path key — the same folding the deterministic
+ * extractor dedupes with, so the panel can match a key_files row against the
+ * extracted anchors regardless of spelling differences.
+ */
+export function relayPathKey(path: string): string {
+  return path.trim().replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+/** Find the extracted anchor backing a key_files row, if any. */
+export function findExtractedFileAnchor(
+  path: string,
+  extracted: RelayPackExtractedFile[] | undefined
+): RelayPackExtractedFile | null {
+  if (!extracted || extracted.length === 0) return null;
+  const key = relayPathKey(path);
+  if (!key) return null;
+  return extracted.find((file) => relayPathKey(file.path) === key) ?? null;
+}
+
 /**
  * Upgrade any stored relay payload to the full schema-v2 shape. v1 packs keep
  * their current_state and get empty defaults for every v2 field (confidence
@@ -128,6 +173,7 @@ function normalizeConfidence(value: unknown): RelayPackConfidence | undefined {
 export function normalizeRelayPackPayload(raw: unknown): RelayPackPayload {
   const source = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   const confidence = normalizeConfidence(source.confidence);
+  const extractedKeyFiles = normalizeExtractedFiles(source.extracted_key_files);
   return {
     title: asString(source.title),
     goal: asString(source.goal),
@@ -142,6 +188,7 @@ export function normalizeRelayPackPayload(raw: unknown): RelayPackPayload {
     verification: normalizeVerification(source.verification),
     next_steps: asStringList(source.next_steps),
     ...(confidence ? { confidence } : {}),
+    ...(extractedKeyFiles.length > 0 ? { extracted_key_files: extractedKeyFiles } : {}),
     suggested_prompt: asString(source.suggested_prompt),
   };
 }

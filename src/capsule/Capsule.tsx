@@ -245,6 +245,7 @@ export function Capsule() {
           <PromptAssist
             copy={copy}
             extensionConnected={extensionConnected}
+            llmConfigured={llmConfigured}
             onExit={() => setView('home')}
             onToast={showToast}
           />

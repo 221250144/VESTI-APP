@@ -33,7 +33,12 @@ export {
   buildMessagePreviewText,
   buildMessageSidecarSummaryLines,
 } from "./lib/messagePackage";
-export { normalizeRelayPackPayload, serializeRelayPackMarkdown } from "./lib/relayMarkdown";
+export {
+  findExtractedFileAnchor,
+  normalizeRelayPackPayload,
+  relayPathKey,
+  serializeRelayPackMarkdown,
+} from "./lib/relayMarkdown";
 export { sanitizeFileBaseName, serializeExtractMarkdown } from "./lib/extractMarkdown";
 export {
   AITI_MIN_STRUCTURED_SUMMARIES,
@@ -86,6 +91,10 @@ export type {
   UpdatePromptChanges,
   PromptListFilter,
   PromptExtractionResult,
+  PromptScanSourceRef,
+  PromptScanCandidate,
+  PromptScanProgress,
+  PromptScanResult,
   PromptCompletionResult,
   PlazaPrompt,
   PlazaCategory,
@@ -112,6 +121,7 @@ export type {
   RelayPackFailedPath,
   RelayPackVerification,
   RelayPackConfidence,
+  RelayPackExtractedFile,
   RelayCliCommandView,
   RelayAvailability,
   ExtractCodeSnippet,

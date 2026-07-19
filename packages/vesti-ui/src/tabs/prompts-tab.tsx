@@ -1,12 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CheckSquare, Copy, Download, ExternalLink, Plus, Search, Sparkles, Square, Trash2, Upload } from "lucide-react";
+import { CheckSquare, Copy, Download, ExternalLink, Plus, ScanSearch, Search, Sparkles, Square, Trash2, Upload } from "lucide-react";
 import type {
   DashboardLabels,
   PlazaData,
   PlazaPrompt,
   Prompt,
+  PromptScanCandidate,
+  PromptScanProgress,
+  PromptScanResult,
   StorageApi,
   UiThemeMode,
 } from "../types";
@@ -66,6 +69,15 @@ export function PromptsTab({
   const [extractStatus, setExtractStatus] = useState<"idle" | "running">("idle");
   const [toast, setToast] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+
+  // Conversation-library scan (agent sessions + browser chats → reviewable
+  // prompt candidates the user adopts or ignores one by one).
+  const [scanStatus, setScanStatus] = useState<"idle" | "running" | "done" | "error">("idle");
+  const [scanProgress, setScanProgress] = useState<PromptScanProgress | null>(null);
+  const [scanResult, setScanResult] = useState<PromptScanResult | null>(null);
+  const [scanError, setScanError] = useState<string | null>(null);
+  const [adoptedScanKeys, setAdoptedScanKeys] = useState<Set<string>>(new Set());
+  const [ignoredScanKeys, setIgnoredScanKeys] = useState<Set<string>>(new Set());
 
   const supportsPrompts = Boolean(storage.listPrompts);
 
@@ -398,6 +410,66 @@ export function PromptsTab({
     }
   }, [storage, labels, load]);
 
+  // Interactive library scan: review candidates, adopt into the prompts table
+  // or ignore. Progress streams in through onProgress for large libraries.
+  const handleScan = useCallback(async () => {
+    if (!storage.scanPromptLibrary || scanStatus === "running") return;
+    setScanStatus("running");
+    setScanError(null);
+    setScanResult(null);
+    setScanProgress({ done: 0, total: 0 });
+    setAdoptedScanKeys(new Set());
+    setIgnoredScanKeys(new Set());
+    try {
+      const result = await storage.scanPromptLibrary({
+        onProgress: (progress) => setScanProgress(progress),
+      });
+      setScanResult(result);
+      setScanStatus("done");
+    } catch (scanErr) {
+      setScanError((scanErr as Error)?.message ?? labels.scanFailed);
+      setScanStatus("error");
+    }
+  }, [storage, scanStatus, labels]);
+
+  const handleAdoptCandidate = useCallback(
+    async (candidate: PromptScanCandidate) => {
+      if (!storage.createPrompt) return;
+      try {
+        await storage.createPrompt({
+          title: candidate.title,
+          body: candidate.body,
+          category: candidate.category,
+          tags: candidate.tags,
+          quality_score: candidate.score,
+          source: "extracted",
+        });
+        setAdoptedScanKeys((prev) => new Set(prev).add(candidate.key));
+        setToast(labels.scanAdopted);
+        await load();
+      } catch (adoptError) {
+        setToast((adoptError as Error)?.message ?? labels.toastSaveFailed);
+      }
+    },
+    [storage, labels, load],
+  );
+
+  const handleIgnoreCandidate = useCallback((key: string) => {
+    setIgnoredScanKeys((prev) => new Set(prev).add(key));
+  }, []);
+
+  const closeScanResults = useCallback(() => {
+    setScanStatus("idle");
+    setScanResult(null);
+    setScanError(null);
+    setScanProgress(null);
+  }, []);
+
+  const visibleScanCandidates = useMemo(
+    () => (scanResult?.candidates ?? []).filter((candidate) => !ignoredScanKeys.has(candidate.key)),
+    [scanResult, ignoredScanKeys],
+  );
+
   if (!supportsPrompts) {
     return (
       <div className="flex h-full items-center justify-center p-8 text-center text-text-secondary">
@@ -429,6 +501,24 @@ export function PromptsTab({
             <Sparkles strokeWidth={1.7} className="h-4 w-4" />
             {extractStatus === "running" ? labels.extracting : labels.extractFromChats}
           </button>
+          {storage.scanPromptLibrary && (
+            <button
+              type="button"
+              onClick={() => void handleScan()}
+              disabled={scanStatus === "running"}
+              title={labels.scanTooltip}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-border-subtle px-3 py-1.5 text-[13px] text-text-primary transition-colors hover:bg-bg-surface-card disabled:opacity-60"
+            >
+              <ScanSearch strokeWidth={1.7} className="h-4 w-4" />
+              {scanStatus === "running"
+                ? scanProgress && scanProgress.total > 0
+                  ? labels.scanProgress
+                      .replace("{done}", String(scanProgress.done))
+                      .replace("{total}", String(scanProgress.total))
+                  : labels.scanning
+                : labels.scanLibrary}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => void handleExport()}
@@ -487,6 +577,138 @@ export function PromptsTab({
 
       {/* Body */}
       <div className="flex-1 overflow-y-auto px-6 py-4">
+        {/* Library scan: progress + reviewable candidate panel */}
+        {(scanStatus === "running" || scanStatus === "done" || scanStatus === "error") && (
+          <section className="mb-4 rounded-xl border border-border-subtle bg-bg-surface-card p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h3 className="text-[13px] font-medium text-text-primary">
+                  {labels.scanResultsTitle}
+                </h3>
+                {scanStatus === "running" && (
+                  <p className="mt-1 text-[12px] text-text-tertiary">
+                    {scanProgress && scanProgress.total > 0
+                      ? labels.scanProgress
+                          .replace("{done}", String(scanProgress.done))
+                          .replace("{total}", String(scanProgress.total))
+                      : labels.scanning}
+                  </p>
+                )}
+                {scanStatus === "done" && scanResult && (
+                  <p className="mt-1 text-[12px] text-text-tertiary">
+                    {labels.scanSummary
+                      .replace("{conversations}", String(scanResult.scannedConversations))
+                      .replace("{inputs}", String(scanResult.scannedInputs))
+                      .replace("{n}", String(visibleScanCandidates.length))}
+                  </p>
+                )}
+                {scanStatus === "error" && (
+                  <p className="mt-1 text-[12px] text-red-600">{scanError ?? labels.scanFailed}</p>
+                )}
+              </div>
+              {scanStatus !== "running" && (
+                <button
+                  type="button"
+                  onClick={closeScanResults}
+                  className="shrink-0 rounded-md px-2 py-1 text-[12px] text-text-secondary hover:bg-bg-tertiary"
+                >
+                  {labels.scanClose}
+                </button>
+              )}
+            </div>
+            <p className="mt-2 text-[11px] leading-relaxed text-text-tertiary">{labels.scanPrivacy}</p>
+            {scanStatus === "done" && scanResult?.truncated && (
+              <p className="mt-1 text-[11px] text-text-tertiary">{labels.scanTruncated}</p>
+            )}
+            {scanStatus === "done" && scanResult && visibleScanCandidates.length === 0 && (
+              <p className="mt-3 text-[12.5px] text-text-secondary">{labels.scanEmpty}</p>
+            )}
+            {scanStatus === "done" && visibleScanCandidates.length > 0 && (
+              <ul className="mt-3 flex flex-col gap-2">
+                {visibleScanCandidates.map((candidate) => {
+                  const adopted = adoptedScanKeys.has(candidate.key);
+                  return (
+                    <li
+                      key={candidate.key}
+                      className="rounded-lg border border-border-subtle bg-bg-primary p-3"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-[13px] font-medium text-text-primary">
+                            {candidate.title}
+                          </div>
+                          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-text-tertiary">
+                            <span>
+                              {labels.scanUsedCount.replace("{n}", String(candidate.count))}
+                            </span>
+                            <span>·</span>
+                            <span>
+                              {labels.scanSourceCount.replace("{n}", String(candidate.sourceCount))}
+                            </span>
+                            {Array.from(new Set(candidate.sources.map((source) => source.origin))).map(
+                              (origin) => (
+                                <span
+                                  key={origin}
+                                  className="rounded-full bg-bg-tertiary px-1.5 py-0.5 text-[10px]"
+                                >
+                                  {origin === "agent" ? labels.scanOriginAgent : labels.scanOriginBrowser}
+                                </span>
+                              ),
+                            )}
+                            {candidate.category && (
+                              <span className="rounded-full bg-bg-tertiary px-1.5 py-0.5 text-[10px]">
+                                {candidate.category}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1.5">
+                          {candidate.alreadyInLibrary ? (
+                            <span className="px-2 py-1 text-[11.5px] text-text-tertiary">
+                              {labels.scanInLibrary}
+                            </span>
+                          ) : adopted ? (
+                            <span className="px-2 py-1 text-[11.5px] text-accent-primary">
+                              {labels.scanAdopted}
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => void handleAdoptCandidate(candidate)}
+                              className="rounded-lg border border-accent-primary px-2.5 py-1 text-[11.5px] text-accent-primary transition-colors hover:bg-accent-primary-light"
+                            >
+                              {labels.scanAdopt}
+                            </button>
+                          )}
+                          {!adopted && (
+                            <button
+                              type="button"
+                              onClick={() => handleIgnoreCandidate(candidate.key)}
+                              className="rounded-lg border border-border-subtle px-2.5 py-1 text-[11.5px] text-text-secondary transition-colors hover:bg-bg-tertiary"
+                            >
+                              {labels.scanIgnore}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      <div className="mt-1.5 line-clamp-3 whitespace-pre-wrap text-[12px] leading-relaxed text-text-secondary">
+                        {candidate.body}
+                      </div>
+                      {candidate.sources.length > 0 && (
+                        <div className="mt-1.5 truncate text-[10.5px] text-text-tertiary">
+                          {candidate.sources
+                            .slice(0, 3)
+                            .map((source) => source.title || source.conversationId)
+                            .join(" · ")}
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+        )}
         {(status === "loading" || extractStatus === "running") && prompts.length === 0 && (
           <p className="py-12 text-center text-[13px] text-text-tertiary">
             {extractStatus === "running" ? labels.extracting : labels.loading}

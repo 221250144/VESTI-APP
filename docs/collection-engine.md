@@ -45,7 +45,7 @@ SQLite（better-sqlite3，WAL + 外键）。核心表：
 | `session_digests` | 每会话 digest：`one_liner`、`key_topics`、`key_files`、`decisions`、`open_questions`、`embedding`（BLOB）、`embedding_status`、`digest_version`、`message_count` |
 | `project_registry` | 项目注册表：`project_key` 主键、`kind`、`label`、`path_or_domain`、`first_seen`/`last_seen` |
 
-全文检索虚表：`messages_fts`（content_text/thinking/tool_* 五列，external content）与 `sessions_fts`（title/summary），各配 insert/delete/update 触发器自动同步。
+全文检索虚表：`messages_fts`（content_text/thinking/tool_* 五列，external content）与 `sessions_fts`（title/summary），各配 insert/delete/update 触发器自动同步。schema v5 起两张表使用 **trigram tokenizer**（迁移 5 运行时探测、重建并全量回填；unicode61 会把整段 CJK 连写当作一个 token，中文事实对分写查询完全不可见；trigram 的 3 字滑窗使 ≥3 字 CJK 子串可匹配）。探测不到 trigram 的 SQLite 构建会跳过迁移并在 `schema_migrations.note` 记录原因，保持 unicode61。
 
 所有写入幂等（`ON CONFLICT DO UPDATE`），sync 计数取 `max(0, 新-旧)`。
 
@@ -94,7 +94,12 @@ score(session) = Σ 1 / (RRF_K + rank)，RRF_K = 60，平手按 id 字典序
 2. `sessions_fts` 命中（title/summary，前 30）；
 3. 向量候选：`embedding_status='ok'` 的 digest 与 query 向量做**暴力余弦相似度**（`search/VectorSearch.ts` 纯函数，无索引；BLOB 为 Float32 小端，维度由 embedding 模型决定，代码不做假设）。
 
-FTS 查询由 Unicode token 加引号 OR 连接生成；`SearchEngine` 另有普通全文搜索，FTS MATCH 失败时回退 `LIKE`。无向量（无 key / 模型不支持 / 全量 skipped）时信号 3 为空，RRF 自动退化为双信号融合——向量是增强不是依赖。
+FTS 查询由 Unicode token 加引号 OR 连接生成（trigram 下另有短 token 合并 span：连续 <3 字符 token 按原文分隔符合并成逐字 span 分支，如 `CI 平台`；单独的 <3 字符 token 在 trigram 下不可匹配，直接丢弃）；`SearchEngine` 另有普通全文搜索，FTS MATCH 失败时回退 `LIKE`。无向量（无 key / 模型不支持 / 全量 skipped）时信号 3 为空，RRF 自动退化为双信号融合——向量是增强不是依赖。
+
+RRF 融合后再做两项后处理（bench 依据见 `docs/bench/after-trigram-2026-07-19.md`）：
+
+- **时序衰减**：`score' = rrf × (0.9 + 0.1·exp(−ageDays/90))`，按会话 `last_activity_at`。地板 0.9 把近因摆动限制在 ≤10%（RRF k=60 顶部相邻位次仅差 ~2%，更深的地板会让新噪声压过词法上明显更优的旧命中）；知识更新对词法得分接近，几个百分点的摆动足以让新值排在旧值前。
+- **confidence 拒答信号**：每命中带 `confidence: 'high'|'low'`——查询无可匹配 token（如全是 <3 字符 token），或最佳命中消息逐字覆盖的可匹配单元（长 token + 内容性合并 span）占比低于 0.5 时标 low。RRF 分数本身无法区分诱饵与真命中（k=60 把分数压平），覆盖率是可用的判别信号；vesti-mcp 的 `vesti_search` 结果同样透出该字段。
 
 ## 与浏览器扩展导入的关系
 
@@ -102,7 +107,7 @@ FTS 查询由 Unicode token 加引号 OR 连接生成；`SearchEngine` 另有普
 
 ## 迁移机制
 
-见 [architecture.md](architecture.md)「数据库迁移机制」。约定摘要：`MIGRATIONS` 只增不改、`up` 幂等、`schema_migrations` 表记录、迁移与记录同事务。当前 v1–v3（`session_type`、`host`、`session_digests` + `project_registry`）。
+见 [architecture.md](architecture.md)「数据库迁移机制」。约定摘要：`MIGRATIONS` 只增不改、`up` 幂等、`schema_migrations` 表记录、迁移与记录同事务；迁移可返回 note 字符串存入 `schema_migrations.note`（如探测失败跳过时记录原因）。当前 v1–v5（`session_type`、`host`、`session_digests` + `project_registry`、fork lineage + 分层项目记忆、FTS5 trigram 重建）。
 
 ## 对外召回：vesti-mcp（MCP server）
 

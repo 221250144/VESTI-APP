@@ -7,6 +7,8 @@ import {
   parseExtractPayload,
   parseRelayPayload,
   registerAgentKind,
+  RELAY_HANDOFF_PREFIX_EN,
+  RELAY_HANDOFF_PREFIX_ZH,
   RELAY_HANDOFF_RULE_EN,
   RELAY_HANDOFF_RULE_ZH,
 } from './agentPrompts';
@@ -94,6 +96,23 @@ describe('digest agent kind', () => {
     expect(messages[0].content).toContain('严格 JSON');
     expect(messages[1].content).toContain('one_liner');
     expect(messages[1].content).toContain('TRANSCRIPT');
+  });
+
+  it('pins numeric-fidelity rules with concrete counterexamples', () => {
+    const messages = getAgentKindDefinition('digest').buildPrompt({
+      transcript: 'TRANSCRIPT',
+      preferences: zhPreferences,
+    });
+    const prompt = messages[1].content;
+    // Hard rule: values/units must be kept verbatim, never generalized.
+    expect(prompt).toContain('必须原样保留数值与单位');
+    expect(prompt).toContain('版本号');
+    // Counterexamples stay in the prompt (bench C: numeric coverage 6.4%).
+    expect(prompt).toContain('超时时间定为 30s');
+    expect(prompt).toContain('v2.5.0');
+    expect(prompt).toContain('1500 元');
+    // one_liner / key_topics / decisions are all named as in-scope.
+    expect(prompt).toContain('one_liner、key_topics 和 decisions');
   });
 
   it('parses and normalizes a valid payload', () => {
@@ -232,6 +251,37 @@ describe('relay agent kind', () => {
     });
     expect(en[1].content).toContain(RELAY_HANDOFF_RULE_EN);
     expect(en[1].content).toContain('MUST end with this exact fixed sentence');
+  });
+
+  it('pins the handoff framing prefix into the prompt (zh and en)', () => {
+    const zh = getAgentKindDefinition('relay').buildPrompt({
+      transcript: 'T',
+      preferences: zhPreferences,
+    });
+    expect(zh[1].content).toContain(RELAY_HANDOFF_PREFIX_ZH);
+    expect(zh[1].content).toContain('原样开头');
+    const en = getAgentKindDefinition('relay').buildPrompt({
+      transcript: 'T',
+      preferences: { ...zhPreferences, outputLanguage: 'en-US' },
+    });
+    expect(en[1].content).toContain(RELAY_HANDOFF_PREFIX_EN);
+    expect(en[1].content).toContain('MUST start with this exact fixed sentence');
+  });
+
+  it('pins key_files to the extracted anchor list and failed_paths to retention', () => {
+    const zh = getAgentKindDefinition('relay').buildPrompt({
+      transcript: 'T',
+      preferences: zhPreferences,
+    });
+    expect(zh[1].content).toContain('关键文件（程序提取，带锚点）');
+    expect(zh[1].content).toContain('不得虚构清单之外的文件');
+    expect(zh[1].content).toContain('失败尝试与否决原因');
+    const en = getAgentKindDefinition('relay').buildPrompt({
+      transcript: 'T',
+      preferences: { ...zhPreferences, outputLanguage: 'en-US' },
+    });
+    expect(en[1].content).toContain('never invent files beyond it');
+    expect(en[1].content).toContain('failed attempt and rejection reason');
   });
 
   it('parses and normalizes a valid v2 payload', () => {
@@ -589,5 +639,47 @@ describe('persona kind (P5 思维意象)', () => {
     expect(definition.parse?.('  蝴蝶最近总绕着\n向量检索 飞。 \n')).toBe('蝴蝶最近总绕着 向量检索 飞。');
     expect(definition.parse?.('x'.repeat(260))).toHaveLength(200);
     expect(() => definition.parse?.('   \n ')).toThrow('persona 输出为空');
+  });
+});
+
+
+describe('roundtable kinds (AI 圆桌)', () => {
+  it('roundtable-turn wraps the prebuilt transcript with the roundtable preamble', () => {
+    const messages = getAgentKindDefinition('roundtable-turn').buildPrompt({
+      transcript: '你的角色设定：怀疑者……\n\n圆桌话题：要不要重写？',
+      preferences: zhPreferences,
+    });
+    expect(messages[0].role).toBe('system');
+    expect(messages[0].content).toContain('圆桌讨论助手');
+    expect(messages[0].content).toContain('使用清晰、简洁的中文 Markdown。');
+    expect(messages[1]).toEqual({
+      role: 'user',
+      content: '你的角色设定：怀疑者……\n\n圆桌话题：要不要重写？',
+    });
+  });
+
+  it('roundtable-turn follows the en-US output language', () => {
+    const messages = getAgentKindDefinition('roundtable-turn').buildPrompt({
+      transcript: 'T',
+      preferences: { ...zhPreferences, outputLanguage: 'en-US' },
+    });
+    expect(messages[0].content).toContain('Respond in clear English Markdown.');
+  });
+
+  it('roundtable-turn parses leniently: strips fences, trims, caps at 4000, rejects empty', () => {
+    const definition = getAgentKindDefinition('roundtable-turn');
+    expect(definition.parse?.('```markdown\n\n发言正文。\n```')).toBe('发言正文。');
+    expect(definition.parse?.('x'.repeat(4100))).toHaveLength(4000);
+    expect(() => definition.parse?.('  \n ')).toThrow('roundtable-turn 输出为空');
+  });
+
+  it('roundtable-synthesis demands JSON in the preamble and parses leniently', () => {
+    const definition = getAgentKindDefinition('roundtable-synthesis');
+    const messages = definition.buildPrompt({ transcript: 'T', preferences: zhPreferences });
+    expect(messages[0].content).toContain('圆桌主持助手');
+    expect(messages[0].content).toContain('严格 JSON');
+    expect(messages[1]).toEqual({ role: 'user', content: 'T' });
+    expect(definition.parse?.('```json\n{"consensus": []}\n```')).toBe('{"consensus": []}');
+    expect(() => definition.parse?.('   ')).toThrow('roundtable-synthesis 输出为空');
   });
 });

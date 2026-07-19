@@ -9,7 +9,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 import type { VestiDatabase } from './db.js';
-import { vestiGetTurns, vestiSearch, vestiTimeline } from './tools.js';
+import { vestiGetTurns, vestiProjectBrief, vestiSearch, vestiTimeline } from './tools.js';
 
 const SEARCH_DESCRIPTION = [
   'Layer 1 of 3 — search VESTI’s memory of past AI-coding sessions (claude code, codex, kimi-code, …).',
@@ -29,6 +29,12 @@ const GET_TURNS_DESCRIPTION = [
   'Layer 3 of 3 — full message content for specific turns of a session (user input, assistant replies, tool-call summaries).',
   'Select turns by turn_ids (sequence numbers from vesti_timeline) or an inclusive {from,to} range. Output is capped at max_chars; when the cap is hit the response sets truncated=true and you should narrow the selection.',
   'This is the expensive layer — only fetch the turns vesti_timeline pointed to.',
+].join(' ');
+
+const PROJECT_BRIEF_DESCRIPTION = [
+  'Project-level memory — the L0 "current state card" (deterministic: one-liner, most-active files of the last 30 days, open questions, session count) plus the L2 LLM-maintained project brief (current state, architecture & key files, decision log, open questions) for one project.',
+  'The project argument is fuzzy-matched against known project names/keys, so a shorthand like "vesti" works.',
+  'Use this when you start working in a project and want its current state without searching individual sessions first.',
 ].join(' ');
 
 export function createVestiMcpServer(db: VestiDatabase): Server {
@@ -114,6 +120,20 @@ export function createVestiMcpServer(db: VestiDatabase): Server {
           required: ['session_id'],
         },
       },
+      {
+        name: 'vesti_project_brief',
+        description: PROJECT_BRIEF_DESCRIPTION,
+        inputSchema: {
+          type: 'object',
+          properties: {
+            project: {
+              type: 'string',
+              description: 'Project name or key (fuzzy-matched, e.g. "vesti").',
+            },
+          },
+          required: ['project'],
+        },
+      },
     ],
   }));
 
@@ -130,6 +150,9 @@ export function createVestiMcpServer(db: VestiDatabase): Server {
           break;
         case 'vesti_get_turns':
           payload = vestiGetTurns(db, (args ?? {}) as Parameters<typeof vestiGetTurns>[1]);
+          break;
+        case 'vesti_project_brief':
+          payload = vestiProjectBrief(db, (args ?? {}) as { project: string });
           break;
         default:
           return {

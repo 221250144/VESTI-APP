@@ -220,3 +220,62 @@ export function createFixtureDb(): Fixture {
     cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
   };
 }
+
+export const PROJECT_KEY = 'cli-path-key-vesti';
+
+/**
+ * Upgrade a fixture database to the memory-v2 shape: digest access_count,
+ * project_registry / project_state / project_briefs, seeded for the "vesti"
+ * project. Opens and closes its own connection.
+ */
+export function upgradeFixtureToMemoryV2(dbPath: string): void {
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    ALTER TABLE session_digests ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE project_registry (
+      project_key TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      label TEXT,
+      path_or_domain TEXT,
+      first_seen TEXT,
+      last_seen TEXT
+    );
+    CREATE TABLE project_state (
+      project_key TEXT PRIMARY KEY,
+      one_liner TEXT,
+      active_files TEXT,
+      open_questions TEXT,
+      session_count INTEGER,
+      last_active TEXT,
+      updated_at TEXT
+    );
+    CREATE TABLE project_briefs (
+      project_key TEXT PRIMARY KEY,
+      content_markdown TEXT,
+      version INTEGER NOT NULL DEFAULT 0,
+      last_ops TEXT,
+      updated_at TEXT
+    );
+  `);
+  db.prepare(
+    `INSERT INTO project_registry (project_key, kind, label, path_or_domain, first_seen, last_seen)
+     VALUES (?, 'cli_path', 'vesti', 'C:/work/vesti', '2026-01-01T00:00:00.000Z', '2026-01-10T00:00:00.000Z')`,
+  ).run(PROJECT_KEY);
+  db.prepare(
+    `INSERT INTO project_state (project_key, one_liner, active_files, open_questions, session_count, last_active, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    PROJECT_KEY,
+    'L0 card one-liner',
+    JSON.stringify([{ path: 'src/storage/migrations.ts', touches: 4, lastTouched: '2026-01-10T12:00:00.000Z' }]),
+    JSON.stringify(['是否切换到 WAL2？']),
+    1,
+    '2026-01-10T12:00:00.000Z',
+    '2026-01-10T13:00:00.000Z',
+  );
+  db.prepare(
+    `INSERT INTO project_briefs (project_key, content_markdown, version, last_ops, updated_at)
+     VALUES (?, ?, ?, '[]', ?)`,
+  ).run(PROJECT_KEY, '# vesti 项目简报\n\n当前在做存储层重构。', 3, '2026-01-10T14:00:00.000Z');
+  db.close();
+}

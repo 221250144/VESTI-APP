@@ -67,6 +67,14 @@ const en = {
   promptNoSnapshot: 'Personal library empty — showing curated catalog only',
   promptFromCurated: 'Curated',
   promptFromUser: 'Mine',
+  // Prompt refine / continue (LLM)
+  promptImprove: 'Improve',
+  promptContinue: 'Continue',
+  promptImproving: 'Improving…',
+  promptContinuing: 'Continuing…',
+  promptLlmRequired: 'Configure an LLM in Settings first',
+  promptImproveNotes: 'What changed',
+  promptUseResult: 'Use this version',
 };
 
 export type CapsuleCopy = typeof en;
@@ -129,6 +137,13 @@ const zh: CapsuleCopy = {
   promptNoSnapshot: '个人提示词库为空，当前仅显示策展目录',
   promptFromCurated: '策展',
   promptFromUser: '我的',
+  promptImprove: '优化',
+  promptContinue: '续写',
+  promptImproving: '优化中…',
+  promptContinuing: '续写中…',
+  promptLlmRequired: '请先在设置中配置 LLM',
+  promptImproveNotes: '修改要点',
+  promptUseResult: '使用此版本',
 };
 
 /** ja/ko keep their legacy translations; new dock keys fall back to English. */

@@ -239,6 +239,12 @@ export class SettingsService {
     await this.persist();
   }
 
+  /** Whether the chat LLM is usable without touching secrets: demo proxy
+   * needs no key, BYOK needs a stored one. */
+  isLlmConfigured(): boolean {
+    return this.settings.llm.mode === 'demo_proxy' || Boolean(this.settings.llm.encryptedApiKey);
+  }
+
   getRuntimeLlm(): RuntimeLlmSettings {
     let apiKey = '';
     if (this.settings.llm.encryptedApiKey) {

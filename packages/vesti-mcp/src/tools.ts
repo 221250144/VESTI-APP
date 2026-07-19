@@ -1,12 +1,15 @@
 /**
- * The three-layer progressive-disclosure tools exposed over MCP:
+ * The progressive-disclosure tools exposed over MCP:
  *
- *   1. vesti_search    — session-level index entries (~100 tokens each)
- *   2. vesti_timeline  — per-session turn outline to locate a passage
- *   3. vesti_get_turns — full message content for a handful of turns
+ *   1. vesti_search        — session-level index entries (~100 tokens each)
+ *   2. vesti_timeline      — per-session turn outline to locate a passage
+ *   3. vesti_get_turns     — full message content for a handful of turns
+ *   4. vesti_project_brief — L0 state card + L2 brief of a whole project
  *
- * Pure SQL + string logic over a read-only database handle; every function
- * is unit-testable against a temporary database file.
+ * Pure SQL + string logic over the database handle; every function is
+ * unit-testable against a temporary database file. The single write in this
+ * package is the session_digests.access_count bump in vesti_search (memory
+ * v2 L1 access tracking); everything else is read-only.
  */
 
 import type { VestiDatabase } from './db.js';
@@ -83,6 +86,12 @@ export interface SearchEntry {
   key_topics: string[];
   snippet: string;
   score: number;
+  /**
+   * Abstention signal from recall: 'low' when the hit is weakly supported
+   * (best message covers < half of the matchable query tokens). Callers
+   * should treat a 'low' top entry as "probably not in the archive".
+   */
+  confidence: 'high' | 'low';
 }
 
 export function vestiSearch(
@@ -128,10 +137,28 @@ export function vestiSearch(
       key_topics: parseJsonArray(meta?.key_topics),
       snippet: oneLine(snippet, 200),
       score: Number(hit.score.toFixed(6)),
+      confidence: hit.confidence,
     };
   });
 
+  bumpDigestAccess(db, results.map(entry => entry.session_id));
+
   return { query: args.query, count: results.length, results };
+}
+
+/**
+ * Memory v2 L1 access tracking: every digest a search surfaces gets its
+ * access_count bumped. This is the package's only write; a pre-v4 database
+ * (no access_count column) silently skips it.
+ */
+export function bumpDigestAccess(db: VestiDatabase, sessionIds: string[]): void {
+  if (sessionIds.length === 0) return;
+  try {
+    const stmt = db.prepare(
+      'UPDATE session_digests SET access_count = access_count + 1 WHERE session_id = ?',
+    );
+    for (const id of new Set(sessionIds)) stmt.run(id);
+  } catch { /* older schema or locked db — access tracking is best-effort */ }
 }
 
 // ==================== layer 2: vesti_timeline ====================
@@ -393,5 +420,149 @@ export function vestiGetTurns(
     char_count: charCount,
     max_chars: maxChars,
     turns,
+  };
+}
+
+// ==================== layer 4: vesti_project_brief ====================
+
+export interface ProjectBriefResult {
+  project_key: string;
+  label: string;
+  matched: string;
+  /** L0 deterministic state card (null before the first desktop rebuild). */
+  state: {
+    one_liner: string;
+    active_files: Array<{ path: string; touches: number; last_touched: string }>;
+    open_questions: string[];
+    session_count: number;
+    last_active: string;
+    updated_at: string;
+  } | null;
+  /** L2 LLM-maintained brief (null until the desktop app generates one). */
+  brief: {
+    content_markdown: string;
+    version: number;
+    updated_at: string;
+  } | null;
+}
+
+interface ProjectCandidate {
+  project_key: string;
+  label: string | null;
+}
+
+/**
+ * Fuzzy-match a project name against project_registry (exact key > exact
+ * label > substring, case-insensitive) and return its L0 state card plus the
+ * L2 brief. Tables from schema v4 may be absent on older databases — those
+ * degrade to null fields instead of errors.
+ */
+export function vestiProjectBrief(
+  db: VestiDatabase,
+  args: { project: string },
+): ProjectBriefResult {
+  const needle = (args.project ?? '').trim();
+  if (!needle) throw new Error('project is required');
+
+  const candidates = db
+    .prepare('SELECT project_key, label FROM project_registry')
+    .all() as unknown as ProjectCandidate[];
+  if (candidates.length === 0) throw new Error('No projects in the database yet');
+
+  const lower = needle.toLowerCase();
+  const scored = candidates
+    .map(candidate => {
+      const key = candidate.project_key.toLowerCase();
+      const label = (candidate.label ?? '').toLowerCase();
+      let score = 0;
+      if (key === lower || label === lower) score = 3;
+      else if (label.includes(lower) || key.includes(lower)) score = 2;
+      else if (lower.includes(label) && label.length > 0) score = 1;
+      return { candidate, score };
+    })
+    .filter(entry => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.candidate.project_key.localeCompare(b.candidate.project_key));
+  if (scored.length === 0) {
+    throw new Error(
+      `Project not found: ${needle}. Known projects: ${candidates
+        .map(candidate => candidate.label ?? candidate.project_key)
+        .slice(0, 10)
+        .join(', ')}`,
+    );
+  }
+  const match = scored[0].candidate;
+
+  let state: ProjectBriefResult['state'] = null;
+  try {
+    const row = db
+      .prepare(
+        `SELECT one_liner, active_files, open_questions, session_count, last_active, updated_at
+         FROM project_state WHERE project_key = ?`,
+      )
+      .get(match.project_key) as unknown as
+      | {
+          one_liner: string | null;
+          active_files: string | null;
+          open_questions: string | null;
+          session_count: number | null;
+          last_active: string | null;
+          updated_at: string | null;
+        }
+      | undefined;
+    if (row) {
+      // active_files is a JSON array of objects, unlike the string arrays
+      // parseJsonArray handles — parse it directly.
+      let files: Array<{ path?: unknown; touches?: unknown; lastTouched?: unknown }> = [];
+      try {
+        const parsed = JSON.parse(row.active_files ?? '[]');
+        if (Array.isArray(parsed)) files = parsed;
+      } catch { /* tolerate a corrupt row */ }
+      state = {
+        one_liner: row.one_liner ?? '',
+        active_files: files.map(file => ({
+          path: String(file?.path ?? ''),
+          touches: Number(file?.touches ?? 0),
+          last_touched: String(file?.lastTouched ?? ''),
+        })),
+        open_questions: parseJsonArray(row.open_questions),
+        session_count: row.session_count ?? 0,
+        last_active: row.last_active ?? '',
+        updated_at: row.updated_at ?? '',
+      };
+    }
+  } catch { /* pre-v4 database without project_state */ }
+
+  let brief: ProjectBriefResult['brief'] = null;
+  try {
+    const row = db
+      .prepare(
+        `SELECT content_markdown, version, updated_at
+         FROM project_briefs WHERE project_key = ?`,
+      )
+      .get(match.project_key) as unknown as
+      | { content_markdown: string | null; version: number | null; updated_at: string | null }
+      | undefined;
+    if (row?.content_markdown) {
+      brief = {
+        content_markdown: row.content_markdown,
+        version: row.version ?? 0,
+        updated_at: row.updated_at ?? '',
+      };
+    }
+  } catch { /* pre-v4 database without project_briefs */ }
+
+  if (!state && !brief) {
+    throw new Error(
+      `Project "${match.label ?? match.project_key}" has no memory layers yet — ` +
+        'open the VESTI desktop app and let a sync + digest pass finish first.',
+    );
+  }
+
+  return {
+    project_key: match.project_key,
+    label: match.label ?? match.project_key,
+    matched: needle,
+    state,
+    brief,
   };
 }

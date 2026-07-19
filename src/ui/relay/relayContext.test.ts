@@ -174,4 +174,61 @@ describe("buildRelayTranscript", () => {
     ]);
     expect(transcript).not.toContain("关键文件汇总");
   });
+
+  it("injects the program-extracted file anchor block at the very top", () => {
+    const transcript = buildRelayTranscript(
+      [
+        conversation({ id: 11, digest: { oneLiner: "一" } }),
+        conversation({ id: 22, digest: { oneLiner: "二" } }),
+      ],
+      RELAY_CONTEXT_BUDGET_CHARS,
+      {
+        fileAnchors: [
+          {
+            path: "src/player/decoder.ts",
+            touches: 5,
+            lastTouchedAt: Date.UTC(2023, 10, 14, 12, 0, 0),
+            conversationIds: [11, 22],
+          },
+        ],
+      }
+    );
+    expect(transcript.startsWith("## 关键文件（程序提取，带锚点）")).toBe(true);
+    // Source anchors use the same numbering as the conversation heads.
+    expect(transcript).toContain(
+      "- src/player/decoder.ts（触碰 5 次，最近 2023-11-14，来源：会话 1、会话 2）"
+    );
+  });
+
+  it("omits the anchor block when no anchors were extracted", () => {
+    const transcript = buildRelayTranscript(
+      [conversation({ digest: { oneLiner: "x" } })],
+      RELAY_CONTEXT_BUDGET_CHARS,
+      { fileAnchors: [] }
+    );
+    expect(transcript).not.toContain("程序提取");
+  });
+
+  it("counts the anchor block against the budget", () => {
+    const anchors = Array.from({ length: 15 }, (_, index) => ({
+      path: `src/${index}/file.ts`,
+      touches: 10,
+      lastTouchedAt: Date.UTC(2023, 10, 14, 12, 0, 0),
+      conversationIds: [1],
+    }));
+    const budget = 600;
+    const transcript = buildRelayTranscript(
+      [
+        conversation({
+          id: 1,
+          digest: { oneLiner: "x" },
+          messages: [{ role: "user", content: "很长的消息".repeat(200) }],
+        }),
+      ],
+      budget,
+      { fileAnchors: anchors }
+    );
+    expect(transcript.length).toBeLessThanOrEqual(budget);
+    expect(transcript).toContain("关键文件（程序提取，带锚点）");
+  });
 });

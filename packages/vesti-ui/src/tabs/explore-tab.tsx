@@ -123,6 +123,9 @@ type ExploreTabProps = {
   themeMode?: UiThemeMode;
   onOpenConversation?: (conversationId: number) => void;
   labels: ExploreLabels;
+  /** "继续深入" seed: the host hands a prefilled question (e.g. from the Learn
+   * map); the composer adopts it once per nonce and takes focus. */
+  seedQuery?: { text: string; nonce: number } | null;
 };
 
 type DrawerTab = "plan" | "tool_calls" | "sources" | "context_draft";
@@ -270,6 +273,7 @@ export function ExploreTab({
   themeMode = "light",
   onOpenConversation,
   labels,
+  seedQuery,
 }: ExploreTabProps) {
   const modeStages = labels.modeStages;
   const starterDecks = labels.starterDecks;
@@ -364,6 +368,16 @@ export function ExploreTab({
   useEffect(() => {
     loadSessions();
   }, []);
+
+  // Adopt a host-seeded question ("继续深入" from the Learn map) once per
+  // nonce: fill the composer and focus it so the user can edit/send at once.
+  const seededNonceRef = useRef(0);
+  useEffect(() => {
+    if (!seedQuery || seedQuery.nonce === seededNonceRef.current) return;
+    seededNonceRef.current = seedQuery.nonce;
+    setInputValue(seedQuery.text);
+    textareaRef.current?.focus();
+  }, [seedQuery]);
 
   useEffect(() => {
     if (currentSessionId) {

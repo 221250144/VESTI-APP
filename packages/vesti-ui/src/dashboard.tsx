@@ -767,6 +767,25 @@ const DEFAULT_LABELS: DashboardLabels = {
     selectedCount: "{n} selected",
     deleteSelected: "Delete",
     clearSelection: "Cancel",
+    scanLibrary: "Scan library",
+    scanning: "Scanning…",
+    scanTooltip: "Scan every archived conversation (agent sessions and browser chats) for prompts you reuse",
+    scanProgress: "Scanning {done}/{total}…",
+    scanResultsTitle: "Scan results",
+    scanSummary: "Scanned {conversations} conversations and {inputs} of your inputs — {n} candidates found",
+    scanEmpty: "No reusable prompt patterns found — reuse similar instructions a few more times, then scan again.",
+    scanFailed: "Scan failed.",
+    scanPrivacy: "Only your own archived inputs on this device are scanned; with no LLM configured it runs fully offline — with one, candidate titles get a single naming call.",
+    scanTruncated: "Large library — only the most recent conversations were scanned this time.",
+    scanUsedCount: "{n}×",
+    scanSourceCount: "{n} chats",
+    scanAdopt: "Adopt",
+    scanAdopted: "Adopted",
+    scanIgnore: "Ignore",
+    scanInLibrary: "In library",
+    scanOriginAgent: "Agent",
+    scanOriginBrowser: "Browser",
+    scanClose: "Close results",
   },
   aiti: {
     modeAsk: "Ask",
@@ -805,6 +824,8 @@ const DEFAULT_LABELS: DashboardLabels = {
     axisSignalFaint: "Faint signal",
     imageryFaint: "The outline is still faint — some axes are gathering signal; read it lightly.",
     personaNoteLabel: "Recent footnote",
+    mindMapTitle: "Thinking map",
+    repoQrCaption: "Open source — scan for the repo",
     evidenceBecause: "This is so you, because…",
     evidenceConversation: "Conversation #{id}",
     exportCard: "Export imagery card",
@@ -822,15 +843,22 @@ const DEFAULT_LABELS: DashboardLabels = {
     modeLearn: "Learn",
     title: "What you've been learning",
     subtitle: "Your conversations, organized as a personal curriculum. Computed locally.",
+    intro: "This is your learning map: it automatically reads the summaries of your AI conversations and lays out what you've been studying, how deep it went, and what is still open.",
+    sourceLine: "Based on {n} analyzed conversations · covering {m} topics",
     insufficient: "Not enough conversations yet — with at least 3 captured conversations your learning map starts to grow here. Ask a few questions in the Ask tab first.",
     sample: "From {n} analyzed conversations",
     domainsTitle: "Knowledge domains",
     uncategorized: "Uncategorized",
     domainConversations: "{n} conversations",
+    representativesTitle: "Representative conversations",
+    deepen: "Go deeper",
+    deepenPrompt: "Around \"{topic}\": what should I dig into next? Lay out a learning path from my past conversations.",
     glossaryTitle: "Things you've learned",
     openLoopsTitle: "Open loops",
     openLoopsEmpty: "No unresolved threads — nicely closed out.",
     weakHint: "Still a thin sample — generate summaries for more conversations (see the AITI tab) and this map will fill in.",
+    weakAction: "Generate summaries on the AITI tab",
+    loading: "Putting your learning map together…",
   },
   roundtable: {
     title: "AI Roundtable",
@@ -838,9 +866,12 @@ const DEFAULT_LABELS: DashboardLabels = {
     comingSoonTitle: "AI Roundtable — coming soon",
     comingSoonBody: "The plan: convene several AI panelists with distinct perspectives on your question, then have a moderator synthesize the consensus, the disagreements, and a recommendation. The multi-turn orchestration is still being polished — until it is real, we'd rather not show you a fake run.",
     questionPlaceholder: "Ask a judgment-call question to debate…",
-    personasLabel: "Panelists (pick up to 3)",
+    personasLabel: "Panelists (pick 2-4)",
     run: "Convene panel",
+    rerun: "Run it again",
     running: "The panel is deliberating…",
+    seatsProgress: "{done}/{total} panelists have spoken",
+    synthesisRunning: "The moderator is synthesizing…",
     latencyHint: "Each seat answers in turn, so this takes a little while.",
     needQuestion: "Type a question first.",
     seatsTitle: "Panel",
@@ -850,6 +881,10 @@ const DEFAULT_LABELS: DashboardLabels = {
     recommendation: "Recommendation",
     openQuestions: "Open questions",
     empty: "Ask a question and convene the panel to see perspectives + a synthesis.",
+    llmMissing: "No model configured — set up an LLM in Settings first; the panel needs one to deliberate.",
+    seatFailed: "Turn failed",
+    savedHint: "Saved to your Ask history — replay it anytime from the Ask tab.",
+    groundedHint: "Grounded in {n} of your past conversations",
     personaSkeptic: "Skeptic",
     personaOptimist: "Optimist",
     personaPragmatist: "Pragmatist",
@@ -876,6 +911,8 @@ type DashboardProps = {
   aitiEmblemUrl?: string;
   aitiPersonaNote?: string | null;
   learn?: LearnProfile;
+  /** Transcript/persona language for the roundtable runs ("zh" default). */
+  lang?: "zh" | "en";
   /** Controlled active tab (desktop dock rail). Uncontrolled when omitted. */
   tab?: Tab;
   onTabChange?: (tab: Tab) => void;
@@ -898,6 +935,7 @@ export function VestiDashboard({
   aitiEmblemUrl,
   aitiPersonaNote,
   learn,
+  lang = "zh",
   tab: controlledTab,
   onTabChange,
 }: DashboardProps) {
@@ -936,6 +974,15 @@ export function VestiDashboard({
     if (typeof window === "undefined") return;
     window.localStorage.setItem(EXPLORE_MODE_STORAGE_KEY, exploreMode);
   }, [exploreMode]);
+
+  // Learn → Ask handoff ("继续深入"): seed the Ask composer with a follow-up
+  // question and switch the pane; the nonce makes repeat clicks re-seed.
+  const [askSeed, setAskSeed] = useState<{ text: string; nonce: number } | null>(null);
+  const handleExploreTopic = useCallback((text: string) => {
+    setAskSeed({ text, nonce: Date.now() });
+    setExploreMode("ask");
+  }, []);
+  const handleGoAiti = useCallback(() => setExploreMode("aiti"), []);
 
   // AITI 摘要覆盖率 + 立即生成摘要 batch state (undefined coverage → the
   // host storage doesn't implement the coverage API and the header hides).
@@ -1498,6 +1545,7 @@ export function VestiDashboard({
                   themeMode={themeMode}
                   onOpenConversation={handleOpenConversation}
                   labels={labels.explore}
+                  seedQuery={askSeed}
                 />
               </div>
               {exploreMode === "aiti" && (
@@ -1529,6 +1577,8 @@ export function VestiDashboard({
                     profile={learn}
                     labels={labels.learn}
                     onOpenConversation={handleOpenConversation}
+                    onOpenAiti={handleGoAiti}
+                    onExploreTopic={handleExploreTopic}
                     storage={storage}
                     sendToLabels={labels.library}
                   />
@@ -1541,6 +1591,8 @@ export function VestiDashboard({
                     themeMode={themeMode}
                     labels={labels.roundtable}
                     sendToLabels={labels.library}
+                    lang={lang}
+                    onOpenConversation={handleOpenConversation}
                   />
                 </div>
               )}

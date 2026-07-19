@@ -213,3 +213,4 @@ App 只依赖 `@vesti/capture-core` 的包接口，不直接引用 CLI 命令。
 - [docs/architecture.md](docs/architecture.md)：分层、安全边界、迁移机制、WSL 抽象与 AgentService 约定。
 - [docs/collection-engine.md](docs/collection-engine.md)：收集引擎设计——适配器矩阵、统一数据模型、增量同步与 vault、树索引与 digest、检索融合。
 - [docs/bridge-protocol.md](docs/bridge-protocol.md)：Bridge Protocol v1.2 完整协议（端点、鉴权、TOFU 自动连接与配对窗口、配对流、增量游标、outbox、CORS/限流、错误码）。
+- [docs/memory-system/](docs/memory-system/)：记忆系统 v2 归档——[agent-formats](docs/memory-system/agent-formats.md)（各大 agent 存储规范建模）、[design](docs/memory-system/design.md)（L0–L3 分级说明系统设计）、[bench](docs/memory-system/bench.md)（评测方案与基线）、[references](docs/memory-system/references.md)（参考文献与工具）。

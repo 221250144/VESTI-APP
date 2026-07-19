@@ -13,6 +13,7 @@ import type {
   Conversation,
   ConversationDigest,
   ConversationTree,
+  ProjectStateView,
   Topic,
   StorageApi,
 } from "../types";
@@ -30,6 +31,8 @@ type LibraryDataContextValue = {
   /** Desktop conversation tree for the source-tree nav (P2b); null when the
    * platform has no capture pipeline (extension). */
   conversationTree: ConversationTree | null;
+  /** Memory v2 L0 cards keyed by projectKey; empty without a capture pipeline. */
+  projectStateByKey: Map<string, ProjectStateView>;
   refresh: () => Promise<void>;
   updateConversationInState: (payload: ConversationUpdatedPayload) => void;
 };
@@ -77,15 +80,19 @@ export function LibraryDataProvider({
   >(new Map());
   const [conversationTree, setConversationTree] =
     useState<ConversationTree | null>(null);
+  const [projectStateByKey, setProjectStateByKey] = useState<
+    Map<string, ProjectStateView>
+  >(new Map());
 
   const refresh = useCallback(async () => {
     try {
-      const [topicData, conversationData, digestData, treeData] =
+      const [topicData, conversationData, digestData, treeData, projectStates] =
         await Promise.all([
           storage.getTopics(),
           storage.getConversations(),
           storage.getConversationDigests?.() ?? Promise.resolve([]),
           storage.getConversationTree?.() ?? Promise.resolve(null),
+          storage.getProjectStates?.() ?? Promise.resolve([]),
         ]);
       setTopics(topicData);
       setConversations(conversationData);
@@ -93,6 +100,9 @@ export function LibraryDataProvider({
         new Map(digestData.map((digest) => [digest.conversationId, digest]))
       );
       setConversationTree(treeData);
+      setProjectStateByKey(
+        new Map(projectStates.map((state) => [state.projectKey, state]))
+      );
     } catch (error) {
       console.error("[dashboard] Failed to load library data", error);
     }
@@ -179,6 +189,7 @@ export function LibraryDataProvider({
       conversations,
       digestByConversationId,
       conversationTree,
+      projectStateByKey,
       refresh,
       updateConversationInState,
     }),
@@ -187,6 +198,7 @@ export function LibraryDataProvider({
       conversations,
       digestByConversationId,
       conversationTree,
+      projectStateByKey,
       refresh,
       updateConversationInState,
     ]

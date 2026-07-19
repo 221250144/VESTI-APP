@@ -7,7 +7,13 @@
 // work-session id, identical to the tree's session id); browser rows map by
 // URL hostname to the tree's `web:<domain>` project keys.
 
-import type { Conversation, ConversationTree, ConversationTreeSession, Topic } from "../../types";
+import type {
+  Conversation,
+  ConversationTree,
+  ConversationTreeSession,
+  ProjectStateView,
+  Topic,
+} from "../../types";
 
 /** Capture-lineage fields the desktop shell stamps on Dexie records. They are
  * absent (undefined) in the extension build. */
@@ -86,6 +92,10 @@ export type ConversationTreeLookup = {
   subagentParentByChildId: Map<string, string>;
   /** main session id → its subagent child nodes (A1) */
   subagentsByParentId: Map<string, ConversationTreeSession[]>;
+  /** Memory v2: fork session id → the session it was forked from */
+  forkedFromBySessionId: Map<string, string>;
+  /** Memory v2: tree session id → node (fork badge + dedup counts on cards) */
+  sessionNodeById: Map<string, ConversationTreeSession>;
 };
 
 export function buildConversationTreeLookup(
@@ -95,6 +105,8 @@ export function buildConversationTreeLookup(
   const byProjectPath = new Map<string, { source: SourceRef; projectKey: string }>();
   const subagentParentByChildId = new Map<string, string>();
   const subagentsByParentId = new Map<string, ConversationTreeSession[]>();
+  const forkedFromBySessionId = new Map<string, string>();
+  const sessionNodeById = new Map<string, ConversationTreeSession>();
   for (const source of tree?.sources ?? []) {
     const ref: SourceRef = { platform: source.platform, host: source.host };
     for (const project of source.projects) {
@@ -110,6 +122,12 @@ export function buildConversationTreeLookup(
         if (!bySessionId.has(session.id)) {
           bySessionId.set(session.id, placement);
         }
+        if (!sessionNodeById.has(session.id)) {
+          sessionNodeById.set(session.id, session);
+        }
+        if (session.forkedFrom && !forkedFromBySessionId.has(session.id)) {
+          forkedFromBySessionId.set(session.id, session.forkedFrom);
+        }
         if (parentId) {
           if (!subagentParentByChildId.has(session.id)) {
             subagentParentByChildId.set(session.id, parentId);
@@ -123,7 +141,14 @@ export function buildConversationTreeLookup(
       for (const session of project.sessions) indexSession(session);
     }
   }
-  return { bySessionId, byProjectPath, subagentParentByChildId, subagentsByParentId };
+  return {
+    bySessionId,
+    byProjectPath,
+    subagentParentByChildId,
+    subagentsByParentId,
+    forkedFromBySessionId,
+    sessionNodeById,
+  };
 }
 
 /** A1: true when the conversation is a captured subagent session (folded
@@ -269,6 +294,8 @@ export type SourceTreeProjectNode = {
   count: number;
   /** Global topics tree pruned to branches used inside this project. */
   topics: SourceTreeTopicNode[];
+  /** Memory v2 L0 card, when the desktop has rebuilt one for this project. */
+  state?: ProjectStateView;
 };
 
 export type SourceTreeSourceNode = {
@@ -315,6 +342,8 @@ export function buildSourceTreeModel(args: {
   conversations: Conversation[];
   topics: Topic[];
   lookup?: ConversationTreeLookup;
+  /** Memory v2: L0 cards keyed by projectKey, attached to project nodes. */
+  projectStates?: Map<string, ProjectStateView>;
 }): SourceTreeModel {
   const { tree, conversations, topics } = args;
   if (!tree) return { sources: [] };
@@ -359,6 +388,9 @@ export function buildSourceTreeModel(args: {
         label: project.label,
         count: aggregate.count,
         topics: pruneTopicTree(topics, aggregate.topicCounts),
+        ...(args.projectStates?.get(project.projectKey)
+          ? { state: args.projectStates.get(project.projectKey) }
+          : {}),
       });
     }
     if (projects.length === 0) continue;

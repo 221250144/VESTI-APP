@@ -10,6 +10,7 @@ import { useState, type ReactNode } from "react";
 import {
   BookOpen,
   ChevronDown,
+  FileText,
   Folder,
   Globe,
   Hash,
@@ -28,12 +29,17 @@ import {
   sourcePlatformLabel,
   wslDistro,
 } from "./sourceTree";
+import type { ProjectStateView } from "../../types";
 
 export type SourceTreeNavLabels = {
   sectionLabel: string;
   notes: string;
   browser: string;
   wslBadge: string;
+  /** Memory v2 */
+  projectBrief?: string;
+  activeFiles?: string;
+  openQuestions?: string;
 };
 
 type SourceTreeNavProps = {
@@ -44,6 +50,8 @@ type SourceTreeNavProps = {
   notesActive: boolean;
   onSelectNotes: () => void;
   labels: SourceTreeNavLabels;
+  /** Memory v2: open the L2 project brief overlay for a project. */
+  onOpenBrief?: (projectKey: string) => void;
 };
 
 function sameRef(a: SourceRef, b: SourceRef): boolean {
@@ -80,6 +88,7 @@ function TreeRow({
   expanded,
   onToggle,
   toggleLabel,
+  hoverCard,
 }: {
   depth: number;
   selected: boolean;
@@ -92,6 +101,8 @@ function TreeRow({
   expanded?: boolean;
   onToggle?: () => void;
   toggleLabel?: string;
+  /** Memory v2: content shown in a floating card while the row is hovered. */
+  hoverCard?: ReactNode;
 }) {
   return (
     <div
@@ -103,6 +114,11 @@ function TreeRow({
       }`}
       style={{ paddingLeft: `${INDENT_BASE_PX + depth * INDENT_STEP_PX}px` }}
     >
+      {hoverCard ? (
+        <div className="pointer-events-none absolute left-full top-0 z-50 ml-1 hidden w-72 group-hover:block">
+          {hoverCard}
+        </div>
+      ) : null}
       {collapsible ? (
         <button
           type="button"
@@ -156,6 +172,46 @@ function WslBadge({ host, label }: { host: string; label: string }) {
   );
 }
 
+/** Memory v2: L0 "current state card" shown on project-row hover. */
+function ProjectStateHoverCard({
+  state,
+  labels,
+}: {
+  state: ProjectStateView;
+  labels: SourceTreeNavLabels;
+}) {
+  return (
+    <div className="rounded-xl border border-border-subtle bg-bg-app p-3 shadow-lg">
+      <p className="text-vesti-sm font-sans text-text-primary line-clamp-2">
+        {state.oneLiner || "—"}
+      </p>
+      {state.activeFiles.length > 0 ? (
+        <div className="mt-2">
+          <p className="text-[10px] font-sans font-semibold uppercase tracking-wider text-text-tertiary">
+            {labels.activeFiles ?? "Active files (30d)"}
+          </p>
+          <div className="mt-1 flex flex-wrap gap-1">
+            {state.activeFiles.slice(0, 6).map((file) => (
+              <span
+                key={file.path}
+                title={`${file.path} · ${file.touches}×`}
+                className="max-w-full truncate rounded bg-bg-surface-card px-1.5 py-0.5 text-vesti-xs font-sans text-text-secondary"
+              >
+                {file.path.split("/").pop() ?? file.path}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      <p className="mt-2 text-vesti-xs font-sans text-text-tertiary">
+        {labels.openQuestions ?? "Open questions"}: {state.openQuestions.length}
+        {" · "}
+        {state.sessionCount} sessions
+      </p>
+    </div>
+  );
+}
+
 export function SourceTreeNav({
   model,
   selection,
@@ -164,6 +220,7 @@ export function SourceTreeNav({
   notesActive,
   onSelectNotes,
   labels,
+  onOpenBrief,
 }: SourceTreeNavProps) {
   // Collapse state is component-local. Default: sources expanded, projects
   // collapsed ("collapsed down to the project layer"); explicit user toggles
@@ -289,7 +346,37 @@ export function SourceTreeNav({
                         collapsible={hasTopics}
                         expanded={!projectCollapsed}
                         onToggle={() => toggleCollapsed(projectKey, true)}
+                        hoverCard={
+                          project.state ? (
+                            <ProjectStateHoverCard
+                              state={project.state}
+                              labels={labels}
+                            />
+                          ) : undefined
+                        }
                       />
+                      {/* Memory v2: L2 project brief entry under the project. */}
+                      {onOpenBrief && project.state ? (
+                        <div
+                          role="treeitem"
+                          className="my-0.5 flex w-full items-center rounded-lg transition-colors hover:bg-bg-surface-card"
+                          style={{ paddingLeft: `${INDENT_BASE_PX + 2 * INDENT_STEP_PX}px` }}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => onOpenBrief(project.projectKey)}
+                            className="flex min-w-0 flex-1 items-center gap-2 py-1 pr-2 text-left"
+                          >
+                            <FileText
+                              strokeWidth={1.75}
+                              className="h-3.5 w-3.5 shrink-0 text-text-tertiary"
+                            />
+                            <span className="min-w-0 flex-1 truncate text-vesti-sm font-sans text-text-secondary">
+                              {labels.projectBrief ?? "项目简报"}
+                            </span>
+                          </button>
+                        </div>
+                      ) : null}
                       {hasTopics && !projectCollapsed
                         ? project.topics.map((topic) =>
                             renderTopic(topic, ref, project, 2),

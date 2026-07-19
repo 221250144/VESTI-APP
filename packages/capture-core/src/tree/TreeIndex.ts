@@ -8,6 +8,7 @@
  */
 
 import { deriveProjectKey } from '../storage/projectRegistry.js';
+import { computeUniqueMessageCounts } from './forks.js';
 
 type Database = import('better-sqlite3').Database;
 
@@ -35,6 +36,19 @@ export interface ConversationTreeSession {
   descendantMessageCount: number;
   /** Subagent children, newest activity first; only present when non-empty. */
   children?: ConversationTreeSession[];
+  /**
+   * Fork lineage (memory v2): work_sessions.id of the parent session this one
+   * was forked from. Fork sessions stay fully visible (they are independent
+   * work) — the badge only explains the shared pre-fork history.
+   */
+  forkedFrom?: string | null;
+  /**
+   * Message counts with fork duplication removed: `duplicatedMessageCount`
+   * messages also exist on an ancestor of the fork chain and are counted
+   * once, on the earliest copy. Absent for non-fork sessions.
+   */
+  uniqueMessageCount?: number;
+  duplicatedMessageCount?: number;
 }
 
 export interface ConversationTreeProject {
@@ -68,6 +82,8 @@ interface SessionRow {
   key_topics: string | null;
   key_files: string | null;
   decisions: string | null;
+  forked_from: string | null;
+  raw_session_id: string;
 }
 
 function parseJsonArray(value: string | null): string[] {
@@ -97,6 +113,7 @@ export function buildConversationTree(db: Database): ConversationTree {
   const sessions = db.prepare(`
     SELECT ws.id, ws.platform, ws.host, ws.project_path, ws.git_remote,
            ws.title, ws.message_count, ws.last_activity_at,
+           ws.forked_from, ws.session_id AS raw_session_id,
            sd.one_liner, sd.key_topics, sd.key_files, sd.decisions
     FROM work_sessions ws
     LEFT JOIN session_digests sd ON sd.session_id = ws.id
@@ -159,10 +176,52 @@ export function buildConversationTree(db: Database): ConversationTree {
         ...(parentSessionId ? { parentSessionId } : {}),
         childCount: 0,
         descendantMessageCount: 0,
+        ...(row.forked_from ? { forkedFrom: row.forked_from } : {}),
       },
       sourceKey,
       projectKey,
     });
+  }
+
+  // Fork dedup (memory v2): sessions with a forked_from lineage carry
+  // unique/duplicated message counts so pre-fork copies are counted once, on
+  // the earliest ancestor. Only sessions on a fork chain need their message
+  // ids loaded — everything else keeps its raw count.
+  const forkedRows = sessions.filter(row => row.forked_from);
+  if (forkedRows.length > 0) {
+    const parentOf = new Map(forkedRows.map(row => [row.id, row.forked_from as string]));
+    const involved = new Set<string>();
+    for (const row of forkedRows) {
+      involved.add(row.id);
+      let cursor = parentOf.get(row.id);
+      const seen = new Set<string>([row.id]);
+      while (cursor && !seen.has(cursor)) {
+        involved.add(cursor);
+        seen.add(cursor);
+        cursor = parentOf.get(cursor);
+      }
+    }
+    const msgStmt = db.prepare('SELECT id FROM messages WHERE session_id = ?');
+    const metaById = new Map(sessions.map(row => [row.id, row]));
+    const countInput = [...involved].map(id => {
+      const meta = metaById.get(id);
+      return {
+        id,
+        rawSessionId: meta?.raw_session_id ?? '',
+        platform: meta?.platform ?? '',
+        messageIds: (msgStmt.all(id) as Array<{ id: string }>).map(message => message.id),
+        forkedFrom: parentOf.get(id) ?? null,
+      };
+    });
+    const uniqueCounts = computeUniqueMessageCounts(countInput);
+    for (const row of forkedRows) {
+      const counts = uniqueCounts.get(row.id);
+      const node = pending.get(row.id)?.node;
+      if (counts && node) {
+        node.uniqueMessageCount = counts.unique;
+        node.duplicatedMessageCount = counts.duplicated;
+      }
+    }
   }
 
   // A mount is valid only when the parent exists, lives in the same

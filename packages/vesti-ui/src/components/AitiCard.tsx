@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Download, Loader2, Sparkles, Square } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Download, Loader2, Quote, Sparkles, Square } from "lucide-react";
 import type {
   AitiAxisScore,
   AitiImagery,
@@ -12,6 +12,7 @@ import type {
 import { SendToMenu } from "./SendToMenu";
 import { buildAitiMarkdown } from "../lib/exploreMarkdown";
 import { renderAitiCardImage } from "../lib/aitiCardImage";
+import { renderQrDataUrl, VESTI_REPO_SHORT, VESTI_REPO_URL } from "../lib/repoQr";
 import { AITI_MIN_STRUCTURED_SUMMARIES } from "../lib/summaryCoverage";
 
 // Lightweight, dependency-free SVG radar of the four AITI axes — a consistent
@@ -169,6 +170,19 @@ export function AitiCard({
 
   const [emblemBroken, setEmblemBroken] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [repoQrUrl, setRepoQrUrl] = useState<string | null>(null);
+
+  // Repo QR for the card footer — dark-on-white tile, theme-independent so it
+  // stays scannable; null while generating (footer simply hides it).
+  useEffect(() => {
+    let alive = true;
+    void renderQrDataUrl(VESTI_REPO_URL, 144).then((url) => {
+      if (alive) setRepoQrUrl(url);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // 摘要覆盖率 header — one slim status row pinned above either state. Only
   // rendered when the host wired the coverage API (undefined → hidden).
@@ -302,6 +316,19 @@ export function AitiCard({
       origin: imagery.origin,
       verdict: imagery.verdict,
       personaNote,
+      personaNoteLabel: labels.personaNoteLabel,
+      mindMapTitle: labels.mindMapTitle,
+      repoQrCaption: labels.repoQrCaption,
+      obsessionsTitle: labels.obsessionsTitle,
+      radarAxes: profile.axes.map((a) => {
+        const meta = axisMeta[a.key];
+        return {
+          score: a.score,
+          hasSignal: a.hasSignal,
+          weak: weakAxes.has(a.key),
+          pole: meta && a.hasSignal !== false ? (a.score >= 50 ? meta.right : meta.left) : "",
+        };
+      }),
       obsessions: profile.obsessions.map((o) => o.term),
       sampleText: labels.sample.replace("{n}", String(profile.sampleSize)),
       emblemUrl,
@@ -401,24 +428,36 @@ export function AitiCard({
         </div>
 
         {/* Verdict: the fixed 判词 is the visual weight; the LLM persona
-            footnote (when available) sits weaker beneath it */}
+            footnote (when available) gets its own quote-styled block — eyebrow
+            label + divider + accent quote bar so it reads as a voiced note,
+            not trailing metadata */}
         {imagery ? (
           <figure className="mt-5 rounded-2xl border border-border-subtle bg-bg-surface-card px-6 py-5">
             <blockquote className="font-serif text-[16px] italic leading-relaxed text-text-primary">
               {imagery.verdict}
             </blockquote>
             {personaNote ? (
-              <figcaption className="mt-3 border-t border-border-subtle pt-3">
-                <div className="text-[11px] text-text-tertiary">{labels.personaNoteLabel}</div>
-                <p className="mt-1 text-[13px] leading-relaxed text-text-secondary">{personaNote}</p>
+              <figcaption className="mt-4 border-t border-border-subtle pt-4">
+                <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-[0.16em] text-text-tertiary">
+                  <Quote className="h-3.5 w-3.5 text-accent-primary" strokeWidth={1.75} aria-hidden="true" />
+                  {labels.personaNoteLabel}
+                </div>
+                <blockquote className="mt-2 border-l-2 border-accent-primary pl-3 font-serif text-[14px] italic leading-relaxed text-text-primary">
+                  {personaNote}
+                </blockquote>
               </figcaption>
             ) : null}
           </figure>
         ) : null}
 
-        {/* Radar overview of the four axes */}
-        <div className="mt-5 flex justify-center rounded-2xl border border-border-subtle bg-bg-surface-card py-4">
-          <AitiRadar axes={profile.axes} axisMeta={axisMeta} weakAxes={weakAxes} />
+        {/* 思维图: radar overview of the four axes */}
+        <div className="mt-5 rounded-2xl border border-border-subtle bg-bg-surface-card px-6 py-5">
+          <div className="text-[11px] uppercase tracking-[0.16em] text-text-tertiary">
+            {labels.mindMapTitle}
+          </div>
+          <div className="mt-2 flex justify-center">
+            <AitiRadar axes={profile.axes} axisMeta={axisMeta} weakAxes={weakAxes} />
+          </div>
         </div>
 
         {/* Empowering strengths — the dominant pole of each axis, framed positively */}
@@ -533,6 +572,22 @@ export function AitiCard({
             </div>
           </div>
         )}
+
+        {/* Footer: VESTI GitHub repo QR, bottom-right — dark-on-white tile so it
+            scans in either theme */}
+        <div className="mt-6 flex items-center justify-end gap-3 border-t border-border-subtle pt-4">
+          <div className="text-right">
+            <div className="text-[11px] text-text-tertiary">{labels.repoQrCaption}</div>
+            <div className="mt-0.5 text-[10.5px] text-text-tertiary">{VESTI_REPO_SHORT}</div>
+          </div>
+          {repoQrUrl ? (
+            <img
+              src={repoQrUrl}
+              alt={labels.repoQrCaption}
+              className="h-16 w-16 shrink-0 rounded-lg border border-border-subtle bg-white p-1"
+            />
+          ) : null}
+        </div>
         </div>
       </div>
     </div>

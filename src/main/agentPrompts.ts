@@ -149,6 +149,9 @@ registerAgentKind('digest', {
         content: [
           '请为下面的会话生成索引摘要，使用简洁的中文，输出一个 JSON 对象，字段如下：',
           '{"one_liner": "一句话概括会话主题（50 字以内）", "key_topics": ["关键主题，至多 6 个"], "key_files": ["涉及的关键文件路径，至多 6 个"], "decisions": ["已做出的决定，至多 6 条"], "open_questions": ["未解决的问题，至多 6 条"]}',
+          '硬性规则：',
+          '- one_liner、key_topics 和 decisions 中涉及具体数值（版本号、配置值、端口号、日期、数量、金额、时长、阈值等）时，必须原样保留数值与单位，不得概括化。反例（禁止）：把「超时时间定为 30s」写成「调整了超时参数」；把「升级到 v2.5.0」写成「升级了版本」；把「预算 1500 元」写成「讨论了预算」。正确写法：「超时时间定为 30s」「升级到 v2.5.0」「预算定为 1500 元」。',
+          '- key_files 保留完整文件路径，不要只写目录名或框架名。',
           '没有内容的字段输出空数组。只输出 JSON 本身。',
           '',
           transcript,
@@ -263,11 +266,32 @@ export interface RelayPackPayload {
   next_steps: string[];
   /** Absent when the model gave no usable confidence (always absent on v1). */
   confidence?: RelayPackConfidence;
+  /** Deterministic file anchors (P4a quality): never produced by the model —
+   * the desktop pipeline attaches them post-parse from captured tool
+   * executions so the panel can badge key_files rows as anchored. */
+  extracted_key_files?: Array<{
+    path: string;
+    touches: number;
+    lastTouchedAt: number;
+    conversationIds: number[];
+  }>;
   suggested_prompt: string;
 }
 
 /** The suggested prompt must stay paste-ready; hard-cap it in parse. */
 export const RELAY_SUGGESTED_PROMPT_MAX_CHARS = 800;
+
+/**
+ * Handoff framing: every suggested prompt must open with this fixed sentence
+ * so the receiving AI treats the pack as another AI's summary — build on it,
+ * don't redo it, and re-check the evidence at the source anchors before
+ * trusting its conclusions. Pinned verbatim by the prompt template (Chinese
+ * output → ZH sentence, English output → EN sentence).
+ */
+export const RELAY_HANDOFF_PREFIX_ZH =
+  '【交接说明】以下内容来自另一个 AI 对先前工作的摘要：请在其已有成果的基础上继续，避免重复劳动；采信其中的结论之前，先回到对应的原文锚点复核证据。';
+export const RELAY_HANDOFF_PREFIX_EN =
+  '[Handoff] The following is another AI\'s summary of prior work: build on what is already done instead of redoing it, and before trusting any conclusion in it, go back to the referenced source anchors and re-check the evidence.';
 
 /**
  * Verify-first handoff rule: every suggested prompt must end with this fixed
@@ -382,6 +406,7 @@ export function parseRelayPayload(raw: string): RelayPackPayload {
 registerAgentKind('relay', {
   buildPrompt({ transcript, preferences }) {
     const english = preferences.outputLanguage === 'en-US';
+    const prefix = english ? RELAY_HANDOFF_PREFIX_EN : RELAY_HANDOFF_PREFIX_ZH;
     const rule = english ? RELAY_HANDOFF_RULE_EN : RELAY_HANDOFF_RULE_ZH;
     const language = english
       ? 'Write the whole pack in clear, concise English.'
@@ -394,7 +419,10 @@ registerAgentKind('relay', {
           'Rules:',
           '- confidence.overall is a number between 0 and 1.',
           '- Fill git_state from the Git lines in the context; if the context carries no git information, output "git_state": {}.',
+          '- When the context contains a "## Key files (program-extracted, with anchors)" / "## 关键文件（程序提取，带锚点）" section, key_files MUST be chosen from that list with the paths kept verbatim — never invent files beyond it; derive "why" and "last_state" from the context.',
+          '- failed_paths MUST preserve every failed attempt and rejection reason visible in the context — never drop them to make the pack look cleaner; output an empty array only when there genuinely were none.',
           '- If nothing was verified, output "verification": {"commands": [], "last_results": []}.',
+          `- The suggested_prompt MUST start with this exact fixed sentence, verbatim:\n${prefix}`,
           `- The suggested_prompt MUST end with this exact fixed sentence, verbatim:\n${rule}`,
           'Use empty arrays for fields with no content. Output JSON only.',
         ]
@@ -402,7 +430,10 @@ registerAgentKind('relay', {
           '要求：',
           '- confidence.overall 是 0 到 1 之间的数字。',
           '- git_state 依据上下文里的 Git 行填写；上下文没有 git 信息时输出 "git_state": {}。',
+          '- 上下文包含「## 关键文件（程序提取，带锚点）」部分时，key_files 必须从该清单中选取并原样沿用其路径，不得虚构清单之外的文件；why 和 last_state 依据上下文推断。',
+          '- failed_paths 必须完整保留上下文中出现的失败尝试与否决原因，不得为了让交接显得顺利而省略；确实没有时才输出空数组。',
           '- 没有做过任何验证时输出 "verification": {"commands": [], "last_results": []}。',
+          `- suggested_prompt 必须以下面这句固定开场白原样开头：\n${prefix}`,
           `- suggested_prompt 必须以下面这句固定规则原样结尾：\n${rule}`,
           '没有内容的数组字段输出空数组。只输出 JSON 本身。',
         ];
@@ -753,5 +784,150 @@ registerAgentKind('persona', {
     const cleaned = raw.trim().replace(/\s+/g, ' ');
     if (!cleaned) throw new Error('persona 输出为空');
     return cleaned.slice(0, PERSONA_NOTE_MAX_CHARS);
+  },
+});
+
+// ---- AI 圆桌 (Roundtable) ----
+// Both kinds keep prompt assembly on the renderer side (src/ui/roundtable):
+// the transcriptOverride already carries the persona setup, the topic, the
+// optional recall context and the output contract. These registrations only
+// wrap it with the assistant preamble + a lenient parse.
+
+/** One seat's turn: free-form prose (3-5 paragraphs); parse is lenient — any
+ * non-empty body passes, fences stripped, hard-capped for storage. */
+registerAgentKind('roundtable-turn', {
+  buildPrompt({ transcript, preferences }) {
+    const { language, custom } = promptAffixes(preferences);
+    return [
+      {
+        role: 'system',
+        content: `你是 Vesti 的圆桌讨论助手。严格保持给定的角色设定发言，立场鲜明、言之有物；不补造背景资料中没有的事实。${language}${custom}`,
+      },
+      {
+        role: 'user',
+        content: transcript,
+      },
+    ];
+  },
+  parse(raw) {
+    const cleaned = raw
+      .trim()
+      .replace(/^```(?:markdown|md)?\s*/i, '')
+      .replace(/\s*```$/, '')
+      .trim();
+    if (!cleaned) throw new Error('roundtable-turn 输出为空');
+    return cleaned.slice(0, 4000);
+  },
+});
+
+/** The moderator's synthesis: strict JSON by contract, but parse stays
+ * lenient (strip fences, require non-empty) — the renderer validates the JSON
+ * shape (parseRoundtableSynthesis) and falls back to the raw text. */
+registerAgentKind('roundtable-synthesis', {
+  buildPrompt({ transcript, preferences }) {
+    const { language } = promptAffixes(preferences);
+    return [
+      {
+        role: 'system',
+        content: `你是 Vesti 的圆桌主持助手。只依据给出的成员发言做汇总，不引入新观点；输出严格 JSON（不要 Markdown 代码围栏、不要任何额外文字）。${language}`,
+      },
+      {
+        role: 'user',
+        content: transcript,
+      },
+    ];
+  },
+  parse(raw) {
+    const cleaned = raw
+      .trim()
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/, '')
+      .trim();
+    if (!cleaned) throw new Error('roundtable-synthesis 输出为空');
+    return cleaned;
+  },
+});
+
+/**
+ * Capsule prompt assistant (P6 follow-up): refine a prompt the user picked in
+ * the floating dock. Two kinds, both fed through transcriptOverride (the
+ * prompt body) with persist:false — nothing lands in the agent-results log.
+ *
+ * 'prompt-improve' answers strict JSON {"improved": string, "notes": string[]}
+ * (up to 3 change notes); parse() validates and normalizes the shape.
+ */
+export interface PromptImprovePayload {
+  improved: string;
+  notes: string[];
+}
+
+export const PROMPT_IMPROVE_MAX_NOTES = 3;
+export const PROMPT_CONTINUE_MAX_CHARS = 4_000;
+
+export function parsePromptImprovePayload(raw: string): PromptImprovePayload {
+  // Tolerate Markdown code fences around the JSON object.
+  const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start === -1 || end <= start) throw new Error('prompt-improve 输出不是 JSON');
+  const parsed = JSON.parse(cleaned.slice(start, end + 1)) as Record<string, unknown>;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('prompt-improve 输出不是 JSON 对象');
+  }
+  const improved = typeof parsed.improved === 'string' ? parsed.improved.trim() : '';
+  if (!improved) throw new Error('prompt-improve 输出缺少 improved');
+  return {
+    improved: improved.slice(0, 8_000),
+    notes: asStringList(parsed.notes, PROMPT_IMPROVE_MAX_NOTES),
+  };
+}
+
+registerAgentKind('prompt-improve', {
+  buildPrompt({ transcript, preferences }) {
+    const { language } = promptAffixes(preferences);
+    return [
+      {
+        role: 'system',
+        content: `你是 Vesti 的提示词优化助手。只改写用户给出的提示词，不执行它、不回答它；输出严格 JSON（不要 Markdown 代码围栏、不要任何额外文字）。${language}`,
+      },
+      {
+        role: 'user',
+        content: [
+          '请优化下面这条提示词，让它更清晰、具体、可复用：明确角色与目标、补齐必要的约束与输出格式要求，但保持原意与语言不变。',
+          '严格只输出一个 JSON 对象：{"improved": "优化后的完整提示词", "notes": ["修改要点，至多 3 条，每条一句话"]}。',
+          '',
+          transcript,
+        ].join('\n'),
+      },
+    ];
+  },
+  parse(raw) {
+    return JSON.stringify(parsePromptImprovePayload(raw));
+  },
+});
+
+/**
+ * 'prompt-continue' continues the given prompt text in the same voice (extend
+ * the instruction with fitting detail). Free-form output, so parse() is
+ * lenient: any non-empty body passes, capped for the dock panel.
+ */
+registerAgentKind('prompt-continue', {
+  buildPrompt({ transcript, preferences }) {
+    const { language } = promptAffixes(preferences);
+    return [
+      {
+        role: 'system',
+        content: `你是 Vesti 的提示词续写助手。沿用原文的语气、语言与结构续写用户给出的提示词，让它更完整可执行；直接输出续写后的完整提示词正文（保持原文开头，不要解释、不要 Markdown 代码围栏）。${language}`,
+      },
+      {
+        role: 'user',
+        content: ['请续写下面这条提示词：', '', transcript].join('\n'),
+      },
+    ];
+  },
+  parse(raw) {
+    const cleaned = raw.trim();
+    if (!cleaned) throw new Error('prompt-continue 输出为空');
+    return cleaned.slice(0, PROMPT_CONTINUE_MAX_CHARS);
   },
 });

@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { SessionDigest } from '@vesti/capture-core';
+import type { SessionDigest, SessionDigestStats } from '@vesti/capture-core';
 import type { SessionDetail, SessionMessage } from '../shared/contracts';
 import {
   DIGEST_VERSION,
   DigestService,
   buildDigestTranscript,
+  isDegradedDigest,
   type DigestAgentRunner,
   type DigestEmbedder,
   type DigestSessionStore,
@@ -53,6 +54,30 @@ class FakeStore implements DigestSessionStore {
   }
   listSessionsNeedingDigest(): Array<{ id: string; messageCount: number }> {
     return this.needing;
+  }
+  // Mirrors the DatabaseManager SQL pre-filter.
+  listDegradedDigestCandidates(): SessionDigest[] {
+    return [...this.digests.values()].filter(digest =>
+      digest.embeddingStatus === 'skipped' &&
+      digest.keyTopics.length === 0 &&
+      digest.keyFiles.length === 0 &&
+      digest.decisions.length === 0 &&
+      digest.openQuestions.length === 0 &&
+      digest.oneLiner.trim() !== '');
+  }
+  getSessionDigestStats(): SessionDigestStats {
+    const all = [...this.digests.values()];
+    return {
+      total: all.length,
+      emptyStructured: all.filter(digest =>
+        digest.keyTopics.length === 0 &&
+        digest.keyFiles.length === 0 &&
+        digest.decisions.length === 0 &&
+        digest.openQuestions.length === 0 &&
+        digest.oneLiner.trim() !== '').length,
+      gaveUp: all.filter(digest => digest.embeddingStatus === 'degraded').length,
+      failed: all.filter(digest => digest.embeddingStatus === 'failed').length,
+    };
   }
   upsertSessionDigest(digest: SessionDigest): void {
     this.digests.set(digest.sessionId, digest);
@@ -256,5 +281,129 @@ describe('DigestService', () => {
 
     expect(agent.run).not.toHaveBeenCalled();
     expect(store.digests.size).toBe(0);
+  });
+});
+
+function degradedRow(sessionId: string, oneLiner: string): SessionDigest {
+  return {
+    sessionId,
+    host: 'native',
+    platform: 'codex',
+    projectKey: 'cli_0123456789abcdef',
+    oneLiner,
+    keyTopics: [],
+    keyFiles: [],
+    decisions: [],
+    openQuestions: [],
+    embedding: null,
+    embeddingStatus: 'skipped',
+    digestVersion: DIGEST_VERSION,
+    messageCount: 2,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+describe('isDegradedDigest', () => {
+  const empty = { keyTopics: [], keyFiles: [], decisions: [], openQuestions: [] };
+
+  it('flags a truncated raw first user message (fallback row shape)', () => {
+    const first = '请在这个仓库里完成一个非常长的任务描述，'.repeat(10);
+    const oneLiner = first.slice(0, 100);
+    expect(isDegradedDigest({ oneLiner, ...empty }, first)).toBe(true);
+  });
+
+  it('flags an echo of the first user message (>80% bigram overlap)', () => {
+    const first = '请帮我优化这个项目的构建速度，现在太慢了';
+    expect(isDegradedDigest({ oneLiner: first.slice(0, -1), ...empty }, first)).toBe(true);
+    expect(isDegradedDigest({ oneLiner: first, ...empty }, first)).toBe(true);
+  });
+
+  it('does not flag a healthy digest with structured content', () => {
+    const first = '请帮我优化这个项目的构建速度，现在太慢了';
+    expect(isDegradedDigest({ oneLiner: first, ...empty, keyTopics: ['构建'] }, first)).toBe(false);
+  });
+
+  it('does not flag a genuine summary of the first user message', () => {
+    expect(isDegradedDigest(
+      { oneLiner: '实现登录功能并接入 JWT', ...empty },
+      '帮我实现登录功能',
+    )).toBe(false);
+  });
+
+  it('does not flag empty one_liners', () => {
+    expect(isDegradedDigest({ oneLiner: '', ...empty }, '帮我实现登录功能')).toBe(false);
+  });
+});
+
+describe('DigestService degraded retries', () => {
+  function degradedStore(): FakeStore {
+    const store = seededStore();
+    store.needing = []; // the normal scan does NOT pick degraded rows up
+    store.digests.set('codex:s1', degradedRow('codex:s1', '帮我实现登录功能'));
+    return store;
+  }
+
+  it('heals a degraded row when the LLM is configured', async () => {
+    const store = degradedStore();
+    const agent = makeAgent(async () => ({ content: JSON.stringify(GOOD_PAYLOAD) } as never));
+    const service = new DigestService(store, agent, makeEmbedding(), () => true);
+
+    await service.enqueuePending();
+
+    expect(agent.run).toHaveBeenCalledTimes(1);
+    const digest = store.digests.get('codex:s1')!;
+    expect(digest.oneLiner).toBe(GOOD_PAYLOAD.one_liner);
+    expect(digest.keyTopics).toEqual(GOOD_PAYLOAD.key_topics);
+    expect(digest.embeddingStatus).toBe('ok');
+    expect(service.getDigestStats().run.degradedRetries).toBe(1);
+  });
+
+  it('does not touch degraded rows while the LLM is not configured', async () => {
+    const store = degradedStore();
+    const agent = makeAgent(async () => ({ content: JSON.stringify(GOOD_PAYLOAD) } as never));
+    const service = new DigestService(store, agent, makeEmbedding(), () => false);
+
+    await service.enqueuePending();
+
+    expect(agent.run).not.toHaveBeenCalled();
+    expect(store.digests.get('codex:s1')!.embeddingStatus).toBe('skipped');
+  });
+
+  it('marks the row degraded and stops retrying when the retry still fails', async () => {
+    const store = degradedStore();
+    const agent = makeAgent(async () => ({ content: 'not json at all' } as never));
+    const service = new DigestService(store, agent, makeEmbedding(), () => true);
+
+    await service.enqueuePending();
+    expect(agent.run).toHaveBeenCalledTimes(2); // one retry pass = two attempts
+    expect(store.digests.get('codex:s1')!.embeddingStatus).toBe('degraded');
+
+    // Marked rows are never auto-retried again.
+    await service.enqueuePending();
+    expect(agent.run).toHaveBeenCalledTimes(2);
+    const stats = service.getDigestStats();
+    expect(stats.run.degradedGaveUp).toBe(1);
+    expect(stats.store.gaveUp).toBe(1);
+    expect(stats.store.emptyStructured).toBe(1);
+  });
+
+  it('marks the row degraded when the retry output is still an echo', async () => {
+    const store = degradedStore();
+    const echoPayload = {
+      one_liner: '帮我实现登录功能',
+      key_topics: [],
+      key_files: [],
+      decisions: [],
+      open_questions: [],
+    };
+    const agent = makeAgent(async () => ({ content: JSON.stringify(echoPayload) } as never));
+    const service = new DigestService(store, agent, makeEmbedding(), () => true);
+
+    await service.enqueuePending();
+
+    const digest = store.digests.get('codex:s1')!;
+    expect(digest.embeddingStatus).toBe('degraded');
+    expect(digest.oneLiner).toBe('帮我实现登录功能');
+    expect(service.getDigestStats().run.degradedGaveUp).toBe(1);
   });
 });

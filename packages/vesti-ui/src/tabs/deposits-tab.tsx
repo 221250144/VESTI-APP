@@ -1076,7 +1076,7 @@ export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps)
 
 /** Change-summary badge for a maintain-merged deposit version, expandable to
  * the per-op details (section, old → new text, reason). */
-function MaintainOpsBadge({
+export function MaintainOpsBadge({
   ops,
   open,
   onToggle,

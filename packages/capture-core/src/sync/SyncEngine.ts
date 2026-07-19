@@ -61,6 +61,11 @@ export class SyncEngine {
 
     // Resolve subagent links after all sessions are synced
     this.resolveSubagentLinks();
+    // Fork lineage (memory v2): codex rollouts copy the parent's history into
+    // the child, so forks are detected post-sync by message-id overlap.
+    try {
+      this.db.refreshForkLineage();
+    } catch { /* lineage detection must never break the sync */ }
 
     return results;
   }

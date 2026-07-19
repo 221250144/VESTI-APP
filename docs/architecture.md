@@ -71,9 +71,10 @@ capture SQLite 的 schema 变更一律走 `packages/capture-core/src/storage/mig
 
 - 每个迁移条目为 `{ version, name, up(db) }`，新 schema 变更必须在数组末尾追加下一个版本号，**永不修改已发布的迁移**。
 - `up` 必须幂等安全：虽然每个库只会执行一次，但仍应自查状态（如 `PRAGMA table_info` 的 `hasColumn()`），保证新版代码新建的库与迁移上来的库结构一致。
+- `up` 可返回一个 note 字符串（如运行时探测失败选择跳过时的原因），由执行方写入 `schema_migrations.note`（v5 起新增的列，老库自动补齐）；版本照常记录，不重试。
 - 执行由 `DatabaseManager.runMigrations()` 完成：先确保 `schema_migrations (version PK, name, applied_at)` 表存在，再把未应用的迁移按数组顺序逐个在事务内执行 `up` + 写入记录；任一步失败整体回滚并抛出，初始化即失败，不留半截 schema。
 
-当前已发布迁移：v1 `work_sessions.session_type`、v2 `work_sessions.host`（WSL 来源标记）、v3 `session_digests` + `project_registry` 建表。
+当前已发布迁移：v1 `work_sessions.session_type`、v2 `work_sessions.host`（WSL 来源标记）、v3 `session_digests` + `project_registry` 建表、v4 `work_sessions.forked_from` + digest 失效语义列 + `project_state`/`project_briefs`（记忆系统 v2）、v5 `messages_fts`/`sessions_fts` 重建为 trigram tokenizer（运行时探测，不可用时跳过并记 note；可用则 DROP 旧表与触发器、重建、`'rebuild'` 全量回填，修复 CJK 连写检索盲区）。
 
 渲染端 Dexie（IndexedDB）另有独立的多版本 schema（`src/ui/db/schema.ts`），同样只增不改旧版本。
 
@@ -95,6 +96,8 @@ capture SQLite 的 schema 变更一律走 `packages/capture-core/src/storage/mig
 - **embedding**：LLM digest 成功后，对摘要文本请求 embedding，以 Float32 小端 BLOB 存入同行，供向量检索。
 - **降级链**：无 API key / LLM 失败 / 输出非法 → 以首条用户消息前 100 字符作为兜底摘要，标记 `embedding_status='skipped'`；embedding 单独失败只影响向量字段，LLM 字段正常落库；存储类异常重试 2 次后标记 `'failed'`，待会话再增长时重试。任何一级失败都不阻塞采集。
 - **对话树索引**：`TreeIndex.buildConversationTree()` 是一条 SQL（`work_sessions LEFT JOIN session_digests`）加内存装配的纯函数，每次调用重算，产出 来源（platform + host）→ 项目 → 会话 的树；`project_registry` 由入库管线同步维护，project key 为 `sha256(platform|host|归一化路径)` 前 16 位。浏览器来源不进该库，渲染层合并自己的 browser 子树。
+
+记忆系统 v2（fork 谱系去重、A1 子代理归属折叠、L0–L3 分级说明系统、检索与评测）的设计与调研归档见 [memory-system/](memory-system/)：[agent-formats.md](memory-system/agent-formats.md)（各大 agent 存储规范建模）、[design.md](memory-system/design.md)（L0–L3 设计）、[bench.md](memory-system/bench.md)（评测方案）、[references.md](memory-system/references.md)（参考文献与工具）。
 
 ## ExtensionBridge 架构
 

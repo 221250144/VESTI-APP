@@ -62,6 +62,7 @@ export class MessageConverter {
       : onlySnapshots ? 'file_snapshot' : 'empty';
 
     // Title generation priority chain:
+    // 0. session.meta.session_title (kimi state.json explicit title)
     // 1. First user_input text (> 5 chars, not interrupted, injected
     //    context blocks like <environment_context> stripped)
     // 2. First assistant_text text
@@ -69,12 +70,18 @@ export class MessageConverter {
     // 4. "File snapshots - {projectDir}" (file_snapshot type)
     // 5. "Empty session" (empty type)
     let title = 'Untitled';
-    for (const m of userInputMessages) {
-      if (m.contentText) {
-        const text = stripInjectedContextBlocks(m.contentText);
-        if (text.length > 5 && !text.startsWith('[Request interrupted')) {
-          title = text.split('\n')[0].slice(0, 80) || 'Untitled';
-          break;
+    const metaTitle = session.meta?.session_title;
+    if (typeof metaTitle === 'string' && metaTitle.trim().length > 0) {
+      title = metaTitle.trim().split('\n')[0].slice(0, 80);
+    }
+    if (title === 'Untitled') {
+      for (const m of userInputMessages) {
+        if (m.contentText) {
+          const text = stripInjectedContextBlocks(m.contentText);
+          if (text.length > 5 && !text.startsWith('[Request interrupted')) {
+            title = text.split('\n')[0].slice(0, 80) || 'Untitled';
+            break;
+          }
         }
       }
     }
@@ -148,6 +155,17 @@ export class MessageConverter {
     // Determine archived status
     const isArchived = session.meta?.archived === true;
 
+    // Fork lineage: adapters put the parent session id (or a fully-qualified
+    // work_sessions.id) in meta.forked_from; qualify bare ids with the
+    // platform prefix so the column always stores a work_sessions.id.
+    let forkedFrom: string | null = null;
+    const rawForkedFrom = session.meta?.forked_from;
+    if (typeof rawForkedFrom === 'string' && rawForkedFrom.trim()) {
+      const value = rawForkedFrom.trim();
+      forkedFrom = value.includes(':') ? value : `${session.platform}:${value}`;
+      if (forkedFrom === sessionId) forkedFrom = null; // self-loop guard
+    }
+
     const ws: WorkSession = {
       id: sessionId,
       sessionId: session.sessionId,
@@ -181,6 +199,7 @@ export class MessageConverter {
       hasContextCompaction: contextCompactions.length > 0,
       agentMeta,
       claudeCodeVersion: session.claudeCodeVersion,
+      forkedFrom,
       createdAt: now,
       updatedAt: now,
     };

@@ -47,6 +47,9 @@ const api: VestiDesktopApi = {
   exportConversations: () => ipcRenderer.invoke(IPC.exportConversations),
   getConversationTree: () => ipcRenderer.invoke(IPC.conversationTree),
   recallSessions: (query, topK) => ipcRenderer.invoke(IPC.recallSessions, query, topK),
+  getProjectStates: () => ipcRenderer.invoke(IPC.projectStates),
+  getProjectBrief: projectKey => ipcRenderer.invoke(IPC.projectBrief, projectKey),
+  getFileTimeline: query => ipcRenderer.invoke(IPC.fileTimeline, query),
   getExtensionBridgeStatus: () => ipcRenderer.invoke(IPC.extensionBridgeStatus),
   createExtensionPairCode: () => ipcRenderer.invoke(IPC.extensionPairCodeCreate),
   openExtensionPairingWindow: () => ipcRenderer.invoke(IPC.extensionPairingWindowOpen),
@@ -75,6 +78,7 @@ const api: VestiDesktopApi = {
   prepareRelayCliCommands: request => ipcRenderer.invoke(IPC.relayPrepareCli, request),
   enqueueRelayOutbox: request => ipcRenderer.invoke(IPC.relayOutboxEnqueue, request),
   getRelaySessionContexts: sessionIds => ipcRenderer.invoke(IPC.relaySessionContexts, sessionIds),
+  getRelayFileTouches: sessionIds => ipcRenderer.invoke(IPC.relayFileTouches, sessionIds),
 };
 
 const uiPrefs: VestiUiPrefsApi = {
@@ -112,6 +116,8 @@ const capsule: VestiCapsuleApi = {
   buildRelayDraft: request => ipcRenderer.invoke(IPC.capsuleRelayDraft, request),
   relayAiPolish: draft => ipcRenderer.invoke(IPC.capsuleRelayPolish, draft),
   searchPrompts: query => ipcRenderer.invoke(IPC.capsuleSearchPrompts, query),
+  improvePrompt: body => ipcRenderer.invoke(IPC.capsulePromptImprove, body),
+  continuePrompt: body => ipcRenderer.invoke(IPC.capsulePromptContinue, body),
   getPromptSnapshot: () => ipcRenderer.invoke(IPC.capsulePromptSnapshotGet),
   savePromptSnapshot: snapshot => ipcRenderer.invoke(IPC.capsulePromptSnapshotSave, snapshot),
   enqueueOutbox: prompt => ipcRenderer.invoke(IPC.relayOutboxEnqueue, { prompt }),

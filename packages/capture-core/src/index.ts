@@ -26,8 +26,23 @@ export type { SyncResult, SyncFileResult } from './sync/SyncEngine.js';
 export { SearchEngine } from './search/SearchEngine.js';
 export { serializeVector, deserializeVector, cosineSimilarity, searchByVector } from './search/VectorSearch.js';
 export type { VectorCandidate, VectorMatch } from './search/VectorSearch.js';
-export { recallSessions, recallTokens, toFtsQuery, buildSnippet } from './search/SessionRecall.js';
-export type { SessionRecallHit, SessionRecallOptions } from './search/SessionRecall.js';
+export {
+  recallSessions,
+  recallTokens,
+  toFtsQuery,
+  buildSnippet,
+  recencyFactor,
+  detectFtsTokenizer,
+  effectiveTokens,
+  buildQueryPlan,
+  confidenceForCoverage,
+  RECENCY_TAU_DAYS,
+  RECENCY_FLOOR,
+  TRIGRAM_MIN_TOKEN_CHARS,
+  COVERAGE_MERGE_MIN_SHORT_CHARS,
+  CONFIDENCE_COVERAGE_FLOOR,
+} from './search/SessionRecall.js';
+export type { SessionRecallHit, SessionRecallOptions, RecallConfidence, QueryPlan } from './search/SessionRecall.js';
 export { buildConversationTree } from './tree/TreeIndex.js';
 export type {
   ConversationTree,
@@ -43,6 +58,30 @@ export {
   normalizeGitRemote,
 } from './storage/projectRegistry.js';
 export type { ProjectKeyInput } from './storage/projectRegistry.js';
+export {
+  messageDedupKey,
+  detectForksByMessageOverlap,
+  buildForkAncestorMap,
+  computeUniqueMessageCounts,
+} from './tree/forks.js';
+export type {
+  ForkCandidateSession,
+  ForkDetectionOptions,
+  ForkCountSession,
+} from './tree/forks.js';
+export {
+  buildProjectState,
+  listProjectKeys,
+  renderProjectStateMarkdown,
+  extractFilePaths,
+  rankActiveFiles,
+  mergeOpenQuestions,
+  ACTIVE_FILES_WINDOW_DAYS,
+  ACTIVE_FILES_LIMIT,
+  OPEN_QUESTIONS_LIMIT,
+} from './state/projectState.js';
+export { getFileTimeline, pathMatches } from './state/fileTimeline.js';
+export type { FileTimelineQuery } from './state/fileTimeline.js';
 export { ExportEngine } from './export/ExportEngine.js';
 export { VaultManager } from './storage/VaultManager.js';
 export { APIServer } from './api/APIServer.js';

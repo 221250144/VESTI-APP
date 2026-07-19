@@ -1,5 +1,5 @@
 import { deriveProjectKey, serializeVector } from '@vesti/capture-core';
-import type { SessionDigest } from '@vesti/capture-core';
+import type { SessionDigest, SessionDigestStats } from '@vesti/capture-core';
 import type {
   AgentResult,
   AgentRunRequest,
@@ -7,6 +7,11 @@ import type {
   SessionMessage,
 } from '../shared/contracts';
 import { parseDigestPayload, type DigestPayload } from './agentPrompts';
+import {
+  RECENT_MESSAGE_LIMIT,
+  TRANSCRIPT_BUDGET_CHARS,
+  buildDigestTranscript as buildTranscript,
+} from './digestTranscript';
 
 /**
  * Digest pipeline (P1.5): after each capture sync, sessions that are new or
@@ -15,20 +20,103 @@ import { parseDigestPayload, type DigestPayload } from './agentPrompts';
  * degrade to a structural row (first user message as one_liner) — capture is
  * never blocked by digest failures. Bump DIGEST_VERSION when the digest
  * prompt structure changes; stale versions are regenerated automatically.
+ *
+ * v2 (bench C 2026-07-19 follow-up): numeric-fidelity rules in the prompt
+ * (values must be kept verbatim), a wider transcript window (see
+ * digestTranscript.ts), and degraded-digest detection: rows whose four
+ * structured fields are all empty and whose one_liner echoes the first user
+ * message get one LLM retry (only when the LLM is configured); a retry that
+ * still degrades is marked embedding_status='degraded' and left alone until
+ * the session grows or the version bumps. No new columns — the mark reuses
+ * the existing embedding_status field (runtime judgment elsewhere).
  */
-export const DIGEST_VERSION = 1;
+export const DIGEST_VERSION = 2;
 
-const RECENT_MESSAGE_LIMIT = 60;
-const TRANSCRIPT_BUDGET_CHARS = 6_000;
 const FALLBACK_ONE_LINER_CHARS = 100;
-const TOOL_OUTPUT_CHARS = 200;
 const MAX_RETRIES = 2;
 const SCAN_DEBOUNCE_MS = 2_000;
+
+/** Degraded one_liner detection thresholds (bench C: fallback rows paste the
+ * raw first user prompt, 100-char truncated). */
+const ECHO_MIN_ONE_LINER_CHARS = 90;
+const ECHO_SIMILARITY_THRESHOLD = 0.8;
+const ECHO_SAMPLE_CHARS = 400;
+
+/** Transcript from the most recent messages plus task framing and file-write
+ * context — see digestTranscript.ts. Keeps the v1 positional signature. */
+export function buildDigestTranscript(
+  messages: SessionMessage[],
+  budgetChars = TRANSCRIPT_BUDGET_CHARS,
+  recentLimit = RECENT_MESSAGE_LIMIT,
+): string {
+  return buildTranscript(messages, { budgetChars, recentLimit });
+}
+
+function collapseWhitespace(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+/** Character-bigram Dice coefficient (0-1); 1 for identical strings. */
+function bigramDice(a: string, b: string): number {
+  if (a === b) return 1;
+  if (a.length < 2 || b.length < 2) return 0;
+  const counts = new Map<string, number>();
+  for (let i = 0; i + 2 <= a.length; i += 1) {
+    const gram = a.slice(i, i + 2);
+    counts.set(gram, (counts.get(gram) ?? 0) + 1);
+  }
+  let hits = 0;
+  for (let i = 0; i + 2 <= b.length; i += 1) {
+    const gram = b.slice(i, i + 2);
+    const available = counts.get(gram) ?? 0;
+    if (available > 0) {
+      hits += 1;
+      counts.set(gram, available - 1);
+    }
+  }
+  return (2 * hits) / (a.length - 1 + (b.length - 1));
+}
+
+export interface DegradedDigestShape {
+  oneLiner: string;
+  keyTopics: string[];
+  keyFiles: string[];
+  decisions: string[];
+  openQuestions: string[];
+}
+
+/**
+ * Runtime degraded-digest judgment (no schema change): the four structured
+ * fields are all empty AND the one_liner is just the first user message —
+ * either a long truncated copy (fallback rows slice 100 chars) or an echo
+ * with >80% bigram overlap.
+ */
+export function isDegradedDigest(digest: DegradedDigestShape, firstUserText: string): boolean {
+  const structuredEmpty =
+    digest.keyTopics.length === 0 &&
+    digest.keyFiles.length === 0 &&
+    digest.decisions.length === 0 &&
+    digest.openQuestions.length === 0;
+  if (!structuredEmpty) return false;
+  const oneLiner = collapseWhitespace(digest.oneLiner ?? '');
+  const firstUser = collapseWhitespace(firstUserText ?? '');
+  if (!oneLiner || !firstUser) return false;
+  if (oneLiner.length >= ECHO_MIN_ONE_LINER_CHARS && firstUser.startsWith(oneLiner)) return true;
+  return bigramDice(
+    oneLiner.slice(0, ECHO_SAMPLE_CHARS),
+    firstUser.slice(0, ECHO_SAMPLE_CHARS),
+  ) > ECHO_SIMILARITY_THRESHOLD;
+}
 
 /** Storage surface the pipeline needs; CaptureService implements it. */
 export interface DigestSessionStore {
   getSession(id: string): SessionDetail | null;
   listSessionsNeedingDigest(digestVersion: number): Array<{ id: string; messageCount: number }>;
+  /** SQL pre-filter for degraded rows (four empty structured fields, non-empty
+   * one_liner, embedding_status='skipped'); the exact echo check happens in
+   * the service with the session's first user message. */
+  listDegradedDigestCandidates(): SessionDigest[];
+  getSessionDigestStats(): SessionDigestStats;
   upsertSessionDigest(digest: SessionDigest): void;
 }
 
@@ -40,45 +128,18 @@ export interface DigestEmbedder {
   embed(texts: string[]): Promise<Float32Array[]>;
 }
 
-function formatDigestMessage(message: SessionMessage): string {
-  const values = [
-    message.contentText,
-    message.contentToolName ? `工具：${message.contentToolName}` : undefined,
-    message.contentToolOutput ? `工具结果：${message.contentToolOutput.slice(0, TOOL_OUTPUT_CHARS)}` : undefined,
-    message.contentToolError ? `工具错误：${message.contentToolError.slice(0, TOOL_OUTPUT_CHARS)}` : undefined,
-  ].filter((value): value is string => Boolean(value?.trim()));
-  if (!values.length) return '';
-  const role = message.role === 'user' ? '用户' : message.role === 'assistant' ? 'AI' : '系统';
-  return `${role}：${values.join('；')}`;
-}
-
-/**
- * Transcript from the most recent messages (newest wins): walk backwards
- * from the tail and prepend until the character budget is exhausted.
- */
-export function buildDigestTranscript(
-  messages: SessionMessage[],
-  budgetChars = TRANSCRIPT_BUDGET_CHARS,
-  recentLimit = RECENT_MESSAGE_LIMIT,
-): string {
-  const recent = messages.slice(-recentLimit);
-  const parts: string[] = [];
-  let used = 0;
-  for (let index = recent.length - 1; index >= 0; index -= 1) {
-    const formatted = formatDigestMessage(recent[index]);
-    if (!formatted) continue;
-    // Stop at the budget once at least the newest message is included.
-    if (used + formatted.length > budgetChars && parts.length > 0) break;
-    parts.unshift(formatted);
-    used += formatted.length;
-  }
-  return parts.join('\n');
+function firstUserText(messages: SessionMessage[]): string {
+  const firstUser = messages.find(message => message.role === 'user' && message.contentText?.trim());
+  return (firstUser?.contentText ?? messages[0]?.contentText ?? '');
 }
 
 export class DigestService {
   private queue: string[] = [];
   private queued = new Set<string>();
   private retryCounts = new Map<string, number>();
+  private degradedRetries = new Set<string>();
+  private degradedRetryCount = 0;
+  private degradedGaveUpCount = 0;
   private pumpPromise: Promise<void> | null = null;
   private scanTimer: NodeJS.Timeout | null = null;
 
@@ -86,6 +147,8 @@ export class DigestService {
     private readonly store: DigestSessionStore,
     private readonly agent: DigestAgentRunner,
     private readonly embedding: DigestEmbedder,
+    /** Degraded rows are retried only when the chat LLM is usable. */
+    private readonly isLlmReady: () => boolean = () => true,
   ) {}
 
   /** Initial backfill scan at startup. */
@@ -109,7 +172,50 @@ export class DigestService {
     for (const candidate of this.store.listSessionsNeedingDigest(DIGEST_VERSION)) {
       this.enqueue(candidate.id);
     }
+    this.enqueueDegradedRetries();
     await this.pumpPromise;
+    this.logDigestHealth();
+  }
+
+  /**
+   * Degraded-digest statistics for future settings/diagnostics surfaces —
+   * currently data layer + logs only: store-wide counts from capture-core
+   * plus this run's retry counters.
+   */
+  getDigestStats(): { run: { degradedRetries: number; degradedGaveUp: number }; store: SessionDigestStats } {
+    return {
+      run: {
+        degradedRetries: this.degradedRetryCount,
+        degradedGaveUp: this.degradedGaveUpCount,
+      },
+      store: this.store.getSessionDigestStats(),
+    };
+  }
+
+  private enqueueDegradedRetries(): void {
+    if (!this.isLlmReady()) return;
+    for (const digest of this.store.listDegradedDigestCandidates()) {
+      if (this.queued.has(digest.sessionId)) continue;
+      const detail = this.store.getSession(digest.sessionId);
+      if (!detail || detail.messages.length === 0) continue;
+      if (!isDegradedDigest(digest, firstUserText(detail.messages))) continue;
+      this.degradedRetries.add(digest.sessionId);
+      this.degradedRetryCount += 1;
+      this.enqueue(digest.sessionId);
+    }
+  }
+
+  private logDigestHealth(): void {
+    try {
+      const stats = this.getDigestStats();
+      if (stats.store.emptyStructured > 0 || stats.store.failed > 0) {
+        console.warn(
+          `[digest] 健康检查：共 ${stats.store.total} 条 digest，四字段全空 ${stats.store.emptyStructured} 条` +
+          `（本轮重试 ${stats.run.degradedRetries}、累计放弃 ${stats.run.degradedGaveUp}、已标记放弃 ${stats.store.gaveUp}），` +
+          `失败 ${stats.store.failed} 条`,
+        );
+      }
+    } catch { /* health logging is best-effort and must never break capture */ }
   }
 
   private enqueue(id: string): void {
@@ -158,6 +264,10 @@ export class DigestService {
     const transcript = buildDigestTranscript(detail.messages);
     if (!transcript.trim()) return;
 
+    // A degraded row gets exactly one retry pass; still-degraded output is
+    // marked 'degraded' and never auto-retried again.
+    const isDegradedRetry = this.degradedRetries.delete(sessionId);
+
     // LLM digest: one retry on bad/unreachable output, then degrade.
     let payload: DigestPayload | null = null;
     for (let attempt = 0; attempt < 2 && !payload; attempt += 1) {
@@ -178,8 +288,29 @@ export class DigestService {
       this.store.upsertSessionDigest({
         ...base,
         oneLiner: this.fallbackOneLiner(detail.messages),
-        embeddingStatus: 'skipped',
+        embeddingStatus: isDegradedRetry ? 'degraded' : 'skipped',
       });
+      if (isDegradedRetry) this.degradedGaveUpCount += 1;
+      return;
+    }
+
+    if (isDegradedRetry && isDegradedDigest(
+      {
+        oneLiner: payload.one_liner,
+        keyTopics: payload.key_topics,
+        keyFiles: payload.key_files,
+        decisions: payload.decisions,
+        openQuestions: payload.open_questions,
+      },
+      firstUserText(detail.messages),
+    )) {
+      // Retry still degraded: keep the row, mark it, stop auto-retrying.
+      this.store.upsertSessionDigest({
+        ...base,
+        oneLiner: payload.one_liner,
+        embeddingStatus: 'degraded',
+      });
+      this.degradedGaveUpCount += 1;
       return;
     }
 
@@ -240,9 +371,7 @@ export class DigestService {
   }
 
   private fallbackOneLiner(messages: SessionMessage[]): string {
-    const firstUser = messages.find(message => message.role === 'user' && message.contentText?.trim());
-    const text = (firstUser?.contentText ?? messages[0]?.contentText ?? '').replace(/\s+/g, ' ').trim();
-    return text.slice(0, FALLBACK_ONE_LINER_CHARS);
+    return collapseWhitespace(firstUserText(messages)).slice(0, FALLBACK_ONE_LINER_CHARS);
   }
 
   private writeFailedRow(sessionId: string): void {

@@ -20,7 +20,6 @@
   --shadow-color: 28, 20, 15;
   --shadow-popover: 0 8px 22px rgba(var(--shadow-color), 0.1),
     0 2px 6px rgba(var(--shadow-color), 0.08);
-  --capsule-ball-shadow: drop-shadow(0 2px 4px rgba(var(--shadow-color), 0.24));
   --capsule-dot-ring: rgba(255, 255, 255, 0.92);
 
   --capsule-bg: hsl(var(--bg-tertiary));
@@ -32,7 +31,6 @@
   --capsule-accent-text: hsl(var(--text-inverse));
   --capsule-surface: hsl(var(--bg-secondary));
   --capsule-surface-hover: hsl(var(--surface-card-hover));
-  --capsule-shadow: var(--shadow-popover);
   --capsule-success: hsl(var(--success));
   --capsule-muted: hsl(var(--text-tertiary));
 }
@@ -53,7 +51,6 @@
   --shadow-color: 0, 0, 0;
   --shadow-popover: 0 12px 30px rgba(var(--shadow-color), 0.4),
     0 4px 10px rgba(var(--shadow-color), 0.3);
-  --capsule-ball-shadow: drop-shadow(0 2px 5px rgba(var(--shadow-color), 0.55));
   --capsule-dot-ring: rgba(0, 0, 0, 0.6);
 }
 
@@ -85,8 +82,8 @@ body,
 
 /* ---- Collapsed ball ----
  * No chrome of its own: the transparent-background owl PNG fills the window
- * and the drop-shadow filter follows the image alpha, so no box edge or
- * white corner can leak onto the desktop. */
+ * with no filter or shadow, so no box edge or white corner can leak onto the
+ * desktop. */
 
 .capsule-ball {
   position: relative;
@@ -110,24 +107,18 @@ body,
 }
 
 .capsule-ball img {
-  /* 48px artwork inside the 56px window leaves margin for the drop-shadow. */
+  /* 48px artwork inside the 56px window; no drop-shadow by design. */
   width: 48px;
   height: 48px;
   pointer-events: none;
-  filter: var(--capsule-ball-shadow);
 }
 
 /* The classic skin is the original line-art owl (wide glyph, dark strokes,
  * no circular badge): render it a touch larger so the strokes stay legible
- * at ball size, and halo it in dark mode so the dark lines survive dark
- * wallpapers. */
+ * at ball size. */
 .capsule-ball img[data-skin='classic'] {
   width: 52px;
   height: 52px;
-}
-
-:root[data-theme='dark'] .capsule-ball img[data-skin='classic'] {
-  filter: drop-shadow(0 0 3px rgba(255, 255, 255, 0.55)) var(--capsule-ball-shadow);
 }
 
 .capsule-ball .status-dot {
@@ -179,7 +170,6 @@ body,
   border-radius: 18px;
   border: 1px solid var(--capsule-border);
   background: var(--capsule-bg);
-  box-shadow: var(--capsule-shadow);
   overflow: hidden;
   animation: capsule-enter 200ms ease-out;
 }
@@ -874,6 +864,30 @@ body,
   color: var(--capsule-text-secondary);
 }
 
+/* Prompt refine result: AI change notes under the improved body */
+
+.prompt-refine-notes {
+  border: 1px solid var(--capsule-border);
+  border-radius: 12px;
+  background: var(--capsule-surface);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.prompt-refine-notes-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--capsule-text);
+}
+
+.prompt-refine-note {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--capsule-text-secondary);
+}
+
 /* Toast */
 
 .capsule-toast {
@@ -890,7 +904,6 @@ body,
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  box-shadow: var(--capsule-shadow);
   animation: capsule-enter 160ms ease-out;
   pointer-events: none;
 }

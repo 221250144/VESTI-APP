@@ -21,6 +21,20 @@ function projectRef(project: CapsuleProjectView): string {
   return `${project.platform}::${project.host}::${project.projectKey}`;
 }
 
+/** Platform display label for the relay scope rows (mirrors the library's
+ * source-tree labels; unknown slugs fall through verbatim). */
+const CAPSULE_PLATFORM_LABELS: Record<string, string> = {
+  'claude-code': 'Claude Code',
+  'kimi-code': 'Kimi Code',
+  codex: 'Codex',
+  cursor: 'Cursor',
+  aider: 'Aider',
+};
+
+function capsulePlatformLabel(platform: string): string {
+  return CAPSULE_PLATFORM_LABELS[platform] ?? platform;
+}
+
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message ? error.message : fallback;
 }
@@ -179,10 +193,10 @@ export function RelayFlow({ copy, llmConfigured, extensionConnected, onExit, onT
                           }}
                         />
                         <span className="project-label" title={project.pathOrDomain}>
-                          {project.label}
+                          {capsulePlatformLabel(project.platform)} · {project.label}
                         </span>
                         <span className="project-meta">
-                          {project.platform} · {project.sessionCount} {copy.relaySessionsUnit}
+                          {project.sessionCount} {copy.relaySessionsUnit}
                         </span>
                       </label>
                       {selected && project.recentSessions.length > 0 && (

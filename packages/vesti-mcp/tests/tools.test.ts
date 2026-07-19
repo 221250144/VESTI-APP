@@ -23,8 +23,10 @@ describe('openVestiDb', () => {
     expect(() => openVestiDb(fixture.dbPath + '.missing')).toThrow(/Run the VESTI/);
   });
 
-  it('opens the database read-only', () => {
-    expect(() => db.exec(`INSERT INTO work_sessions (id) VALUES ('nope')`)).toThrow(/readonly/i);
+  it('opens read-write so search can bump digest access counters (the only write)', () => {
+    // The write policy is package-level: only bumpDigestAccess issues writes.
+    expect(() => db.exec('CREATE TABLE IF NOT EXISTS _write_probe (id TEXT)')).not.toThrow();
+    db.exec('DROP TABLE IF EXISTS _write_probe');
   });
 });
 

@@ -22,6 +22,9 @@ import type {
   ExtractPayload,
   ExtractResult,
   GenerateDepositInput,
+  PromptScanCandidate,
+  PromptScanProgress,
+  PromptScanResult,
   RelayAvailability,
   RelayCliCommandView,
   RelayPack,
@@ -30,7 +33,11 @@ import type {
   WeeklyReport,
 } from "@vesti/ui";
 import { computeSummaryCoverage, serializeRelayPackMarkdown } from "@vesti/ui";
-import type { SessionRecallHit, VestiDesktopApi } from "../../shared/contracts";
+import type {
+  ConversationTreeSession,
+  SessionRecallHit,
+  VestiDesktopApi,
+} from "../../shared/contracts";
 import { db } from "../db/schema";
 import type { ConversationRecord } from "../db/schema";
 import { loadConversationTree } from "../sync/conversationTree";
@@ -93,7 +100,20 @@ import {
   togglePromptFavorite,
   updatePrompt,
 } from "../db/promptRepository";
-import type { ConversationSummaryV2, SummaryRecord } from "../db/types";
+import {
+  canonicalizeForHash,
+  scanUserPromptInputs,
+  type PromptScanUserInput,
+} from "../db/promptlib";
+import type { ConversationSummaryV2, RoundtableSeatTurn, SummaryRecord } from "../db/types";
+import {
+  aggregateRoundtable,
+  buildModeratorTranscript,
+  buildRoundtableRecordMarkdown,
+  buildSeatTranscript,
+  resolveRoundtablePersonas,
+  ROUNDTABLE_MIN_SEATS,
+} from "../roundtable/roundtable";
 import {
   parseConversationSummaryV2,
   renderSummaryPlainText,
@@ -111,8 +131,13 @@ import {
 import { sanitizeFileBaseName } from "../upstream/markdownSerializer";
 import {
   buildRelayTranscript,
+  RELAY_CONTEXT_BUDGET_CHARS,
   type RelayContextConversation,
 } from "../relay/relayContext";
+import {
+  extractRelayFileAnchors,
+  type RelayFileAnchor,
+} from "../relay/relayFiles";
 import {
   distillAndMergeDeposit,
   nextDepositVersion,
@@ -597,6 +622,76 @@ async function gatherRelayContexts(
   return contexts;
 }
 
+/**
+ * Deterministic key-file anchors (P4a quality): aggregate the captured
+ * file-tool touches of the selected sessions into a grounded file list.
+ * Subagent sessions fold into their selected parent (A1) — their touches are
+ * attributed to the parent conversation. Returns [] when the capture bridge
+ * or the tool data is unavailable; the transcript then simply omits the
+ * anchor block.
+ */
+async function gatherRelayFileAnchors(
+  cliIdByConversationId: Map<number, string>
+): Promise<RelayFileAnchor[]> {
+  const api = vestiApi();
+  if (!api || cliIdByConversationId.size === 0) return [];
+  const conversationIdByCliId = new Map<string, number>();
+  for (const [conversationId, cliId] of cliIdByConversationId) {
+    conversationIdByCliId.set(cliId, conversationId);
+  }
+  const tree = await loadConversationTree().catch(() => null);
+  if (tree) {
+    const collectDescendantIds = (
+      session: ConversationTreeSession,
+      into: string[]
+    ): void => {
+      for (const child of session.children ?? []) {
+        into.push(child.id);
+        collectDescendantIds(child, into);
+      }
+    };
+    for (const source of tree.sources) {
+      for (const project of source.projects) {
+        for (const session of project.sessions) {
+          const parentConversationId = conversationIdByCliId.get(session.id);
+          if (parentConversationId === undefined) continue;
+          const descendantIds: string[] = [];
+          collectDescendantIds(session, descendantIds);
+          for (const id of descendantIds) {
+            if (!conversationIdByCliId.has(id)) {
+              conversationIdByCliId.set(id, parentConversationId);
+            }
+          }
+        }
+      }
+    }
+  }
+  // Selected sessions first (Map insertion order), descendants fill the rest
+  // up to the main-process fan-out cap.
+  const rows = await api
+    .getRelayFileTouches([...conversationIdByCliId.keys()].slice(0, 200))
+    .catch(() => []);
+  return extractRelayFileAnchors(
+    rows,
+    (sessionId) => conversationIdByCliId.get(sessionId) ?? null
+  );
+}
+
+/** Rebuild the conversation-id → capture-session-id map for a selection. */
+async function mapSelectedCliIds(
+  uniqueIds: number[]
+): Promise<Map<number, string>> {
+  const records = await db.conversations.where("id").anyOf(uniqueIds).toArray();
+  const map = new Map<number, string>();
+  for (const record of records) {
+    const cliId = (record as LocalTerminalFields)._cli_id;
+    if (typeof record.id === "number" && typeof cliId === "string") {
+      map.set(record.id, cliId);
+    }
+  }
+  return map;
+}
+
 async function generateRelayPackImpl(conversationIds: number[]): Promise<RelayPack> {
   const api = vestiApi();
   if (!api) {
@@ -608,7 +703,13 @@ async function generateRelayPackImpl(conversationIds: number[]): Promise<RelayPa
   }
 
   const contexts = await gatherRelayContexts(uniqueIds);
-  const transcript = buildRelayTranscript(contexts);
+  // Ground the pack's key-files section on captured tool executions instead
+  // of model recollection; the anchors also persist on the pack so the panel
+  // can badge every key_files row as anchored vs. to-be-verified.
+  const fileAnchors = await gatherRelayFileAnchors(await mapSelectedCliIds(uniqueIds));
+  const transcript = buildRelayTranscript(contexts, RELAY_CONTEXT_BUDGET_CHARS, {
+    fileAnchors,
+  });
   const result = await api.runAgent({
     kind: "relay",
     // No capture-store session backs a multi-selection; the pre-built
@@ -618,6 +719,14 @@ async function generateRelayPackImpl(conversationIds: number[]): Promise<RelayPa
     persist: false,
   });
   const payload = JSON.parse(result.content) as RelayPackPayload;
+  if (fileAnchors.length > 0) {
+    payload.extracted_key_files = fileAnchors.map((anchor) => ({
+      path: anchor.path,
+      touches: anchor.touches,
+      lastTouchedAt: anchor.lastTouchedAt,
+      conversationIds: anchor.conversationIds,
+    }));
+  }
   return createRelayPack({
     title: payload.title,
     conversationIds: contexts.map((context) => context.id),
@@ -892,6 +1001,208 @@ async function getDailyLogById(id: number): Promise<DailyLog | null> {
   return logs.find((log) => log.id === id) ?? null;
 }
 
+// ---- Prompt library scan (agent CLI sessions + browser conversations) ------
+//
+// Interactive counterpart to extractPromptsFromLibrary: instead of silently
+// archiving a curated few, it flattens every user turn from BOTH sources into
+// reviewable candidates (frequency + provenance) and lets the user adopt or
+// ignore each one. Clustering/ranking is pure (promptlib/promptScanner);
+// the only LLM usage is ONE optional batch call that relabels the top
+// candidates (heuristic titles stay when no model is configured).
+
+const SCAN_AGENT_SESSION_LIMIT = 200;
+const SCAN_BROWSER_CONVERSATION_LIMIT = 500;
+const SCAN_MESSAGE_TEXT_CAP = 8_000;
+const SCAN_AGENT_BATCH_SIZE = 10;
+/** Rate limit: a single naming call over at most this many top candidates. */
+const SCAN_LLM_NAMING_LIMIT = 12;
+
+function truncateScanText(text: string): string {
+  return text.length > SCAN_MESSAGE_TEXT_CAP ? text.slice(0, SCAN_MESSAGE_TEXT_CAP) : text;
+}
+
+/** Browser conversations live in Dexie and are NOT stamped local_terminal. */
+async function listBrowserScanConversations(): Promise<{
+  records: Array<ConversationRecord & LocalTerminalFields>;
+  truncated: boolean;
+}> {
+  const records = (await db.conversations.toArray()) as Array<
+    ConversationRecord & LocalTerminalFields
+  >;
+  const browser = records
+    .filter((record) => record._source !== "local_terminal" && typeof record.id === "number")
+    .sort((a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0));
+  return {
+    records: browser.slice(0, SCAN_BROWSER_CONVERSATION_LIMIT),
+    truncated: browser.length > SCAN_BROWSER_CONVERSATION_LIMIT,
+  };
+}
+
+async function collectBrowserScanInputs(
+  records: Array<ConversationRecord & LocalTerminalFields>,
+  report: (step: number) => void,
+): Promise<PromptScanUserInput[]> {
+  const inputs: PromptScanUserInput[] = [];
+  let sinceReport = 0;
+  for (const record of records) {
+    const messages = await db.messages
+      .where("conversation_id")
+      .equals(record.id as number)
+      .toArray();
+    for (const message of messages) {
+      if (message.role !== "user") continue;
+      const text = (message.content_text ?? "").trim();
+      if (!text) continue;
+      inputs.push({
+        origin: "browser",
+        conversationId: String(record.id),
+        conversationTitle: record.title || "",
+        text: truncateScanText(text),
+      });
+    }
+    sinceReport += 1;
+    if (sinceReport >= 25) {
+      report(sinceReport);
+      sinceReport = 0;
+    }
+  }
+  if (sinceReport > 0) report(sinceReport);
+  return inputs;
+}
+
+/** Agent CLI sessions are read straight from the main-process capture store. */
+async function collectAgentScanInputs(
+  api: VestiDesktopApi,
+  sessions: Awaited<ReturnType<VestiDesktopApi["getSessions"]>>,
+  report: (step: number) => void,
+): Promise<PromptScanUserInput[]> {
+  const inputs: PromptScanUserInput[] = [];
+  // Batched detail fetches keep IPC pressure bounded on large libraries.
+  for (let index = 0; index < sessions.length; index += SCAN_AGENT_BATCH_SIZE) {
+    const batch = sessions.slice(index, index + SCAN_AGENT_BATCH_SIZE);
+    const details = await Promise.all(
+      batch.map((session) => api.getSession(session.id).catch(() => null)),
+    );
+    for (const detail of details) {
+      if (!detail) continue;
+      for (const message of detail.messages) {
+        if (message.role !== "user") continue;
+        const text = (message.contentText ?? "").trim();
+        if (!text) continue;
+        inputs.push({
+          origin: "agent",
+          conversationId: detail.session.id,
+          conversationTitle: detail.session.title || "",
+          text: truncateScanText(text),
+        });
+      }
+    }
+    report(batch.length);
+  }
+  return inputs;
+}
+
+/** Leniently parse the LLM naming response: a JSON array of short titles. */
+function parseNamingTitles(raw: string, expected: number): string[] | null {
+  const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  const start = cleaned.indexOf("[");
+  const end = cleaned.lastIndexOf("]");
+  if (start === -1 || end <= start) return null;
+  try {
+    const parsed = JSON.parse(cleaned.slice(start, end + 1)) as unknown;
+    if (!Array.isArray(parsed) || parsed.length < expected) return null;
+    const titles = parsed.slice(0, expected).map((item) =>
+      typeof item === "string" ? item.trim().replace(/\s+/g, " ").slice(0, 48) : "");
+    return titles.every((title) => title.length > 0) ? titles : null;
+  } catch {
+    return null;
+  }
+}
+
+async function scanPromptLibraryImpl(options?: {
+  sessionLimit?: number;
+  onProgress?: (progress: PromptScanProgress) => void;
+}): Promise<PromptScanResult> {
+  const api = vestiApi();
+
+  // Enumerate first so the progress total is known up front.
+  const browserPart = await listBrowserScanConversations();
+  const allAgentSessions = api ? await api.getSessions() : [];
+  const sessionLimit = Math.max(1, options?.sessionLimit ?? SCAN_AGENT_SESSION_LIMIT);
+  const agentSessions = [...allAgentSessions]
+    .sort((a, b) => b.lastActivityAt - a.lastActivityAt)
+    .slice(0, sessionLimit);
+  const total = browserPart.records.length + agentSessions.length;
+  let done = 0;
+  const report = (step: number) => {
+    done += step;
+    options?.onProgress?.({ done, total });
+  };
+  options?.onProgress?.({ done: 0, total });
+
+  const browserInputs = await collectBrowserScanInputs(browserPart.records, report);
+  const agentInputs = api ? await collectAgentScanInputs(api, agentSessions, report) : [];
+
+  const inputs = [...browserInputs, ...agentInputs];
+  const clusters = scanUserPromptInputs(inputs);
+  const candidates: PromptScanCandidate[] = clusters.map((cluster) => ({
+    ...cluster,
+    alreadyInLibrary: false,
+  }));
+
+  // Mark candidates whose body already lives in the prompts table.
+  const existingBodies = new Set(
+    (await db.prompts.toArray()).map((record) => canonicalizeForHash(record.body ?? "")),
+  );
+  for (const candidate of candidates) {
+    candidate.alreadyInLibrary = existingBodies.has(canonicalizeForHash(candidate.body));
+  }
+
+  // Optional LLM naming: exactly ONE batch call over the top candidates; any
+  // failure leaves the heuristic titles in place.
+  let usedLlm = false;
+  if (api && candidates.length > 0) {
+    const settingsView = await api.getSettings().catch(() => null);
+    const llmReady = Boolean(
+      settingsView &&
+        (settingsView.llm.mode === "demo_proxy" || settingsView.llm.apiKeyConfigured),
+    );
+    if (llmReady) {
+      const top = candidates.slice(0, SCAN_LLM_NAMING_LIMIT);
+      const transcript = top
+        .map((candidate, index) => `${index + 1}. ${candidate.body.slice(0, 600)}`)
+        .join("\n\n");
+      try {
+        const result = await api.runAgent({
+          kind: "explore",
+          sessionId: `prompt-scan:${Date.now()}`,
+          transcriptOverride: transcript,
+          question:
+            "上面是若干条候选提示词（按编号给出）。请为每一条生成一个不超过 20 字的简短标题，严格只输出一个 JSON 字符串数组，顺序与编号一一对应，例如 [\"标题一\", \"标题二\"]。不要输出任何其他文字。",
+          persist: false,
+        });
+        const titles = parseNamingTitles(result.content, top.length);
+        if (titles) {
+          top.forEach((candidate, index) => {
+            candidate.title = titles[index];
+          });
+          usedLlm = true;
+        }
+      } catch {
+        /* naming is best-effort; heuristic titles stay */
+      }
+    }
+  }
+
+  return {
+    candidates,
+    scannedConversations: total,
+    scannedInputs: inputs.length,
+    usedLlm,
+    truncated: browserPart.truncated || allAgentSessions.length > agentSessions.length,
+  };
+}
+
 // ---- StorageApi ------------------------------------------------------------
 
 export const desktopStorage: StorageApi = {
@@ -915,6 +1226,11 @@ export const desktopStorage: StorageApi = {
   // P2b organizer: source tree + bulk operations. Soft trash keeps the record
   // (and its capture lineage), so re-syncs reconcile instead of resurrecting.
   getConversationTree: () => loadConversationTree(),
+  // Memory v2: L0 project cards / L2 briefs / file timelines (main-process).
+  getProjectStates: async () => (await vestiApi()?.getProjectStates()) ?? [],
+  getProjectBrief: async (projectKey) =>
+    (await vestiApi()?.getProjectBrief(projectKey)) ?? null,
+  getFileTimeline: async (query) => (await vestiApi()?.getFileTimeline(query)) ?? [],
   trashConversations: (ids) => bulkSetConversationFlags(ids, { is_trash: true }),
   bulkAddTag: (ids, tag) => bulkAddTagToConversations(ids, tag),
   renameFolderTag: async (from, to) => ({ updated: await renameTagAcrossConversations(from, to) }),
@@ -1034,16 +1350,144 @@ export const desktopStorage: StorageApi = {
   updateExploreMessageContext: (messageId, contextDraft, selectedContextConversationIds) =>
     updateExploreMessageContext(messageId, contextDraft, selectedContextConversationIds),
 
-  runRoundtable: async (question, _personaIds, opts) => ({
-    question,
-    lang: opts?.lang ?? "zh",
-    grounded: false,
-    seatTurns: [],
-    synthesis: null,
-    synthesisRaw: "",
-    sources: [],
-    totalDurationMs: 0,
-  }),
+  // AI 圆桌: convene the selected personas on the configured LLM (one
+  // 'roundtable-turn' run per seat, serial so progress arrives in order and
+  // rate limits stay calm), then a 'roundtable-synthesis' moderator pass over
+  // the successful turns. Recall hits ground the discussion when available.
+  // The finished run is archived into explore_sessions so it replays from the
+  // Ask history — same convention as askKnowledgeBase.
+  runRoundtable: async (question, personaIds, opts) => {
+    const lang = opts?.lang ?? "zh";
+    const api = vestiApi();
+    if (!api) {
+      throw new Error(
+        lang === "zh" ? "桌面接口不可用，无法运行圆桌。" : "Desktop API unavailable — cannot run the roundtable.",
+      );
+    }
+    // LLM gate (same probe as getLlmConfigured): the panel disables the run up
+    // front; this guard keeps direct callers honest too.
+    const settingsView = await api.getSettings().catch(() => null);
+    const llmConfigured = settingsView
+      ? settingsView.llm.mode === "demo_proxy" || settingsView.llm.apiKeyConfigured
+      : false;
+    if (!llmConfigured) {
+      throw new Error(
+        lang === "zh"
+          ? "尚未配置模型 —— 请先在「设置」中配置 LLM，圆桌需要模型才能讨论。"
+          : "No model configured — set up an LLM in Settings first; the panel needs one to deliberate.",
+      );
+    }
+    const personas = resolveRoundtablePersonas(personaIds);
+    if (personas.length < ROUNDTABLE_MIN_SEATS) {
+      throw new Error(
+        lang === "zh" ? "圆桌至少需要 2 位成员。" : "The roundtable needs at least 2 panelists.",
+      );
+    }
+
+    const startedAt = Date.now();
+
+    // Optional grounding: cross-session recall, same context shape as Ask.
+    const hits = await api.recallSessions(question, 5).catch(() => []);
+    const context =
+      hits.length > 0
+        ? hits
+            .map((hit, index) => {
+              const lines = [`[会话 ${index + 1}] ${hit.title}`];
+              if (hit.oneLiner) lines.push(`摘要：${hit.oneLiner}`);
+              if (hit.snippet) lines.push(`命中片段：${hit.snippet}`);
+              return lines.join("\n");
+            })
+            .join("\n\n")
+        : "";
+    const sources = hits.length > 0 ? await recallSources(hits) : [];
+
+    const seatTurns: RoundtableSeatTurn[] = [];
+    for (const persona of personas) {
+      const seatStart = Date.now();
+      let turn: RoundtableSeatTurn;
+      try {
+        const result = await api.runAgent({
+          kind: "roundtable-turn",
+          sessionId: `roundtable:${startedAt}:${persona.id}`,
+          question,
+          transcriptOverride: buildSeatTranscript({ persona, question, context, lang }),
+          persist: false,
+        });
+        turn = {
+          personaId: persona.id,
+          content: result.content.trim(),
+          ok: true,
+          durationMs: Date.now() - seatStart,
+        };
+      } catch (error) {
+        turn = {
+          personaId: persona.id,
+          content: "",
+          ok: false,
+          error: (error as Error)?.message ?? String(error),
+          durationMs: Date.now() - seatStart,
+        };
+      }
+      seatTurns.push(turn);
+      opts?.onSeatComplete?.(turn);
+    }
+
+    // Moderator over whatever seats succeeded; a failed/absent synthesis never
+    // sinks the seat turns.
+    const okTurns = seatTurns.filter((turn) => turn.ok && turn.content.trim());
+    let synthesisRaw = "";
+    if (okTurns.length > 0) {
+      try {
+        const result = await api.runAgent({
+          kind: "roundtable-synthesis",
+          sessionId: `roundtable:${startedAt}:moderator`,
+          question,
+          transcriptOverride: buildModeratorTranscript(question, okTurns, context, lang),
+          persist: false,
+        });
+        synthesisRaw = result.content.trim();
+      } catch (error) {
+        console.warn("[Roundtable] synthesis failed; returning seat turns only", error);
+      }
+    }
+
+    const result = aggregateRoundtable({
+      question,
+      lang,
+      grounded: hits.length > 0,
+      seatTurns,
+      synthesisRaw,
+      sources,
+      totalDurationMs: Date.now() - startedAt,
+    });
+
+    // Archive into explore_sessions (best-effort — storage failures must not
+    // sink a finished run).
+    try {
+      const titlePrefix = lang === "zh" ? "圆桌：" : "Roundtable: ";
+      const sessionId = await createExploreSession(
+        `${titlePrefix}${question.slice(0, 50)}` || "Roundtable",
+      );
+      await addExploreMessage(sessionId, {
+        role: "user",
+        content: question,
+        timestamp: startedAt,
+      });
+      const markdown = buildRoundtableRecordMarkdown(result);
+      if (markdown) {
+        await addExploreMessage(sessionId, {
+          role: "assistant",
+          content: markdown,
+          sources,
+          timestamp: Date.now(),
+        });
+      }
+    } catch (error) {
+      console.warn("[Roundtable] failed to archive the session", error);
+    }
+
+    return result;
+  },
 
   getSummary: async (conversationId) => {
     const record = await getSummaryRecord(conversationId);
@@ -1142,5 +1586,6 @@ export const desktopStorage: StorageApi = {
   // Offline heuristic extraction (no LLM distiller wired on desktop); the
   // result reports usedLlm: false, same as the extension's no-LLM path.
   extractPromptsFromLibrary: (options) => extractPromptsFromLibrary(options),
+  scanPromptLibrary: (options) => scanPromptLibraryImpl(options),
   completePrompt: async (payload) => ({ completion: payload.draft, usedLlm: false }),
 };

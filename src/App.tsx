@@ -179,6 +179,7 @@ function Shell() {
               aitiEmblemUrl={aitiImagery ? emblemUrl(aitiImagery.emblemId) : undefined}
               aitiPersonaNote={aitiPersonaNote}
               learn={learn}
+              lang={lang}
               tab={dashboardTab}
               onTabChange={(tab) => setPage(tab)}
             />

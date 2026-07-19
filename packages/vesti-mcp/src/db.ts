@@ -1,10 +1,14 @@
 /**
- * Read-only access to the VESTI capture database.
+ * Access to the VESTI capture database.
  *
  * Uses the built-in `node:sqlite` driver (no native module, no ABI coupling
  * to the Electron-flavored better-sqlite3 binary in the desktop app).
- * The database is always opened with `readOnly: true` — this server never
- * writes to the user's memory store.
+ *
+ * Write policy: the database is opened read-write, but the ONLY write this
+ * server ever issues is `session_digests.access_count + 1` when vesti_search
+ * surfaces a digest (memory v2 L1 access tracking). Everything else is
+ * strictly read-only. If the column is missing (pre-v4 database) the bump is
+ * skipped silently.
  */
 
 import fs from 'node:fs';
@@ -37,13 +41,11 @@ export class VestiDbNotFoundError extends Error {
 }
 
 /**
- * Open the database read-only. Throws VestiDbNotFoundError when the file is
- * missing so the CLI can print actionable guidance instead of a stack trace.
+ * Open the database. Throws VestiDbNotFoundError when the file is missing so
+ * the CLI can print actionable guidance instead of a stack trace. See the
+ * file-header comment for the (single-statement) write policy.
  */
 export function openVestiDb(dbPath: string): VestiDatabase {
   if (!fs.existsSync(dbPath)) throw new VestiDbNotFoundError(dbPath);
-  // `readOnly` exists since Node 22.13 / 23.4; cast because @types/node 22
-  // lags the runtime surface.
-  const options = { readOnly: true } as ConstructorParameters<typeof DatabaseSync>[1];
-  return new DatabaseSync(dbPath, options);
+  return new DatabaseSync(dbPath);
 }
