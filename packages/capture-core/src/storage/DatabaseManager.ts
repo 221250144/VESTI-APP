@@ -7,10 +7,13 @@
 
 import fs from 'fs-extra';
 import path from 'path';
-import { MIGRATIONS } from './migrations.js';
+import { MIGRATIONS, hasColumn } from './migrations.js';
 import { deriveProjectKey, projectBasis, projectLabel } from './projectRegistry.js';
 import { buildConversationTree, type ConversationTree } from '../tree/TreeIndex.js';
 import { recallSessions, type SessionRecallHit, type SessionRecallOptions } from '../search/SessionRecall.js';
+import { detectForksByMessageOverlap } from '../tree/forks.js';
+import { buildProjectState, listProjectKeys } from '../state/projectState.js';
+import { getFileTimeline, type FileTimelineQuery } from '../state/fileTimeline.js';
 import type {
   VestiConversation,
   VestiMessage,
@@ -29,6 +32,10 @@ import type {
   SystemEvent,
   MessageSource,
   SessionDigest,
+  SessionDigestStats,
+  ProjectState,
+  ProjectBrief,
+  FileTimelineEvent,
 } from '../types/unified.js';
 
 type Database = import('better-sqlite3').Database;
@@ -431,6 +438,9 @@ export class DatabaseManager {
   /**
    * Apply pending schema migrations in version order. Each migration runs
    * once inside a transaction together with its schema_migrations record.
+   * A migration may return a note (e.g. migration 5 skipping itself when the
+   * SQLite build has no trigram tokenizer) which is stored in the `note`
+   * column — the version is still recorded so startup never retries it.
    */
   private runMigrations(): void {
     const db = this.getDb();
@@ -441,18 +451,22 @@ export class DatabaseManager {
         applied_at TEXT NOT NULL
       )
     `);
+    // Added with migration 5; older databases pick it up here idempotently.
+    if (!hasColumn(db, 'schema_migrations', 'note')) {
+      db.exec('ALTER TABLE schema_migrations ADD COLUMN note TEXT');
+    }
     const applied = new Set(
       (db.prepare('SELECT version FROM schema_migrations').all() as Array<{ version: number }>)
         .map(row => row.version),
     );
     const record = db.prepare(
-      'INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)'
+      'INSERT INTO schema_migrations (version, name, applied_at, note) VALUES (?, ?, ?, ?)'
     );
     for (const migration of MIGRATIONS) {
       if (applied.has(migration.version)) continue;
       db.transaction(() => {
-        migration.up(db);
-        record.run(migration.version, migration.name, new Date().toISOString());
+        const note = migration.up(db);
+        record.run(migration.version, migration.name, new Date().toISOString(), note ?? null);
       })();
     }
   }
@@ -469,7 +483,7 @@ export class DatabaseManager {
         message_count, user_input_count, assistant_message_count,
         thinking_count, tool_call_count, code_block_count, turn_count,
         total_input_tokens, total_output_tokens, total_cache_creation_tokens, total_cache_read_tokens,
-        has_subagents, has_context_compaction, agent_meta, claude_code_version, session_type, created_at, updated_at
+        has_subagents, has_context_compaction, agent_meta, claude_code_version, session_type, forked_from, created_at, updated_at
       ) VALUES (
         @id, @sessionId, @platform, @host, @platformVersion, @projectPath, @gitBranch, @gitRemote, @model, @models,
         @title, @summary, @tags, @status,
@@ -477,7 +491,7 @@ export class DatabaseManager {
         @messageCount, @userInputCount, @assistantMessageCount,
         @thinkingCount, @toolCallCount, @codeBlockCount, @turnCount,
         @totalInputTokens, @totalOutputTokens, @totalCacheCreationTokens, @totalCacheReadTokens,
-        @hasSubagents, @hasContextCompaction, @agentMeta, @claudeCodeVersion, @sessionType, @createdAt, @updatedAt
+        @hasSubagents, @hasContextCompaction, @agentMeta, @claudeCodeVersion, @sessionType, @forkedFrom, @createdAt, @updatedAt
       )
       ON CONFLICT(id) DO UPDATE SET
         host = excluded.host,
@@ -508,6 +522,9 @@ export class DatabaseManager {
         agent_meta = excluded.agent_meta,
         session_type = excluded.session_type,
         models = excluded.models,
+        -- Lineage, once known (parse-time meta or fork detection), is sticky:
+        -- a routine resync carries no lineage info and must not wipe it.
+        forked_from = COALESCE(excluded.forked_from, work_sessions.forked_from),
         updated_at = excluded.updated_at
     `).run({
       id: s.id,
@@ -544,6 +561,7 @@ export class DatabaseManager {
       agentMeta: s.agentMeta ?? null,
       claudeCodeVersion: s.claudeCodeVersion ?? null,
       sessionType: s.sessionType ?? 'conversation',
+      forkedFrom: s.forkedFrom ?? null,
       createdAt: s.createdAt,
       updatedAt: s.updatedAt,
     });
@@ -851,6 +869,37 @@ export class DatabaseManager {
     return (this.getDb().prepare(sql).all(...params) as any[]).map(r => this.rowToSessionMessage(r));
   }
 
+  /**
+   * Batch variant of getSessionMessages: one query per 500-id chunk instead
+   * of one round trip per session. Full-snapshot export over a few thousand
+   * sessions otherwise issues that many individual SELECTs (N+1). Returns
+   * messages grouped by session id; each group's ordering matches
+   * getSessionMessages (sequence, timestamp).
+   */
+  getSessionMessagesBatch(sessionIds: string[]): Map<string, SessionMessage[]> {
+    const grouped = new Map<string, SessionMessage[]>();
+    if (sessionIds.length === 0) return grouped;
+    const db = this.getDb();
+    const CHUNK_SIZE = 500; // SQLite's default host-variable limit is 999
+    for (let offset = 0; offset < sessionIds.length; offset += CHUNK_SIZE) {
+      const chunk = sessionIds.slice(offset, offset + CHUNK_SIZE);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = db.prepare(
+        `SELECT * FROM messages WHERE session_id IN (${placeholders}) ORDER BY session_id, sequence, timestamp`
+      ).all(...chunk) as any[];
+      for (const row of rows) {
+        const message = this.rowToSessionMessage(row);
+        const list = grouped.get(message.sessionId);
+        if (list) {
+          list.push(message);
+        } else {
+          grouped.set(message.sessionId, [message]);
+        }
+      }
+    }
+    return grouped;
+  }
+
   getSessionMessageCount(sessionId: string): number {
     const row = this.getDb().prepare(
       'SELECT COUNT(*) as cnt FROM messages WHERE session_id = ?'
@@ -992,6 +1041,38 @@ export class DatabaseManager {
       isError: r.is_error === 1,
       exitCode: r.exit_code,
       durationMs: r.duration_ms,
+      timestamp: r.timestamp,
+    }));
+  }
+
+  /**
+   * P4a relay quality: raw file-tool touch rows (read/write/edit) across a set
+   * of sessions, oldest first. The deterministic key-file extraction aggregates
+   * these into anchored file lists — the handoff pack's file section is
+   * grounded on captured tool executions, not on model recollection.
+   */
+  listFileToolTouches(sessionIds: string[], maxRows = 5_000): Array<{
+    sessionId: string;
+    toolName: string;
+    toolCategory: string;
+    inputSummary: string | null;
+    timestamp: number;
+  }> {
+    const unique = [...new Set(sessionIds)].filter(id => typeof id === 'string' && id.length > 0);
+    if (unique.length === 0) return [];
+    const placeholders = unique.map(() => '?').join(', ');
+    return (this.getDb().prepare(
+      `SELECT session_id, tool_name, tool_category, input_summary, timestamp
+       FROM tool_executions
+       WHERE tool_category IN ('file_read', 'file_write', 'file_edit')
+         AND session_id IN (${placeholders})
+       ORDER BY timestamp
+       LIMIT ?`
+    ).all(...unique, maxRows) as any[]).map(r => ({
+      sessionId: r.session_id,
+      toolName: r.tool_name,
+      toolCategory: r.tool_category,
+      inputSummary: r.input_summary,
       timestamp: r.timestamp,
     }));
   }
@@ -1362,6 +1443,19 @@ export class DatabaseManager {
     return row ? this.rowToSessionDigest(row) : null;
   }
 
+  /** All digests of one project, newest first (L2 brief input). */
+  listSessionDigestsForProject(projectKey: string): SessionDigest[] {
+    return (this.getDb().prepare(
+      'SELECT * FROM session_digests WHERE project_key = ? ORDER BY updated_at DESC',
+    ).all(projectKey) as any[]).map(row => this.rowToSessionDigest(row));
+  }
+
+  /** Registry label for a project key ('' when unknown). */
+  getProjectLabel(projectKey: string): string {
+    const row = this.getDb().prepare('SELECT label FROM project_registry WHERE project_key = ?').get(projectKey) as any;
+    return row?.label ?? '';
+  }
+
   /**
    * Conversation sessions whose digest is missing, stale (fewer messages
    * digested than captured) or built by an older prompt version.
@@ -1381,6 +1475,49 @@ export class DatabaseManager {
         )
       ORDER BY ws.last_activity_at DESC
     `).all(digestVersion) as any[]).map(row => ({ id: row.id, messageCount: row.message_count }));
+  }
+
+  /**
+   * SQL pre-filter for degraded digests (bench C 2026-07-19): LLM-failure
+   * fallback rows have all four structured fields empty and the raw first
+   * user message as one_liner. Exact echo judgment needs the session's first
+   * user message, so callers re-check at runtime; 'degraded' rows already
+   * used their retry and are excluded here.
+   */
+  listDegradedDigestCandidates(): SessionDigest[] {
+    return (this.getDb().prepare(`
+      SELECT * FROM session_digests
+      WHERE embedding_status = 'skipped'
+        AND COALESCE(TRIM(key_topics), '[]') IN ('', '[]')
+        AND COALESCE(TRIM(key_files), '[]') IN ('', '[]')
+        AND COALESCE(TRIM(decisions), '[]') IN ('', '[]')
+        AND COALESCE(TRIM(open_questions), '[]') IN ('', '[]')
+        AND COALESCE(TRIM(one_liner), '') != ''
+      ORDER BY updated_at DESC
+    `).all() as any[]).map(row => this.rowToSessionDigest(row));
+  }
+
+  /** Store-wide digest health counts (DigestService.getDigestStats). */
+  getSessionDigestStats(): SessionDigestStats {
+    const row = this.getDb().prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN COALESCE(TRIM(key_topics), '[]') IN ('', '[]')
+                  AND COALESCE(TRIM(key_files), '[]') IN ('', '[]')
+                  AND COALESCE(TRIM(decisions), '[]') IN ('', '[]')
+                  AND COALESCE(TRIM(open_questions), '[]') IN ('', '[]')
+                  AND COALESCE(TRIM(one_liner), '') != ''
+                 THEN 1 ELSE 0 END) AS empty_structured,
+        SUM(CASE WHEN embedding_status = 'degraded' THEN 1 ELSE 0 END) AS gave_up,
+        SUM(CASE WHEN embedding_status = 'failed' THEN 1 ELSE 0 END) AS failed
+      FROM session_digests
+    `).get() as any;
+    return {
+      total: row?.total ?? 0,
+      emptyStructured: row?.empty_structured ?? 0,
+      gaveUp: row?.gave_up ?? 0,
+      failed: row?.failed ?? 0,
+    };
   }
 
   private rowToSessionDigest(row: any): SessionDigest {
@@ -1408,6 +1545,10 @@ export class DatabaseManager {
       digestVersion: row.digest_version ?? 1,
       messageCount: row.message_count ?? 0,
       updatedAt: row.updated_at ?? '',
+      validFrom: row.valid_from ?? null,
+      validTo: row.valid_to ?? null,
+      supersededBy: row.superseded_by ?? null,
+      accessCount: row.access_count ?? 0,
     };
   }
 
@@ -1419,6 +1560,165 @@ export class DatabaseManager {
 
   recallSessions(query: string, options: SessionRecallOptions = {}): SessionRecallHit[] {
     return recallSessions(this.getDb(), query, options);
+  }
+
+  // ==================== Memory v2: fork lineage + L0/L2 project layers ====================
+
+  /**
+   * Detect codex forks (rollout copies the parent's history, so two sessions
+   * share most message ids) and persist `forked_from` for sessions that have
+   * no lineage yet. Explicit lineage (kimi state.json forkedFrom, set at
+   * parse time) is never overwritten. Returns the number of edges written.
+   */
+  refreshForkLineage(): number {
+    const db = this.getDb();
+    const rows = db.prepare(`
+      SELECT id, session_id, platform, started_at
+      FROM work_sessions
+      WHERE platform = 'codex' AND forked_from IS NULL AND session_type = 'conversation'
+      ORDER BY started_at ASC
+    `).all() as Array<{ id: string; session_id: string; platform: string; started_at: number }>;
+    if (rows.length < 2) return 0;
+
+    const msgStmt = db.prepare('SELECT id FROM messages WHERE session_id = ?');
+    const candidates = rows.map(row => ({
+      id: row.id,
+      rawSessionId: row.session_id,
+      platform: row.platform,
+      startedAt: row.started_at,
+      messageIds: (msgStmt.all(row.id) as Array<{ id: string }>).map(message => message.id),
+    }));
+
+    const edges = detectForksByMessageOverlap(candidates);
+    if (edges.size === 0) return 0;
+    const update = db.prepare('UPDATE work_sessions SET forked_from = ? WHERE id = ? AND forked_from IS NULL');
+    let written = 0;
+    const apply = db.transaction(() => {
+      for (const [child, parent] of edges) {
+        written += update.run(parent, child).changes;
+      }
+    });
+    apply();
+    return written;
+  }
+
+  // ---- L0: project_state ----
+
+  upsertProjectState(state: ProjectState): void {
+    this.getDb().prepare(`
+      INSERT INTO project_state (
+        project_key, one_liner, active_files, open_questions, session_count, last_active, updated_at
+      ) VALUES (
+        @projectKey, @oneLiner, @activeFiles, @openQuestions, @sessionCount, @lastActive, @updatedAt
+      )
+      ON CONFLICT(project_key) DO UPDATE SET
+        one_liner = excluded.one_liner,
+        active_files = excluded.active_files,
+        open_questions = excluded.open_questions,
+        session_count = excluded.session_count,
+        last_active = excluded.last_active,
+        updated_at = excluded.updated_at
+    `).run({
+      projectKey: state.projectKey,
+      oneLiner: state.oneLiner,
+      activeFiles: JSON.stringify(state.activeFiles ?? []),
+      openQuestions: JSON.stringify(state.openQuestions ?? []),
+      sessionCount: state.sessionCount,
+      lastActive: state.lastActive,
+      updatedAt: state.updatedAt,
+    });
+  }
+
+  /** Rebuild every project's L0 card deterministically. Returns the count. */
+  rebuildProjectStates(now: Date = new Date()): number {
+    const db = this.getDb();
+    const keys = listProjectKeys(db);
+    const rebuild = db.transaction(() => {
+      for (const key of keys) this.upsertProjectState(buildProjectState(db, key, now));
+    });
+    rebuild();
+    return keys.length;
+  }
+
+  getProjectState(projectKey: string): ProjectState | null {
+    const row = this.getDb().prepare('SELECT * FROM project_state WHERE project_key = ?').get(projectKey) as any;
+    return row ? this.rowToProjectState(row) : null;
+  }
+
+  listProjectStates(): ProjectState[] {
+    return (this.getDb().prepare('SELECT * FROM project_state ORDER BY project_key').all() as any[])
+      .map(row => this.rowToProjectState(row));
+  }
+
+  private rowToProjectState(row: any): ProjectState {
+    const parse = (value: unknown): any[] => {
+      if (typeof value !== 'string' || !value) return [];
+      try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    };
+    return {
+      projectKey: row.project_key,
+      oneLiner: row.one_liner ?? '',
+      activeFiles: parse(row.active_files),
+      openQuestions: parse(row.open_questions).filter((item): item is string => typeof item === 'string'),
+      sessionCount: row.session_count ?? 0,
+      lastActive: row.last_active ?? '',
+      updatedAt: row.updated_at ?? '',
+    };
+  }
+
+  // ---- L2: project_briefs ----
+
+  getProjectBrief(projectKey: string): ProjectBrief | null {
+    const row = this.getDb().prepare('SELECT * FROM project_briefs WHERE project_key = ?').get(projectKey) as any;
+    if (!row) return null;
+    return {
+      projectKey: row.project_key,
+      contentMarkdown: row.content_markdown ?? '',
+      version: row.version ?? 0,
+      lastOps: row.last_ops ?? '[]',
+      updatedAt: row.updated_at ?? '',
+    };
+  }
+
+  upsertProjectBrief(brief: ProjectBrief): void {
+    this.getDb().prepare(`
+      INSERT INTO project_briefs (project_key, content_markdown, version, last_ops, updated_at)
+      VALUES (@projectKey, @contentMarkdown, @version, @lastOps, @updatedAt)
+      ON CONFLICT(project_key) DO UPDATE SET
+        content_markdown = excluded.content_markdown,
+        version = excluded.version,
+        last_ops = excluded.last_ops,
+        updated_at = excluded.updated_at
+    `).run({
+      projectKey: brief.projectKey,
+      contentMarkdown: brief.contentMarkdown,
+      version: brief.version,
+      lastOps: brief.lastOps,
+      updatedAt: brief.updatedAt,
+    });
+  }
+
+  // ---- L2 support: deterministic per-file timeline ----
+
+  getFileTimeline(query: FileTimelineQuery): FileTimelineEvent[] {
+    return getFileTimeline(this.getDb(), query);
+  }
+
+  /** L1 access tracking: MCP search bumps the digests it surfaced. */
+  bumpDigestAccessCount(sessionIds: string[]): void {
+    if (sessionIds.length === 0) return;
+    const stmt = this.getDb().prepare(
+      'UPDATE session_digests SET access_count = access_count + 1 WHERE session_id = ?',
+    );
+    const bump = this.getDb().transaction(() => {
+      for (const id of sessionIds) stmt.run(id);
+    });
+    bump();
   }
 
   // ==================== Stats ====================
@@ -1586,6 +1886,7 @@ export class DatabaseManager {
       agentMeta: r.agent_meta,
       claudeCodeVersion: r.claude_code_version,
       sessionType: r.session_type || 'conversation',
+      forkedFrom: r.forked_from ?? null,
       createdAt: r.created_at,
       updatedAt: r.updated_at,
     };

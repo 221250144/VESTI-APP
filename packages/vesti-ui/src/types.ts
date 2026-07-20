@@ -64,6 +64,8 @@ export interface RelatedConversation {
   title: string;
   platform: Platform;
   similarity: number;
+  /** A1: the recall hit surfaced through a subagent of this conversation. */
+  fromSubagent?: boolean;
 }
 
 export type ExploreMode = "agent" | "classic";
@@ -478,14 +480,42 @@ export type StorageApi = {
   runRoundtable?: (
     question: string,
     personaIds: RoundtablePersonaId[],
-    opts?: { lang?: "zh" | "en" }
+    opts?: {
+      lang?: "zh" | "en";
+      /** Fired after each seat finishes (in seat order) so the panel can show
+       * per-seat progress instead of one long spinner. */
+      onSeatComplete?: (turn: RoundtableSeatTurn) => void;
+    }
   ) => Promise<RoundtableResult>;
+  /** AI 深化 (Learn): one LLM pass over a learning domain with recall
+   * grounding (current mastery / blind spots / suggested path), archived into
+   * the Ask history like a roundtable run. Optional — the Learn card hides the
+   * AI-deepen affordance when the host doesn't implement it. */
+  runLearnDeepen?: (
+    domain: LearnDomain,
+    opts?: { lang?: "zh" | "en" }
+  ) => Promise<LearnDeepenResult>;
   getSummary?: (conversationId: number) => Promise<ChatSummaryData | null>;
   generateSummary?: (conversationId: number) => Promise<ChatSummaryData>;
+  /** AITI coverage: how many live conversations already have a (structured)
+   * summary, and which ones are still pending. Drives the 摘要覆盖率 header. */
+  getSummaryCoverage?: () => Promise<SummaryCoverage>;
+  /** True when an LLM is configured (demo proxy or BYOK key) so summary
+   * generation can run; false disables the batch button with a hint. */
+  getLlmConfigured?: () => Promise<boolean>;
   /** Bulk digest fetch for the library list/detail views (P1.5). */
   getConversationDigests?: () => Promise<ConversationDigest[]>;
   /** Desktop conversation tree for the source-tree nav (P2b). */
   getConversationTree?: () => Promise<ConversationTree | null>;
+  /** Memory v2: all L0 project state cards (desktop capture only). */
+  getProjectStates?: () => Promise<ProjectStateView[]>;
+  /** Memory v2: one project's L2 brief (null until generated). */
+  getProjectBrief?: (projectKey: string) => Promise<ProjectBriefView | null>;
+  /** Memory v2: deterministic per-file touch timeline. */
+  getFileTimeline?: (query: {
+    projectKey?: string;
+    filePath: string;
+  }) => Promise<FileTimelineEventView[]>;
   /** Soft-trash conversations in bulk (P2b organizer). Returns the number
    * actually updated. Soft trash keeps the record (and its capture lineage)
    * so capture re-syncs reconcile cleanly. */
@@ -597,6 +627,16 @@ export type StorageApi = {
     scope?: "all" | "recent";
     limit?: number;
   }) => Promise<PromptExtractionResult>;
+  /**
+   * Interactive scan of the whole conversation library (agent CLI sessions +
+   * browser conversations) for reusable prompt patterns. Unlike
+   * extractPromptsFromLibrary (which archives silently), this returns reviewable
+   * candidates; the caller decides which ones to adopt into the prompts table.
+   */
+  scanPromptLibrary?: (options?: {
+    sessionLimit?: number;
+    onProgress?: (progress: PromptScanProgress) => void;
+  }) => Promise<PromptScanResult>;
   completePrompt?: (payload: {
     draft: string;
     platform?: Platform;
@@ -672,6 +712,51 @@ export interface PromptExtractionResult {
   usedLlm: boolean;
 }
 
+// ---- Conversation-library prompt scan (interactive review flow) ------------
+
+/** A conversation a scanned prompt candidate was seen in. */
+export interface PromptScanSourceRef {
+  /** 'agent' = local CLI session; 'browser' = extension-captured web chat. */
+  origin: "agent" | "browser";
+  conversationId: string;
+  title: string;
+}
+
+/** One clustered prompt pattern surfaced by the library scan. */
+export interface PromptScanCandidate {
+  /** Stable cluster key (template identity), safe as a React key. */
+  key: string;
+  title: string;
+  body: string;
+  /** Total occurrences across every scanned conversation. */
+  count: number;
+  /** Distinct conversations the pattern appears in. */
+  sourceCount: number;
+  sources: PromptScanSourceRef[];
+  score: number;
+  tags: string[];
+  category: string | null;
+  /** True when an identical body already lives in the prompts table. */
+  alreadyInLibrary: boolean;
+}
+
+export interface PromptScanProgress {
+  done: number;
+  total: number;
+}
+
+export interface PromptScanResult {
+  candidates: PromptScanCandidate[];
+  /** Conversations actually scanned (agent sessions + browser chats). */
+  scannedConversations: number;
+  /** User inputs considered before filtering. */
+  scannedInputs: number;
+  /** True when an LLM refined the candidate titles. */
+  usedLlm: boolean;
+  /** True when the scan hit a cap and older conversations were skipped. */
+  truncated: boolean;
+}
+
 export interface PromptCompletionResult {
   completion: string;
   usedLlm: boolean;
@@ -719,26 +804,80 @@ export interface ConversationDigest {
   keyTopics: string[];
   keyFiles: string[];
   decisions: string[];
+  /** L0 project linkage (memory v2) — lets the knowledge graph group sessions
+   * by project. Absent for conversations outside any project registry. */
+  projectKey?: string;
+  projectLabel?: string;
 }
 
 // ---- P4a AI relay (handoff packs) -----------------------------------------
 // Mirror of the desktop db relay types (src/ui/db/types.ts). The pack payload
 // keeps the relay agent's snake_case JSON contract verbatim so a stored pack
-// round-trips losslessly.
+// round-trips losslessly. Schema v2 fields are additive; stored v1 packs lack
+// them and are normalized at render time (normalizeRelayPackPayload).
 export interface RelayPackKeyFile {
   path: string;
   why: string;
   last_state: string;
 }
 
+export interface RelayPackGitState {
+  branch?: string;
+  dirty_files: string[];
+  last_commits: string[];
+}
+
+export interface RelayPackFailedPath {
+  approach: string;
+  why_failed: string;
+}
+
+export interface RelayPackVerification {
+  commands: string[];
+  last_results: string[];
+}
+
+export interface RelayPackConfidence {
+  /** 0-1 overall confidence. */
+  overall: number;
+  low_areas: string[];
+}
+
+/**
+ * Deterministically extracted key-file anchor (P4a quality): aggregated from
+ * the captured tool_executions of the source sessions and attached to the
+ * pack after the relay agent answers. The panel badges every key_files row
+ * against this list — anchored rows link back to their source conversations,
+ * the rest render as to-be-verified.
+ */
+export interface RelayPackExtractedFile {
+  path: string;
+  touches: number;
+  /** Epoch ms of the most recent captured touch. */
+  lastTouchedAt: number;
+  /** Conversation ids (subset of RelayPack.conversationIds) that touched it. */
+  conversationIds: number[];
+}
+
 export interface RelayPackPayload {
   title: string;
   goal: string;
+  /** v1 free-text state; v2 packs carry completed/in_progress instead. */
   current_state: string;
+  completed: string[];
+  in_progress: string[];
+  git_state: RelayPackGitState;
   key_decisions: string[];
   key_files: RelayPackKeyFile[];
+  failed_paths: RelayPackFailedPath[];
   open_issues: string[];
+  verification: RelayPackVerification;
   next_steps: string[];
+  /** Absent on v1 packs and when the model gave no usable confidence. */
+  confidence?: RelayPackConfidence;
+  /** Program-extracted file anchors (absent on packs generated before the
+   * deterministic extraction existed, or when no tool data was captured). */
+  extracted_key_files?: RelayPackExtractedFile[];
   suggested_prompt: string;
 }
 
@@ -807,6 +946,17 @@ export type DepositScope =
   | { kind: "timerange"; start: number; end: number }
   | { kind: "selection"; conversationIds: number[] };
 
+/** mem0-style deposit maintain op (mirror of src/shared/depositMaintain.ts). */
+export type DepositMaintainOpName = "ADD" | "UPDATE" | "DELETE" | "NOOP";
+
+export interface DepositMaintainOp {
+  op: DepositMaintainOpName;
+  section: string;
+  old_text?: string;
+  new_text?: string;
+  reason: string;
+}
+
 export interface Deposit {
   id: number;
   createdAt: number;
@@ -818,6 +968,9 @@ export interface Deposit {
   version: number;
   prevId: number | null;
   customInstruction: string | null;
+  /** Maintain ops recorded when this version was merged from a fresh
+   * distillation; null/undefined when stored without a maintain pass. */
+  lastOps?: DepositMaintainOp[] | null;
 }
 
 export interface CreateDepositInput {
@@ -828,6 +981,8 @@ export interface CreateDepositInput {
   version?: number;
   prevId?: number | null;
   customInstruction?: string | null;
+  /** mem0-style maintain ops behind this version (null without a maintain pass). */
+  lastOps?: DepositMaintainOp[] | null;
 }
 
 /** Distill generation request: resolve the scope, run the distill agent and
@@ -893,6 +1048,58 @@ export interface ConversationTreeSession {
   keyTopics: string[];
   keyFiles: string[];
   decisions: string[];
+  // A1 subagent folding (optional: absent on renderer-built browser nodes)
+  role?: "main" | "subagent";
+  parentSessionId?: string;
+  orphan?: boolean;
+  childCount?: number;
+  descendantMessageCount?: number;
+  children?: ConversationTreeSession[];
+  // Memory v2 fork lineage (optional, additive)
+  forkedFrom?: string | null;
+  uniqueMessageCount?: number;
+  duplicatedMessageCount?: number;
+}
+
+// ---- Memory v2: L0 project state + L2 project briefs ------------------------
+// Field-for-field mirrors of src/shared/contracts.ts. Optional in StorageApi:
+// only the desktop app with a capture pipeline implements them.
+
+export interface ProjectActiveFileView {
+  path: string;
+  touches: number;
+  lastTouched: string;
+}
+
+/** L0: deterministic per-project "current state card". */
+export interface ProjectStateView {
+  projectKey: string;
+  oneLiner: string;
+  activeFiles: ProjectActiveFileView[];
+  openQuestions: string[];
+  sessionCount: number;
+  lastActive: string;
+  updatedAt: string;
+}
+
+/** L2: LLM-maintained cross-session project brief. */
+export interface ProjectBriefView {
+  projectKey: string;
+  contentMarkdown: string;
+  version: number;
+  /** JSON array of the last deposit-maintain ops (for MaintainOpsBadge). */
+  lastOps: string;
+  updatedAt: string;
+}
+
+export interface FileTimelineEventView {
+  sessionId: string;
+  sessionTitle: string;
+  platform: string;
+  toolName: string;
+  toolCategory: string;
+  isError: boolean;
+  timestamp: number;
 }
 
 export interface ConversationTreeProject {
@@ -1131,6 +1338,11 @@ export interface ExploreLabels {
   };
   // Helper returns / summaries
   inRange: string;
+  /** A1: badge on recall sources that surfaced through a subagent session. */
+  fromSubagent?: string;
+  /** Empty-KB guidance in the ask starter deck (no conversations to recall). */
+  libraryEmptyTitle?: string;
+  libraryEmptyHint?: string;
   unknown: string;
   unavailable: string;
   noToolCalls: string;
@@ -1596,6 +1808,12 @@ export interface DashboardLabels {
     gapInsightTemplate: string;
     conceptMentionedIn: string;
     relatedConversations: string;
+    groupByLabel: string;
+    groupByPlatform: string;
+    groupByTopic: string;
+    groupByProject: string;
+    groupOther: string;
+    clusterConversationCount: string;
   };
   prompts: {
     title: string;
@@ -1683,6 +1901,26 @@ export interface DashboardLabels {
     selectedCount: string;
     deleteSelected: string;
     clearSelection: string;
+    // Conversation-library scan (interactive review panel)
+    scanLibrary: string;
+    scanning: string;
+    scanTooltip: string;
+    scanProgress: string;
+    scanResultsTitle: string;
+    scanSummary: string;
+    scanEmpty: string;
+    scanFailed: string;
+    scanPrivacy: string;
+    scanTruncated: string;
+    scanUsedCount: string;
+    scanSourceCount: string;
+    scanAdopt: string;
+    scanAdopted: string;
+    scanIgnore: string;
+    scanInLibrary: string;
+    scanOriginAgent: string;
+    scanOriginBrowser: string;
+    scanClose: string;
   };
   /** P4b deposits area labels (loose record, same idiom as the library
    * relay/organize groups: components carry English fallbacks inline). */
@@ -1729,33 +1967,107 @@ export interface DashboardLabels {
     imageryFaint: string;
     /** P5: caption above the LLM persona footnote. */
     personaNoteLabel: string;
+    /** P5: eyebrow heading of the four-axis radar (思维图) section. */
+    mindMapTitle: string;
+    /** P5: caption beside the repo QR in the card footer / export image. */
+    repoQrCaption: string;
     /** P5: lead-in for the per-axis evidence chips. */
     evidenceBecause: string;
     /** P5: evidence chip fallback text, "{id}" = conversation id. */
     evidenceConversation: string;
     /** P5: export-share-image button. */
     exportCard: string;
+    /** 摘要覆盖率 header: "{x}" summarized / "{y}" total / "{z}" structured. */
+    coverageSummary: string;
+    /** Explanation under the coverage line when structured < 5; "{n}" = gap. */
+    coverageNeedMore: string;
+    /** Coverage line shown when there are no conversations at all. */
+    coverageEmpty: string;
+    /** 立即生成摘要 batch button. */
+    generateSummaries: string;
+    /** Batch progress: "{done}" finished of "{total}". */
+    generatingSummaries: string;
+    /** Cancel an in-flight batch run. */
+    cancelGeneration: string;
+    /** Batch result: "{done}" generated, "{failed}" failed. */
+    summariesResult: string;
+    /** Disabled-button hint when no LLM is configured. */
+    llmMissing: string;
+    /** Pending queue is empty — everything already has a structured summary. */
+    allSummarized: string;
   };
   learn: {
     modeLearn: string;
     title: string;
     subtitle: string;
+    /** One-sentence "这是什么": what the map is and where it comes from. */
+    intro: string;
+    /** Data provenance line: "{n}" analyzed summaries, "{m}" topics covered. */
+    sourceLine: string;
     insufficient: string;
     sample: string;
     domainsTitle: string;
     uncategorized: string;
     domainConversations: string;
+    /** Caption above a domain's representative-conversation jump chips. */
+    representativesTitle: string;
+    /** "继续深入": jump to Ask with a prefilled follow-up on this domain. */
+    deepen: string;
+    /** Prefilled Ask question template; "{topic}" = domain name. */
+    deepenPrompt: string;
     glossaryTitle: string;
     openLoopsTitle: string;
     openLoopsEmpty: string;
+    /** Weak-data hint shown when the map is available but built from few
+     * summaries — points at generating more (same guidance as AITI). */
+    weakHint: string;
+    /** Button inside the weak hint / empty state: jump to AITI to generate
+     * more summaries. */
+    weakAction: string;
+    /** Shown while the host is still computing the profile. */
+    loading: string;
+    /** "AI 深化": run an LLM deep-dive on one domain (recall-grounded). */
+    deepenAi: string;
+    /** Progress line while the deep-dive runs; "{topic}" = domain name. */
+    deepenAiRunning: string;
+    /** Heading above the deep-dive result inside the domain card. */
+    deepenAiTitle: string;
+    /** Deep-dive sections: what's mastered / blind spots / suggested path. */
+    mastered: string;
+    blindSpots: string;
+    learningPath: string;
+    /** Deep-dive failure line (followed by the error message). */
+    deepenAiFailed: string;
+    /** Disabled-state guidance when no LLM is configured (deep-dive needs one). */
+    llmMissing: string;
+    /** Grounding note when recall context fed the deep-dive: "{n}" conversations. */
+    groundedHint: string;
+    /** Note that the deep-dive was archived into the Ask history. */
+    savedHint: string;
   };
   roundtable: {
     title: string;
     subtitle: string;
+    /** 诚实降级: kept for hosts that still want a static placeholder; the
+     * implemented panel no longer renders these. */
+    comingSoonTitle: string;
+    comingSoonBody: string;
     questionPlaceholder: string;
+    /** One-sentence "这是什么": what the panel is and how it works (info bar). */
+    intro: string;
+    /** Caption above the learning-domain topic suggestion chips. */
+    topicsLabel: string;
+    /** Question-box template when a topic chip is picked; "{topic}" = domain name. */
+    topicPrompt: string;
     personasLabel: string;
     run: string;
+    /** Run-button label once a result is on screen ("重新讨论"). */
+    rerun: string;
     running: string;
+    /** Per-seat progress while deliberating: "{done}" of "{total}" seats. */
+    seatsProgress: string;
+    /** Shown while the moderator synthesis call is in flight. */
+    synthesisRunning: string;
     latencyHint: string;
     needQuestion: string;
     seatsTitle: string;
@@ -1765,11 +2077,24 @@ export interface DashboardLabels {
     recommendation: string;
     openQuestions: string;
     empty: string;
+    /** Disabled-state guidance when no LLM is configured. */
+    llmMissing: string;
+    /** A seat whose turn failed (inline in its card). */
+    seatFailed: string;
+    /** Note that the run was archived into the Ask history. */
+    savedHint: string;
+    /** Grounding note when recall context fed the panel: "{n}" conversations. */
+    groundedHint: string;
     personaSkeptic: string;
     personaOptimist: string;
     personaPragmatist: string;
     personaDomainExpert: string;
     personaDevilsAdvocate: string;
+    /** "继续深入": jump to Ask with a prefilled follow-up on a seat's viewpoint. */
+    deepen: string;
+    /** Prefilled Ask template; "{question}" = topic, "{persona}" = seat name,
+     * "{excerpt}" = a short excerpt of that seat's viewpoint. */
+    deepenPrompt: string;
   };
 }
 
@@ -1779,6 +2104,10 @@ export interface PlazaPrompt {
   title: string;
   body: string;
   category: string;
+  /** Optional one-liner: what the prompt is for / when to use it. */
+  description?: string;
+  /** Optional keywords shown as small chips. */
+  tags?: string[];
   source: string;
   sourceUrl?: string;
   featured?: boolean;
@@ -1816,6 +2145,28 @@ export interface AitiProfile {
   obsessions: AitiObsession[];
 }
 
+/** AITI 摘要覆盖率 — computed host-side from Dexie conversations + summaries
+ * (see lib/summaryCoverage.ts for the pure computation). */
+export interface SummaryCoverage {
+  /** live conversations (not archived / trashed) */
+  totalConversations: number;
+  /** live conversations with at least one summary row */
+  summarizedCount: number;
+  /** live conversations whose latest summary is structured (feeds AITI) */
+  structuredCount: number;
+  /** live, summarizable conversations still lacking a structured summary,
+   * newest first */
+  pendingConversationIds: number[];
+}
+
+/** Progress of one 立即生成摘要 batch run (concurrency 1, capped). */
+export interface SummaryBatchState {
+  status: "running" | "done";
+  total: number;
+  done: number;
+  failed: number;
+}
+
 /**
  * AITI 思维意象 (P5) — flat, already-localized mirror of the host's imagery
  * table entry (src/ui/aiti/imagery.ts). The host resolves axes → imagery and
@@ -1843,6 +2194,9 @@ export interface LearnDomain {
   deep: number;
   moderate: number;
   superficial: number;
+  /** Up to 3 conversations that best represent this domain (deepest first,
+   * then most recent) — the evidence-chain jump targets. */
+  representatives: Array<{ conversationId: number; title: string }>;
 }
 export interface LearnGlossaryEntry {
   term: string;
@@ -1859,6 +2213,27 @@ export interface LearnProfile {
   domains: LearnDomain[];
   glossary: LearnGlossaryEntry[];
   openLoops: LearnOpenLoop[];
+}
+
+/** AI 深化 (Learn) — an LLM deep-dive into one learning domain, grounded by
+ * cross-session recall and archived into the Ask history. */
+export interface LearnDeepenAnalysis {
+  /** What the learner already has a grip on. */
+  mastered: string[];
+  /** Gaps and key questions not yet touched. */
+  blindSpots: string[];
+  /** Suggested next steps, in order. */
+  path: string[];
+}
+export interface LearnDeepenResult {
+  domain: string;
+  lang: "zh" | "en";
+  grounded: boolean;
+  /** null when the model output wasn't usable JSON — `raw` still carries it. */
+  analysis: LearnDeepenAnalysis | null;
+  raw: string;
+  sources: RelatedConversation[];
+  durationMs: number;
 }
 
 // ---- AI 圆桌 (Roundtable) ----

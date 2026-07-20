@@ -2,13 +2,15 @@
 // scope → conversation-id resolution. Node environment, no Dexie involved.
 
 import { describe, expect, it } from "vitest";
-import type { ConversationTree } from "../../shared/contracts";
+import type { AgentRunRequest, ConversationTree } from "../../shared/contracts";
 import type { Deposit, DepositScope } from "../db/types";
 import {
   collectVersionChain,
+  distillAndMergeDeposit,
   findDepositHeads,
   nextDepositVersion,
   resolveScopeConversationIds,
+  type DepositAgentRunner,
   type ScopeResolutionData,
 } from "./deposits";
 
@@ -175,5 +177,86 @@ describe("resolveScopeConversationIds", () => {
         { ...data, tree: null },
       ),
     ).toEqual([]);
+  });
+});
+
+describe("distillAndMergeDeposit", () => {
+  /** Records every agent request and answers per kind from the given map. */
+  function mockRunner(
+    answers: Record<string, string | Error>
+  ): DepositAgentRunner & { requests: AgentRunRequest[] } {
+    const requests: AgentRunRequest[] = [];
+    return {
+      requests,
+      run: async (request: AgentRunRequest) => {
+        requests.push(request);
+        const answer = answers[request.kind];
+        if (answer instanceof Error) throw answer;
+        if (typeof answer !== "string") throw new Error(`unexpected kind ${request.kind}`);
+        return { content: answer };
+      },
+    };
+  }
+
+  const baseParams = {
+    sessionId: "distill:test",
+    template: "project_state",
+    customInstruction: undefined,
+    transcript: "TRANSCRIPT",
+  };
+
+  it("stores the raw distillation (no maintain run) for a fresh v1", async () => {
+    const runner = mockRunner({ distill: "新鲜内容" });
+    const result = await distillAndMergeDeposit(runner, { ...baseParams, previousContent: null });
+    expect(result).toEqual({ contentMarkdown: "新鲜内容", ops: null });
+    expect(runner.requests.map((request) => request.kind)).toEqual(["distill"]);
+    expect(runner.requests[0].transcriptOverride).toBe("TRANSCRIPT");
+    expect(runner.requests[0].persist).toBe(false);
+  });
+
+  it("merges into the previous version and returns the maintain ops", async () => {
+    const maintainPayload = JSON.stringify({
+      ops: [
+        { op: "UPDATE", section: "架构", old_text: "旧表述", new_text: "新表述", reason: "架构已调整" },
+        { op: "ADD", section: "风险", new_text: "新增风险条目", reason: "新会话提到" },
+      ],
+      merged_markdown: "# 合并后的文档",
+    });
+    const runner = mockRunner({ distill: "新提炼内容", "deposit-maintain": maintainPayload });
+    const result = await distillAndMergeDeposit(runner, {
+      ...baseParams,
+      previousContent: "# 旧版本文档",
+    });
+    expect(result.contentMarkdown).toBe("# 合并后的文档");
+    expect(result.ops).toHaveLength(2);
+    expect(result.ops?.[0].op).toBe("UPDATE");
+    // Two runs in order: distill first, then maintain with both documents.
+    expect(runner.requests.map((request) => request.kind)).toEqual(["distill", "deposit-maintain"]);
+    const maintainRequest = runner.requests[1];
+    expect(maintainRequest.transcriptOverride).toContain("【旧版本沉淀内容】");
+    expect(maintainRequest.transcriptOverride).toContain("# 旧版本文档");
+    expect(maintainRequest.transcriptOverride).toContain("【新提炼内容】");
+    expect(maintainRequest.transcriptOverride).toContain("新提炼内容");
+  });
+
+  it("falls back to the raw distillation when the maintain run fails", async () => {
+    // LLM not configured / network error on the maintain call.
+    const failing = mockRunner({
+      distill: "新提炼内容",
+      "deposit-maintain": new Error("LLM 未配置"),
+    });
+    const fallback = await distillAndMergeDeposit(failing, {
+      ...baseParams,
+      previousContent: "# 旧版本文档",
+    });
+    expect(fallback).toEqual({ contentMarkdown: "新提炼内容", ops: null });
+
+    // Bad maintain output (fails parse) degrades the same way.
+    const badOutput = mockRunner({ distill: "新提炼内容", "deposit-maintain": "不是 JSON" });
+    const degraded = await distillAndMergeDeposit(badOutput, {
+      ...baseParams,
+      previousContent: "# 旧版本文档",
+    });
+    expect(degraded).toEqual({ contentMarkdown: "新提炼内容", ops: null });
   });
 });

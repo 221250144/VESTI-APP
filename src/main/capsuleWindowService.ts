@@ -36,6 +36,8 @@ function clamp(value: number, min: number, max: number): number {
 export class CapsuleWindowService {
   private window: BrowserWindow | null = null;
   private expanded = false;
+  /** Temporary expanded-panel height override (dock flows); null = default. */
+  private panelHeight: number | null = null;
   private dragOffset: { x: number; y: number } | null = null;
 
   constructor(private host: CapsuleHost) {}
@@ -126,6 +128,9 @@ export class CapsuleWindowService {
   async setExpanded(expanded: boolean): Promise<void> {
     if (!this.window || this.expanded === expanded) return;
     this.expanded = expanded;
+    // Re-expanding always starts from the default panel height; dock flows
+    // grow it again via setPanelHeight as needed.
+    this.panelHeight = null;
     const bounds = this.window.getBounds();
     const area = screen.getDisplayMatching(bounds).workArea;
     let next: Electron.Rectangle;
@@ -161,6 +166,31 @@ export class CapsuleWindowService {
     this.window.setBounds(next);
     this.window.showInactive();
     this.pushState();
+  }
+
+  /**
+   * Temporarily grow/shrink the expanded panel (dock flows need more room
+   * than the home screen). Instant hide/setBounds/show like setExpanded —
+   * animated resizes leave ghost frames on transparent Windows windows.
+   * Pass null to restore the default panel height.
+   */
+  async setPanelHeight(height: number | null): Promise<void> {
+    if (!this.window || this.window.isDestroyed() || !this.expanded) return;
+    const next = typeof height === 'number' && Number.isFinite(height) ? Math.round(height) : null;
+    if (this.panelHeight === next) return;
+    this.panelHeight = next;
+    const bounds = this.window.getBounds();
+    const area = screen.getDisplayMatching(bounds).workArea;
+    const maxHeight = Math.max(PANEL_HEIGHT, area.height - EDGE_MARGIN * 2);
+    const nextHeight = clamp(this.panelHeight ?? PANEL_HEIGHT, PANEL_HEIGHT, maxHeight);
+    const y = clamp(
+      bounds.y,
+      area.y + EDGE_MARGIN,
+      Math.max(area.y + EDGE_MARGIN, area.y + area.height - nextHeight - EDGE_MARGIN),
+    );
+    this.window.hide();
+    this.window.setBounds({ x: bounds.x, y, width: PANEL_WIDTH, height: nextHeight });
+    this.window.showInactive();
   }
 
   handleDragStart(screenX: number, screenY: number): void {

@@ -1,4 +1,5 @@
 import type { DistillTemplate } from '../shared/contracts';
+import { parseDepositMaintainPayload } from '../shared/depositMaintain';
 import type { RuntimeAgentSettings } from './settingsService';
 
 export interface AgentPromptInput {
@@ -57,8 +58,24 @@ registerAgentKind('summary', {
         content: `你是 Vesti 的会话总结助手。只能依据提供的会话，不补造事实。${language}${custom}`,
       },
       {
+        // Strict ConversationSummaryV2 JSON (the shape the summaries table
+        // already stores): the renderer validates + normalizes it
+        // (src/ui/aiti/parseSummary.ts) and falls back to plain text when
+        // the model answers prose instead.
         role: 'user',
-        content: `请总结下面的会话，包含：主题、关键结论、已做决定、未解决问题、建议的下一步。没有内容的栏目请写“无”。\n\n${transcript}`,
+        content: `请总结下面的会话，严格只输出一个 JSON 对象（不要 Markdown 代码块，不要任何额外文字），结构：
+{
+  "core_question": "一句话概括会话的核心问题",
+  "thinking_journey": [{"step": 1, "speaker": "User", "assertion": "每一步的关键推进", "real_world_anchor": "对应的现实依据，没有则为 null"}],
+  "key_insights": [{"term": "关键概念或结论", "definition": "一句话解释"}],
+  "unresolved_threads": ["尚未解决的问题"],
+  "meta_observations": {"thinking_style": "对思维风格的一句话观察", "emotional_tone": "对情绪基调的一句话观察", "depth_level": "superficial 或 moderate 或 deep"},
+  "actionable_next_steps": ["建议的下一步"]
+}
+要求：speaker 只能是 "User" 或 "AI"；depth_level 只能是 "superficial"、"moderate"、"deep" 之一；thinking_journey 最多 10 步；key_insights 最多 8 条；没有内容的字段给空数组。
+
+会话内容：
+${transcript}`,
       },
     ];
   },
@@ -136,6 +153,9 @@ registerAgentKind('digest', {
         content: [
           '请为下面的会话生成索引摘要，内容字段使用设置中指定的输出语言，输出一个 JSON 对象，字段如下：',
           '{"one_liner": "一句话概括会话主题（50 字以内）", "key_topics": ["关键主题，至多 6 个"], "key_files": ["涉及的关键文件路径，至多 6 个"], "decisions": ["已做出的决定，至多 6 条"], "open_questions": ["未解决的问题，至多 6 条"]}',
+          '硬性规则：',
+          '- one_liner、key_topics 和 decisions 中涉及具体数值（版本号、配置值、端口号、日期、数量、金额、时长、阈值等）时，必须原样保留数值与单位，不得概括化。反例（禁止）：把「超时时间定为 30s」写成「调整了超时参数」；把「升级到 v2.5.0」写成「升级了版本」；把「预算 1500 元」写成「讨论了预算」。正确写法：「超时时间定为 30s」「升级到 v2.5.0」「预算定为 1500 元」。',
+          '- key_files 保留完整文件路径，不要只写目录名或框架名。',
           '没有内容的字段输出空数组。只输出 JSON 本身。',
           '',
           transcript,
@@ -200,6 +220,10 @@ export function parseClassifyPayload(raw: string): ClassifyAssignment[] {
  * conversations into a structured handoff pack that can seed a fresh session
  * on any AI. The model answers with strict JSON only; parse() validates and
  * normalizes the shape so downstream persistence never sees malformed output.
+ *
+ * Schema v2 adds completed/in_progress/git_state/failed_paths/verification/
+ * confidence; parse() is backward compatible — v1 output (current_state only)
+ * still parses, missing v2 fields get empty defaults and never throw.
  */
 export interface RelayPackKeyFile {
   path: string;
@@ -207,19 +231,82 @@ export interface RelayPackKeyFile {
   last_state: string;
 }
 
+export interface RelayPackGitState {
+  branch?: string;
+  dirty_files: string[];
+  last_commits: string[];
+}
+
+export interface RelayPackFailedPath {
+  approach: string;
+  why_failed: string;
+}
+
+export interface RelayPackVerification {
+  commands: string[];
+  last_results: string[];
+}
+
+export interface RelayPackConfidence {
+  /** 0-1 overall confidence. */
+  overall: number;
+  low_areas: string[];
+}
+
 export interface RelayPackPayload {
   title: string;
   goal: string;
+  /** v1 free-text state; v2 packs carry completed/in_progress instead and
+   * leave this empty (''). */
   current_state: string;
+  completed: string[];
+  in_progress: string[];
+  git_state: RelayPackGitState;
   key_decisions: string[];
   key_files: RelayPackKeyFile[];
+  failed_paths: RelayPackFailedPath[];
   open_issues: string[];
+  verification: RelayPackVerification;
   next_steps: string[];
+  /** Absent when the model gave no usable confidence (always absent on v1). */
+  confidence?: RelayPackConfidence;
+  /** Deterministic file anchors (P4a quality): never produced by the model —
+   * the desktop pipeline attaches them post-parse from captured tool
+   * executions so the panel can badge key_files rows as anchored. */
+  extracted_key_files?: Array<{
+    path: string;
+    touches: number;
+    lastTouchedAt: number;
+    conversationIds: number[];
+  }>;
   suggested_prompt: string;
 }
 
 /** The suggested prompt must stay paste-ready; hard-cap it in parse. */
 export const RELAY_SUGGESTED_PROMPT_MAX_CHARS = 800;
+
+/**
+ * Handoff framing: every suggested prompt must open with this fixed sentence
+ * so the receiving AI treats the pack as another AI's summary — build on it,
+ * don't redo it, and re-check the evidence at the source anchors before
+ * trusting its conclusions. Pinned verbatim by the prompt template (Chinese
+ * output → ZH sentence, English output → EN sentence).
+ */
+export const RELAY_HANDOFF_PREFIX_ZH =
+  '【交接说明】以下内容来自另一个 AI 对先前工作的摘要：请在其已有成果的基础上继续，避免重复劳动；采信其中的结论之前，先回到对应的原文锚点复核证据。';
+export const RELAY_HANDOFF_PREFIX_EN =
+  '[Handoff] The following is another AI\'s summary of prior work: build on what is already done instead of redoing it, and before trusting any conclusion in it, go back to the referenced source anchors and re-check the evidence.';
+
+/**
+ * Verify-first handoff rule: every suggested prompt must end with this fixed
+ * sentence so the receiving AI re-checks the last verification result before
+ * trusting the pack. The prompt template pins the sentence verbatim (Chinese
+ * output → ZH rule, English output → EN rule).
+ */
+export const RELAY_HANDOFF_RULE_ZH =
+  '⚠️ 接手规则：在开始下一步之前，先重新验证上面「验证」部分的最后一步结果，确认无误后再信任并继续。';
+export const RELAY_HANDOFF_RULE_EN =
+  '⚠️ Handoff rule: before starting the next step, first re-verify the last result in the "Verification" section above; trust and continue only after it checks out.';
 
 function asTrimmedString(value: unknown, maxChars: number): string {
   return typeof value === 'string' ? value.trim().slice(0, maxChars) : '';
@@ -243,6 +330,49 @@ function asKeyFileList(value: unknown, maxItems: number): RelayPackKeyFile[] {
   return files;
 }
 
+function asGitState(value: unknown): RelayPackGitState {
+  const entry = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+  const branch = asTrimmedString(entry.branch, 200);
+  return {
+    ...(branch ? { branch } : {}),
+    dirty_files: asStringList(entry.dirty_files, 20),
+    last_commits: asStringList(entry.last_commits, 8),
+  };
+}
+
+function asFailedPathList(value: unknown, maxItems: number): RelayPackFailedPath[] {
+  if (!Array.isArray(value)) return [];
+  const paths: RelayPackFailedPath[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue;
+    const entry = item as Record<string, unknown>;
+    const approach = asTrimmedString(entry.approach, 400);
+    if (!approach) continue;
+    paths.push({ approach, why_failed: asTrimmedString(entry.why_failed, 400) });
+    if (paths.length >= maxItems) break;
+  }
+  return paths;
+}
+
+function asVerification(value: unknown): RelayPackVerification {
+  const entry = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+  return {
+    commands: asStringList(entry.commands, 12),
+    last_results: asStringList(entry.last_results, 12),
+  };
+}
+
+/** Confidence stays absent unless the model gave a usable 0-1 number. */
+function asConfidence(value: unknown): RelayPackConfidence | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const entry = value as Record<string, unknown>;
+  if (typeof entry.overall !== 'number' || !Number.isFinite(entry.overall)) return undefined;
+  return {
+    overall: Math.min(1, Math.max(0, entry.overall)),
+    low_areas: asStringList(entry.low_areas, 8),
+  };
+}
+
 export function parseRelayPayload(raw: string): RelayPackPayload {
   // Tolerate Markdown code fences around the JSON object.
   const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
@@ -254,25 +384,63 @@ export function parseRelayPayload(raw: string): RelayPackPayload {
   if (!title) throw new Error('relay 输出缺少 title');
   const goal = asTrimmedString(parsed.goal, 2_000);
   if (!goal) throw new Error('relay 输出缺少 goal');
+  // v1 field: v2 output leaves it out; v1 output keeps it. Never required.
   const currentState = asTrimmedString(parsed.current_state, 4_000);
-  if (!currentState) throw new Error('relay 输出缺少 current_state');
   const suggestedPrompt = asTrimmedString(parsed.suggested_prompt, RELAY_SUGGESTED_PROMPT_MAX_CHARS);
   if (!suggestedPrompt) throw new Error('relay 输出缺少 suggested_prompt');
+  const confidence = asConfidence(parsed.confidence);
   return {
     title,
     goal,
     current_state: currentState,
+    completed: asStringList(parsed.completed, 12),
+    in_progress: asStringList(parsed.in_progress, 12),
+    git_state: asGitState(parsed.git_state),
     key_decisions: asStringList(parsed.key_decisions, 12),
     key_files: asKeyFileList(parsed.key_files, 12),
+    failed_paths: asFailedPathList(parsed.failed_paths, 8),
     open_issues: asStringList(parsed.open_issues, 12),
+    verification: asVerification(parsed.verification),
     next_steps: asStringList(parsed.next_steps, 12),
+    ...(confidence ? { confidence } : {}),
     suggested_prompt: suggestedPrompt,
   };
 }
 
 registerAgentKind('relay', {
   buildPrompt({ transcript, preferences }) {
-    const { language } = promptAffixes(preferences);
+    const english = preferences.outputLanguage === 'en-US';
+    const prefix = english ? RELAY_HANDOFF_PREFIX_EN : RELAY_HANDOFF_PREFIX_ZH;
+    const rule = english ? RELAY_HANDOFF_RULE_EN : RELAY_HANDOFF_RULE_ZH;
+    const language = english
+      ? 'Write the whole pack in clear, concise English.'
+      : '使用简洁的中文。';
+    const schema = english
+      ? '{"title": "pack title (<= 12 words)", "goal": "what this work aims to achieve", "completed": ["what is already done, <= 8 items"], "in_progress": ["what is underway and where it stopped, <= 8 items"], "git_state": {"branch": "branch name, omit if unknown", "dirty_files": ["uncommitted files"], "last_commits": ["recent commit summaries"]}, "key_decisions": ["key decisions with rationale, <= 8"], "key_files": [{"path": "key file path", "why": "why it matters", "last_state": "its current change state"}, "<= 8"], "failed_paths": [{"approach": "an approach that was tried and abandoned", "why_failed": "why it failed"}, "<= 6"], "open_issues": ["unresolved problems, <= 8"], "verification": {"commands": ["commands used to verify the work (build/test/lint)"], "last_results": ["the latest result of each verification step"]}, "next_steps": ["suggested next steps by priority, <= 8"], "confidence": {"overall": 0.0, "low_areas": ["areas you are least sure about"]}, "suggested_prompt": "a self-contained handoff prompt, paste-ready at the top of a fresh AI session: background, goal, state, key files and todos, <= 800 chars"}'
+      : '{"title": "交接包标题（30 字以内）", "goal": "这项工作要达成的目标", "completed": ["已经完成的事项，至多 8 条"], "in_progress": ["正在进行的事项及停在哪一步，至多 8 条"], "git_state": {"branch": "分支名，不知道就省略", "dirty_files": ["未提交的文件"], "last_commits": ["最近提交摘要"]}, "key_decisions": ["已做出的关键决定及理由，至多 8 条"], "key_files": [{"path": "关键文件路径", "why": "为什么重要", "last_state": "该文件目前的改动状态"}，至多 8 个], "failed_paths": [{"approach": "试过但放弃的方案", "why_failed": "失败原因"}，至多 6 条], "open_issues": ["尚未解决的问题，至多 8 条"], "verification": {"commands": ["用于验证工作的命令（构建/测试/lint）"], "last_results": ["各验证步骤的最近一次结果"]}, "next_steps": ["建议的下一步，按优先级排序，至多 8 条"], "confidence": {"overall": 0.0, "low_areas": ["你最没把握的部分"]}, "suggested_prompt": "一段可直接粘贴到任意 AI 新会话开头的自包含交接提示词：包含背景、目标、现状、关键文件和待办，800 字以内"}';
+    const notes = english
+      ? [
+          'Rules:',
+          '- confidence.overall is a number between 0 and 1.',
+          '- Fill git_state from the Git lines in the context; if the context carries no git information, output "git_state": {}.',
+          '- When the context contains a "## Key files (program-extracted, with anchors)" / "## 关键文件（程序提取，带锚点）" section, key_files MUST be chosen from that list with the paths kept verbatim — never invent files beyond it; derive "why" and "last_state" from the context.',
+          '- failed_paths MUST preserve every failed attempt and rejection reason visible in the context — never drop them to make the pack look cleaner; output an empty array only when there genuinely were none.',
+          '- If nothing was verified, output "verification": {"commands": [], "last_results": []}.',
+          `- The suggested_prompt MUST start with this exact fixed sentence, verbatim:\n${prefix}`,
+          `- The suggested_prompt MUST end with this exact fixed sentence, verbatim:\n${rule}`,
+          'Use empty arrays for fields with no content. Output JSON only.',
+        ]
+      : [
+          '要求：',
+          '- confidence.overall 是 0 到 1 之间的数字。',
+          '- git_state 依据上下文里的 Git 行填写；上下文没有 git 信息时输出 "git_state": {}。',
+          '- 上下文包含「## 关键文件（程序提取，带锚点）」部分时，key_files 必须从该清单中选取并原样沿用其路径，不得虚构清单之外的文件；why 和 last_state 依据上下文推断。',
+          '- failed_paths 必须完整保留上下文中出现的失败尝试与否决原因，不得为了让交接显得顺利而省略；确实没有时才输出空数组。',
+          '- 没有做过任何验证时输出 "verification": {"commands": [], "last_results": []}。',
+          `- suggested_prompt 必须以下面这句固定开场白原样开头：\n${prefix}`,
+          `- suggested_prompt 必须以下面这句固定规则原样结尾：\n${rule}`,
+          '没有内容的数组字段输出空数组。只输出 JSON 本身。',
+        ];
     return [
       {
         role: 'system',
@@ -281,9 +449,11 @@ registerAgentKind('relay', {
       {
         role: 'user',
         content: [
-          '下面是若干个相关会话的浓缩上下文（索引摘要 + 最近关键消息）。请把它们归纳成一份“交接包”，让另一个 AI 能接着继续这项工作。内容字段使用设置中指定的输出语言，输出一个 JSON 对象，字段如下：',
-          '{"title": "交接包标题（30 字以内）", "goal": "这项工作要达成的目标", "current_state": "目前已完成什么、进行到哪一步", "key_decisions": ["已做出的关键决定及理由，至多 8 条"], "key_files": [{"path": "关键文件路径", "why": "为什么重要", "last_state": "该文件目前的改动状态"}，至多 8 个], "open_issues": ["尚未解决的问题，至多 8 条"], "next_steps": ["建议的下一步，按优先级排序，至多 8 条"], "suggested_prompt": "一段可直接粘贴到任意 AI 新会话开头的自包含中文交接提示词：包含背景、目标、现状、关键文件和待办，800 字以内"}',
-          '没有内容的数组字段输出空数组。只输出 JSON 本身。',
+          english
+            ? 'Below is the condensed context of several related conversations (digest summaries + recent key messages). Distill them into a "handoff pack" that lets another AI continue this work. ' + language + ' Output one JSON object with these fields:'
+            : '下面是若干个相关会话的浓缩上下文（索引摘要 + 最近关键消息）。请把它们归纳成一份“交接包”，让另一个 AI 能接着继续这项工作。' + language + '输出一个 JSON 对象，字段如下：',
+          schema,
+          ...notes,
           '',
           transcript,
         ].join('\n'),
@@ -496,6 +666,39 @@ registerAgentKind('distill', {
 });
 
 /**
+ * Deposit maintain (mem0-style): given the previous deposit document and a
+ * fresh distillation (composed by the caller via
+ * buildDepositMaintainTranscript), decide the minimal edit operations and
+ * produce the merged document. Strict JSON; parse() validates the op enum and
+ * required fields, and rejects empty merged_markdown.
+ */
+registerAgentKind('deposit-maintain', {
+  buildPrompt({ transcript, preferences }) {
+    const { language } = promptAffixes(preferences);
+    return [
+      {
+        role: 'system',
+        content: `你是 Vesti 的沉淀维护助手。对比「旧版本沉淀内容」与「新提炼内容」，以最小改动把新信息合并进旧文档，删除过时内容；输出严格 JSON（不要 Markdown 代码围栏、不要任何额外文字）。${language}`,
+      },
+      {
+        role: 'user',
+        content: [
+          '下面给出一份沉淀文档的旧版本和基于最新会话重新提炼的新内容。请输出维护操作与合并结果，JSON 对象字段如下：',
+          '{"ops": [{"op": "ADD|UPDATE|DELETE|NOOP", "section": "所属小节标题", "old_text": "被替换或删除的旧原文（ADD/NOOP 可省略）", "new_text": "写入的新文本（DELETE/NOOP 可省略）", "reason": "为什么需要这个操作"}], "merged_markdown": "应用全部操作后的完整文档"}',
+          'op 语义：ADD=新内容有而旧文档没有、值得加入的信息；UPDATE=旧内容仍相关但需按新信息改写；DELETE=旧内容已过时或被新内容否定；NOOP=保持不变的重要部分（至多 3 条，reason 说明为什么保留）。',
+          'merged_markdown 必须非空，是应用全部操作后的最终文档（Markdown，保持原有小节结构，语言与旧文档一致）。只输出 JSON 本身。',
+          '',
+          transcript,
+        ].join('\n'),
+      },
+    ];
+  },
+  parse(raw) {
+    return JSON.stringify(parseDepositMaintainPayload(raw));
+  },
+});
+
+/**
  * Daily log (P4c): turn one local day's condensed activity context (CLI
  * session digests + browser conversation summaries) into a structured daily
  * report. The prompt is parameterized by template: 'daily' (default) writes
@@ -587,5 +790,180 @@ registerAgentKind('persona', {
     const cleaned = raw.trim().replace(/\s+/g, ' ');
     if (!cleaned) throw new Error('persona 输出为空');
     return cleaned.slice(0, PERSONA_NOTE_MAX_CHARS);
+  },
+});
+
+// ---- AI 圆桌 (Roundtable) ----
+// Both kinds keep prompt assembly on the renderer side (src/ui/roundtable):
+// the transcriptOverride already carries the persona setup, the topic, the
+// optional recall context and the output contract. These registrations only
+// wrap it with the assistant preamble + a lenient parse.
+
+/** One seat's turn: free-form prose (3-5 paragraphs); parse is lenient — any
+ * non-empty body passes, fences stripped, hard-capped for storage. */
+registerAgentKind('roundtable-turn', {
+  buildPrompt({ transcript, preferences }) {
+    const { language, custom } = promptAffixes(preferences);
+    return [
+      {
+        role: 'system',
+        content: `你是 Vesti 的圆桌讨论助手。严格保持给定的角色设定发言，立场鲜明、言之有物；不补造背景资料中没有的事实。${language}${custom}`,
+      },
+      {
+        role: 'user',
+        content: transcript,
+      },
+    ];
+  },
+  parse(raw) {
+    const cleaned = raw
+      .trim()
+      .replace(/^```(?:markdown|md)?\s*/i, '')
+      .replace(/\s*```$/, '')
+      .trim();
+    if (!cleaned) throw new Error('roundtable-turn 输出为空');
+    return cleaned.slice(0, 4000);
+  },
+});
+
+/** The moderator's synthesis: strict JSON by contract, but parse stays
+ * lenient (strip fences, require non-empty) — the renderer validates the JSON
+ * shape (parseRoundtableSynthesis) and falls back to the raw text. */
+registerAgentKind('roundtable-synthesis', {
+  buildPrompt({ transcript, preferences }) {
+    const { language } = promptAffixes(preferences);
+    return [
+      {
+        role: 'system',
+        content: `你是 Vesti 的圆桌主持助手。只依据给出的成员发言做汇总，不引入新观点；输出严格 JSON（不要 Markdown 代码围栏、不要任何额外文字）。${language}`,
+      },
+      {
+        role: 'user',
+        content: transcript,
+      },
+    ];
+  },
+  parse(raw) {
+    const cleaned = raw
+      .trim()
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/, '')
+      .trim();
+    if (!cleaned) throw new Error('roundtable-synthesis 输出为空');
+    return cleaned;
+  },
+});
+
+/** AI 深化 (Learn deep-dive): one recall-grounded pass over a learning domain.
+ * Same wiring as the roundtable kinds — the transcriptOverride (assembled in
+ * src/ui/learn/learnDeepen) already carries the domain stats, the optional
+ * recall context and the strict-JSON contract; this registration only wraps
+ * it with the assistant preamble + a lenient parse. */
+registerAgentKind('learn-deepen', {
+  buildPrompt({ transcript, preferences }) {
+    const { language, custom } = promptAffixes(preferences);
+    return [
+      {
+        role: 'system',
+        content: `你是 Vesti 的学习脉络分析助手。只依据给出的本地统计与背景资料做分析，不编造资料中没有的具体事实；输出严格 JSON（不要 Markdown 代码围栏、不要任何额外文字）。${language}${custom}`,
+      },
+      {
+        role: 'user',
+        content: transcript,
+      },
+    ];
+  },
+  parse(raw) {
+    const cleaned = raw
+      .trim()
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/, '')
+      .trim();
+    if (!cleaned) throw new Error('learn-deepen 输出为空');
+    return cleaned.slice(0, 4000);
+  },
+});
+
+/**
+ * Capsule prompt assistant (P6 follow-up): refine a prompt the user picked in
+ * the floating dock. Two kinds, both fed through transcriptOverride (the
+ * prompt body) with persist:false — nothing lands in the agent-results log.
+ *
+ * 'prompt-improve' answers strict JSON {"improved": string, "notes": string[]}
+ * (up to 3 change notes); parse() validates and normalizes the shape.
+ */
+export interface PromptImprovePayload {
+  improved: string;
+  notes: string[];
+}
+
+export const PROMPT_IMPROVE_MAX_NOTES = 3;
+export const PROMPT_CONTINUE_MAX_CHARS = 4_000;
+
+export function parsePromptImprovePayload(raw: string): PromptImprovePayload {
+  // Tolerate Markdown code fences around the JSON object.
+  const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start === -1 || end <= start) throw new Error('prompt-improve 输出不是 JSON');
+  const parsed = JSON.parse(cleaned.slice(start, end + 1)) as Record<string, unknown>;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('prompt-improve 输出不是 JSON 对象');
+  }
+  const improved = typeof parsed.improved === 'string' ? parsed.improved.trim() : '';
+  if (!improved) throw new Error('prompt-improve 输出缺少 improved');
+  return {
+    improved: improved.slice(0, 8_000),
+    notes: asStringList(parsed.notes, PROMPT_IMPROVE_MAX_NOTES),
+  };
+}
+
+registerAgentKind('prompt-improve', {
+  buildPrompt({ transcript, preferences }) {
+    const { language } = promptAffixes(preferences);
+    return [
+      {
+        role: 'system',
+        content: `你是 Vesti 的提示词优化助手。只改写用户给出的提示词，不执行它、不回答它；输出严格 JSON（不要 Markdown 代码围栏、不要任何额外文字）。${language}`,
+      },
+      {
+        role: 'user',
+        content: [
+          '请优化下面这条提示词，让它更清晰、具体、可复用：明确角色与目标、补齐必要的约束与输出格式要求，但保持原意与语言不变。',
+          '严格只输出一个 JSON 对象：{"improved": "优化后的完整提示词", "notes": ["修改要点，至多 3 条，每条一句话"]}。',
+          '',
+          transcript,
+        ].join('\n'),
+      },
+    ];
+  },
+  parse(raw) {
+    return JSON.stringify(parsePromptImprovePayload(raw));
+  },
+});
+
+/**
+ * 'prompt-continue' continues the given prompt text in the same voice (extend
+ * the instruction with fitting detail). Free-form output, so parse() is
+ * lenient: any non-empty body passes, capped for the dock panel.
+ */
+registerAgentKind('prompt-continue', {
+  buildPrompt({ transcript, preferences }) {
+    const { language } = promptAffixes(preferences);
+    return [
+      {
+        role: 'system',
+        content: `你是 Vesti 的提示词续写助手。沿用原文的语气、语言与结构续写用户给出的提示词，让它更完整可执行；直接输出续写后的完整提示词正文（保持原文开头，不要解释、不要 Markdown 代码围栏）。${language}`,
+      },
+      {
+        role: 'user',
+        content: ['请续写下面这条提示词：', '', transcript].join('\n'),
+      },
+    ];
+  },
+  parse(raw) {
+    const cleaned = raw.trim();
+    if (!cleaned) throw new Error('prompt-continue 输出为空');
+    return cleaned.slice(0, PROMPT_CONTINUE_MAX_CHARS);
   },
 });

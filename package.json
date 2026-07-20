@@ -8,6 +8,8 @@
   "main": ".vite/build/main.js",
   "scripts": {
     "core:build": "pnpm --filter @vesti/capture-core build",
+    "mcp:build": "pnpm --filter @vesti/vesti-mcp build",
+    "packages:build": "pnpm core:build && pnpm mcp:build",
     "native:prepare": "node scripts/prepare-native.mjs",
     "electron:cache": "node scripts/prepare-electron-zip.mjs",
     "start": "pnpm core:build && pnpm native:prepare && electron-forge start",

@@ -172,12 +172,71 @@ export function buildCandidateLine(ref: number, brief: ClassifyBrief): string {
   return parts.join("｜");
 }
 
-/** The transcriptOverride sent to the classify kind: topic tree + numbered candidates. */
+// ---- Classification rules (language + quality constraints) -----------------
+//
+// The classify kind prompt (src/main/agentPrompts.ts) is fixed, so output
+// language following and topic-quality constraints are injected from the call
+// side: a rules block prepended to the transcript, the same way distill-style
+// kinds follow agent.outputLanguage.
+
+export type ClassifyLanguage = "zh" | "en";
+
+/**
+ * Pick the language topic names must be written in. The agent output-language
+ * setting wins; the UI locale is the fallback (ja/ko fall back to English,
+ * mirroring the i18n copy). Both missing keeps the historical Chinese
+ * default.
+ */
+export function resolveClassifyLanguage(
+  outputLanguage?: string | null,
+  uiLocale?: string | null
+): ClassifyLanguage {
+  if (outputLanguage === "en-US") return "en";
+  if (outputLanguage === "zh-CN") return "zh";
+  if (uiLocale && uiLocale !== "zh") return "en";
+  return "zh";
+}
+
+const CLASSIFY_RULES_ZH = [
+  "分类要求：",
+  "- 话题名一律使用简体中文：topicPath 的每一层都必须是中文（React、API 这类专有名词可保留原文），且与现有同义主题的语言保持一致。",
+  "- 优先复用现有主题；与现有主题同义或近义时必须并入现有主题，禁止新建同义分支。",
+  "- 主题数量预算：同一父主题下的子主题不超过 7 个；会超出时，先把粒度相近的主题合并，而不是继续新建。",
+  "- 分层策略：一级是领域（粗粒度），二级是具体主题（细粒度）；层级越少越好，最多 3 层。",
+  "  结构示范（仅供参照，不要照抄到无关会话）：",
+  '  ["前端", "React"]、["前端", "工程化"]、["后端", "数据库"]、["AI工程", "提示词"]、["AI工程", "Agent开发"]、["写作", "文案"]、["学习", "英语"]、["产品", "需求分析"]',
+  "- 命名要求：2-6 个字、有区分度的名词短语；禁止直接用平台名（如 Kimi Code、ChatGPT）或文件名当话题名；禁止「其他」「杂项」这类无信息量的名字。",
+].join("\n");
+
+const CLASSIFY_RULES_EN = [
+  "Classification requirements:",
+  "- Topic names must be written in English: every level of topicPath (proper nouns like React or API may stay as-is), matching the language of existing synonymous topics.",
+  "- Prefer existing topics; anything synonymous or near-duplicate MUST be filed under the existing topic instead of creating a parallel branch.",
+  "- Topic budget: at most 7 child topics under the same parent; merge similar topics rather than exceeding the budget.",
+  "- Hierarchy: level 1 is a broad domain, level 2 a concrete theme; use as few levels as possible, at most 3.",
+  "  Structure examples (for reference only, do not copy onto unrelated conversations):",
+  '  ["Frontend", "React"], ["Frontend", "Tooling"], ["Backend", "Databases"], ["AI Engineering", "Prompting"], ["AI Engineering", "Agents"], ["Writing", "Copywriting"], ["Learning", "English"], ["Product", "Requirements"]',
+  '- Naming: a distinctive 2-6 word noun phrase; never name a topic after a platform (e.g. Kimi Code, ChatGPT) or a file name; no meaningless names like "Misc" or "Other".',
+].join("\n");
+
+/** Rules block prepended to the classify transcript (language + quality bar). */
+export function buildClassifyRules(language: ClassifyLanguage = "zh"): string {
+  return language === "en" ? CLASSIFY_RULES_EN : CLASSIFY_RULES_ZH;
+}
+
+/**
+ * The transcriptOverride sent to the classify kind: rules block + topic tree +
+ * numbered candidates. `language` controls which language topic names are
+ * requested in (and which language the rules are written in).
+ */
 export function buildClassifyTranscript(
   briefs: ClassifyBrief[],
-  topics: ClassifyTopicNode[]
+  topics: ClassifyTopicNode[],
+  options?: { language?: ClassifyLanguage }
 ): string {
   return [
+    buildClassifyRules(options?.language ?? "zh"),
+    "",
     "现有主题树：",
     formatTopicTree(topics),
     "",
@@ -446,6 +505,9 @@ export async function ensureTopicPath(
 }
 
 let running = false;
+/** Cooldown end timestamp after the circuit breaker aborts (auto-runs only). */
+let autoTriggerSuppressedUntil = 0;
+const AUTO_CLASSIFY_FAILURE_COOLDOWN_MS = 30 * 60 * 1000;
 
 /**
  * One auto-classify pass over every eligible conversation. Returns the run
@@ -463,6 +525,9 @@ export async function runAutoClassify(options?: {
   if (options?.trigger !== "manual") {
     const enabled = await readPref(PREF_KEYS.enabled, true);
     if (!enabled) return null;
+    // Circuit-breaker cooldown: after repeated batch failures (LLM down),
+    // skip auto-runs for a while instead of re-storming every data-updated.
+    if (Date.now() < autoTriggerSuppressedUntil) return null;
   }
   const settings = await api.getSettings().catch(() => null);
   if (!settings) return null;
@@ -470,6 +535,10 @@ export async function runAutoClassify(options?: {
   const llmReady = settings.llm.mode === "demo_proxy" || settings.llm.apiKeyConfigured;
   if (!llmReady) return null;
   const mode = await readPref<AutoClassifyMode>(PREF_KEYS.mode, "auto");
+  // Topic names follow the configured output language, falling back to the UI
+  // locale (stored by languageSettingsService under the "language" pref).
+  const uiLanguage = await readPref<{ locale?: string } | null>("language", null);
+  const classifyLanguage = resolveClassifyLanguage(settings.agent?.outputLanguage, uiLanguage?.locale);
 
   running = true;
   setState({ running: true });
@@ -518,6 +587,14 @@ export async function runAutoClassify(options?: {
     const queuedItems: ClassifySuggestion[] = [];
     const briefById = new Map(briefs.map((brief) => [brief.id, brief]));
 
+    // Circuit breaker: when the LLM is down (quota exhausted / offline), every
+    // batch fails fast and the loop would otherwise burn through all candidates
+    // on every data-updated tick — a failure storm that also spams the log.
+    // Abort the run after 3 consecutive failures and suppress auto-runs for a
+    // cooldown window (manual runs from settings still allowed).
+    let consecutiveFailures = 0;
+    let aborted = false;
+
     for (let start = 0; start < briefs.length; start += CLASSIFY_BATCH_SIZE) {
       const batch = briefs.slice(start, start + CLASSIFY_BATCH_SIZE);
       stats.batches += 1;
@@ -525,7 +602,7 @@ export async function runAutoClassify(options?: {
         const result = await api.runAgent({
           kind: "classify",
           sessionId: `classify:${stats.ranAt}:${stats.batches}`,
-          transcriptOverride: buildClassifyTranscript(batch, topics),
+          transcriptOverride: buildClassifyTranscript(batch, topics, { language: classifyLanguage }),
           persist: false,
         });
         const assignments = mapClassifyAssignments(
@@ -564,9 +641,23 @@ export async function runAutoClassify(options?: {
         // Bad model output or a failed batch: degrade by skipping the batch,
         // the conversations stay unclassified for the next run.
         stats.failedBatches += 1;
+        consecutiveFailures += 1;
         logger.error("db", "Auto-classify batch failed", error as Error);
+        if (consecutiveFailures >= 3) {
+          aborted = true;
+          autoTriggerSuppressedUntil = Date.now() + AUTO_CLASSIFY_FAILURE_COOLDOWN_MS;
+          logger.warn(
+            "db",
+            `Auto-classify aborted after ${consecutiveFailures} consecutive batch failures; auto-runs paused for 30 minutes (LLM unreachable?)`
+          );
+          break;
+        }
+        continue;
       }
+      consecutiveFailures = 0;
     }
+
+    if (aborted) setState({ lastRun: stats });
 
     if (queuedItems.length > 0) {
       await (options?.store ?? dexieSuggestionStore).add(queuedItems);

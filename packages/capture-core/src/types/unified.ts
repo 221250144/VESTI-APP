@@ -83,6 +83,13 @@ export interface WorkSession {
   agentMeta?: string;
   claudeCodeVersion?: string;
 
+  /**
+   * Fork lineage (memory v2): work_sessions.id of the session this one was
+   * forked from, when known. Forked sessions are independent work — the
+   * lineage exists so duplicated pre-fork history is counted once.
+   */
+  forkedFrom?: string | null;
+
   createdAt: number;
   updatedAt: number;
 }
@@ -228,7 +235,21 @@ export interface ConvertedSession {
 
 // ==================== Session Digest (P1.5) ====================
 
-export type DigestEmbeddingStatus = 'none' | 'ok' | 'skipped' | 'failed';
+/** 'degraded' doubles as the degraded-digest mark: the row is a structural
+ * fallback that already used its one LLM retry — do not auto-retry until the
+ * session grows or DIGEST_VERSION bumps (no new column; TEXT field). */
+export type DigestEmbeddingStatus = 'none' | 'ok' | 'skipped' | 'failed' | 'degraded';
+
+/** Store-wide digest health snapshot (DigestService.getDigestStats). */
+export interface SessionDigestStats {
+  total: number;
+  /** Four structured fields all empty with a non-empty one_liner — degraded
+   * suspects; the exact echo check happens at runtime in the digest service. */
+  emptyStructured: number;
+  /** embedding_status='degraded': degraded rows that used up their retry. */
+  gaveUp: number;
+  failed: number;
+}
 
 export interface SessionDigest {
   sessionId: string;             // work_sessions.id
@@ -245,6 +266,65 @@ export interface SessionDigest {
   digestVersion: number;
   messageCount: number;
   updatedAt: string;             // ISO 8601
+
+  // ---- L1 validity semantics (memory v2; all optional, additive) ----
+  /** Start of the interval this digest describes (ISO 8601). */
+  validFrom?: string | null;
+  /** Set when the digest stopped being current (superseded); NULL = current. */
+  validTo?: string | null;
+  /** session_id of the digest row that replaced this one. */
+  supersededBy?: string | null;
+  /** How often recall/search surfaced this digest (MCP bumps it on hits). */
+  accessCount?: number;
+}
+
+// ==================== Project State / Brief (memory v2, L0 & L2) ====================
+
+/** A file surfaced in the project's L0 state card. */
+export interface ProjectActiveFile {
+  path: string;
+  /** tool_executions touching this file in the lookback window. */
+  touches: number;
+  /** ISO 8601 of the most recent touch. */
+  lastTouched: string;
+}
+
+/**
+ * L0 project_state: one deterministic "current state card" per project.
+ * Rewritten wholesale on every rebuild (never invalidated, never compressed).
+ */
+export interface ProjectState {
+  projectKey: string;
+  oneLiner: string;              // newest session digest one-liner ('' when none)
+  activeFiles: ProjectActiveFile[];
+  openQuestions: string[];       // merged from the 5 newest digests, deduped
+  sessionCount: number;
+  lastActive: string;            // ISO 8601 ('' when the project has no sessions)
+  updatedAt: string;             // ISO 8601 of this rebuild
+}
+
+/**
+ * L2 project_briefs: LLM-maintained cross-session project brief. `version`
+ * increments on every successful maintain pass; `lastOps` holds the ops the
+ * last deposit-maintain merge applied (JSON array, for the UI badge).
+ */
+export interface ProjectBrief {
+  projectKey: string;
+  contentMarkdown: string;
+  version: number;
+  lastOps: string;               // JSON array of DepositMaintainOp ('[]' for fallbacks)
+  updatedAt: string;             // ISO 8601
+}
+
+/** One touch event in a file's deterministic timeline (L2 support query). */
+export interface FileTimelineEvent {
+  sessionId: string;             // work_sessions.id
+  sessionTitle: string;
+  platform: string;
+  toolName: string;
+  toolCategory: string;
+  isError: boolean;
+  timestamp: number;             // ms epoch
 }
 
 // ==================== Project Registry (P1.5) ====================

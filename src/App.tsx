@@ -24,6 +24,7 @@ import {
 import { startAutoClassifyTrigger } from "./ui/organize/autoClassify";
 import { startUpstreamAutoExport } from "./ui/upstream/autoExport";
 import { startDailyScheduler } from "./ui/daily/dailyScheduler";
+import { startPromptSnapshotSync } from "./ui/sync/promptSnapshot";
 import { getAllSummaries, getTopics, listConversations } from "./ui/db/repository";
 import { computeAiti } from "./ui/aiti/computeAiti";
 import { localizeImagery, resolveImagery } from "./ui/aiti/imagery";
@@ -74,6 +75,7 @@ function Shell() {
     startAutoClassifyTrigger();
     startUpstreamAutoExport();
     startDailyScheduler();
+    startPromptSnapshotSync();
   }, []);
 
   useEffect(() => subscribeCaptureSync(setSyncState), []);
@@ -84,9 +86,11 @@ function Shell() {
   }, []);
 
   // AITI / Learn are computed locally from stored summaries; recompute after
-  // every successful capture import (signalled by captureSync).
+  // every successful capture import (signalled by captureSync). Debounced:
+  // data-updated arrives in storms and each recompute reads three tables.
   useEffect(() => {
     let cancelled = false;
+    let debounce: ReturnType<typeof setTimeout> | null = null;
     const recompute = () => {
       void Promise.all([getAllSummaries(), getTopics(), listConversations()])
         .then(([summaries, topics, conversations]) => {
@@ -100,11 +104,19 @@ function Shell() {
           setLearn({ available: false, sampleSize: 0, domains: [], glossary: [], openLoops: [] });
         });
     };
+    const scheduleRecompute = () => {
+      if (debounce !== null) clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        debounce = null;
+        recompute();
+      }, 300);
+    };
     recompute();
-    window.addEventListener("vesti:data-updated", recompute);
+    window.addEventListener("vesti:data-updated", scheduleRecompute);
     return () => {
       cancelled = true;
-      window.removeEventListener("vesti:data-updated", recompute);
+      if (debounce !== null) clearTimeout(debounce);
+      window.removeEventListener("vesti:data-updated", scheduleRecompute);
     };
   }, []);
 
@@ -179,6 +191,7 @@ function Shell() {
               aitiEmblemUrl={aitiImagery ? emblemUrl(aitiImagery.emblemId) : undefined}
               aitiPersonaNote={aitiPersonaNote}
               learn={learn}
+              lang={lang}
               tab={dashboardTab}
               onTabChange={(tab) => setPage(tab)}
             />

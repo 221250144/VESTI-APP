@@ -3,6 +3,11 @@
 // summaries and recent messages from Dexie and passes them in; everything
 // budget-related is deterministic and unit-tested here.
 
+import {
+  formatRelayFileAnchorBlock,
+  type RelayFileAnchor,
+} from "./relayFiles";
+
 /** Total transcript budget handed to the relay agent (~24K chars). The main
  * process caps transcriptOverride at 30K, so this always fits. */
 export const RELAY_CONTEXT_BUDGET_CHARS = 24_000;
@@ -30,6 +35,8 @@ export interface RelayContextConversation {
   platform: string;
   /** Structured digest (P1.5); preferred context source when present. */
   digest?: RelayContextDigest | null;
+  /** Git info from work_sessions (P4a v2), when the capture carries it. */
+  git?: { branch?: string | null; remote?: string | null } | null;
   /** Latest summary text; fallback when no digest exists. */
   summary?: string | null;
   /** Plain snippet; last-resort fallback after digest/summary. */
@@ -64,6 +71,15 @@ function buildConversationHead(
   const lines: string[] = [
     `## 会话 ${index + 1}：《${truncateText(conversation.title || "未命名会话", 80)}》（${conversation.platform}）`,
   ];
+  // Git metadata (work_sessions) rides above the digest: it is session-level
+  // facts, independent of which text source the head falls back to.
+  const gitParts = [
+    conversation.git?.branch?.trim(),
+    conversation.git?.remote?.trim(),
+  ].filter((part): part is string => Boolean(part));
+  if (gitParts.length > 0) {
+    lines.push(`Git：${truncateText(gitParts.join(" · "), 200)}`);
+  }
   const digest = conversation.digest;
   const hasDigest = Boolean(
     digest?.oneLiner ||
@@ -91,6 +107,34 @@ function buildConversationHead(
     : "";
   lines.push(`摘要：${truncateText(conversation.title || "未命名会话", 80)}${snippet}`);
   return lines.join("\n");
+}
+
+/**
+ * Cross-conversation key-file aggregate (P4a v2): dedupe digest.keyFiles in
+ * first-seen order so the relay model grounds its key_files output on the
+ * union instead of per-conversation fragments. Returns null when no digest
+ * carries files (the block is then omitted entirely).
+ */
+function buildKeyFilesAggregate(
+  conversations: RelayContextConversation[],
+  maxItems = 12
+): string | null {
+  const seen = new Set<string>();
+  const files: string[] = [];
+  for (const conversation of conversations) {
+    for (const file of conversation.digest?.keyFiles ?? []) {
+      const normalized = collapseWhitespace(file);
+      if (!normalized) continue;
+      const key = normalized.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      files.push(normalized);
+      if (files.length >= maxItems) break;
+    }
+    if (files.length >= maxItems) break;
+  }
+  if (files.length === 0) return null;
+  return `## 关键文件汇总（跨会话去重）\n${files.join("、")}`;
 }
 
 /**
@@ -128,31 +172,54 @@ function collectMessageExcerpts(
  * always kept; the remaining budget is split evenly across conversations for
  * recent-message excerpts. The result never exceeds `budgetChars` (beyond a
  * possible few chars of truncation marker).
+ *
+ * `options.fileAnchors` (P4a quality): deterministically extracted key-file
+ * anchors — when present, a "关键文件（程序提取，带锚点）" block rides at the
+ * very top of the transcript (counted against the budget) and the relay
+ * prompt pins the model's key_files output to that list.
  */
 export function buildRelayTranscript(
   conversations: RelayContextConversation[],
-  budgetChars: number = RELAY_CONTEXT_BUDGET_CHARS
+  budgetChars: number = RELAY_CONTEXT_BUDGET_CHARS,
+  options: { fileAnchors?: RelayFileAnchor[] } = {}
 ): string {
   if (conversations.length === 0) return "";
 
+  const anchorBlock = formatRelayFileAnchorBlock(
+    options.fileAnchors ?? [],
+    (conversationId) => {
+      const index = conversations.findIndex(
+        (conversation) => conversation.id === conversationId
+      );
+      return index >= 0 ? `会话 ${index + 1}` : null;
+    }
+  );
+  const aggregate = buildKeyFilesAggregate(conversations);
   const heads = conversations.map((conversation, index) =>
     buildConversationHead(conversation, index)
   );
   const separator = "\n\n";
-  const headsTotal = heads.reduce((sum, head) => sum + head.length, 0) +
-    separator.length * (heads.length - 1);
-  if (headsTotal >= budgetChars) {
-    return `${heads.join(separator).slice(0, Math.max(0, budgetChars - 12))}\n[上下文已截断]`;
+  // Fixed head blocks, top first: file anchors, digest aggregate, per-
+  // conversation heads — all always kept, all counted against the budget.
+  const fixedBlocks = [anchorBlock, aggregate, ...heads].filter(
+    (block): block is string => Boolean(block)
+  );
+  const fixedTotal =
+    fixedBlocks.reduce((sum, block) => sum + block.length, 0) +
+    separator.length * (fixedBlocks.length - 1);
+  if (fixedTotal >= budgetChars) {
+    return `${fixedBlocks.join(separator).slice(0, Math.max(0, budgetChars - 12))}\n[上下文已截断]`;
   }
 
-  const perConversation = Math.floor((budgetChars - headsTotal) / conversations.length);
+  const perConversation = Math.floor((budgetChars - fixedTotal) / conversations.length);
+  const headCount = (anchorBlock ? 1 : 0) + (aggregate ? 1 : 0);
   const blocks = conversations.map((conversation, index) => {
     const excerpts = collectMessageExcerpts(conversation.messages, perConversation);
     if (excerpts.length === 0) return heads[index];
     return `${heads[index]}\n最近消息：\n${excerpts.join("\n")}`;
   });
 
-  const assembled = blocks.join(separator);
+  const assembled = [...fixedBlocks.slice(0, headCount), ...blocks].join(separator);
   if (assembled.length <= budgetChars) return assembled;
   return `${assembled.slice(0, Math.max(0, budgetChars - 12))}\n[上下文已截断]`;
 }

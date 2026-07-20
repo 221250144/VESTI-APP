@@ -3,9 +3,11 @@ import type { Conversation, ConversationTree, Topic } from "../../types";
 import {
   buildConversationTreeLookup,
   buildSourceTreeModel,
+  collectSubagentTopics,
   collectTopicSubtreeIds,
   describeSelection,
   filterConversationsBySelection,
+  isSubagentConversation,
   resolveConversationPlacement,
   type DesktopSourceFields,
   type SourceSelection,
@@ -292,8 +294,118 @@ describe("filterConversationsBySelection", () => {
   });
 });
 
-describe("collectTopicSubtreeIds", () => {
-  it("collects the node and all descendants", () => {
+// ---- A1: subagent folding ---------------------------------------------------
+
+const SUB_TREE: ConversationTree = {
+  generatedAt: "2026-07-18T00:00:00.000Z",
+  sources: [
+    {
+      platform: "claude-code",
+      host: "native",
+      projects: [
+        {
+          projectKey: "cli_aaa",
+          label: "vesti-app",
+          pathOrDomain: "C:/dev/vesti-app",
+          sessions: [
+            {
+              ...session("claude-code:main"),
+              role: "main" as const,
+              childCount: 1,
+              descendantMessageCount: 3,
+              children: [
+                {
+                  ...session("claude-code:sub"),
+                  role: "subagent" as const,
+                  parentSessionId: "claude-code:main",
+                  messageCount: 3,
+                  keyTopics: ["检索", "归属"],
+                  childCount: 0,
+                  descendantMessageCount: 0,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
+const SUB_LOOKUP = buildConversationTreeLookup(SUB_TREE);
+
+const mainConv = conversation(101, {
+  _source: "local_terminal",
+  _cli_id: "claude-code:main",
+});
+const subConv = conversation(102, {
+  _source: "local_terminal",
+  _cli_id: "claude-code:sub",
+});
+
+describe("A1 subagent lookup helpers", () => {
+  it("indexes nested children with their parent and placement", () => {
+    expect(SUB_LOOKUP.subagentParentByChildId.get("claude-code:sub")).toBe(
+      "claude-code:main",
+    );
+    expect(
+      SUB_LOOKUP.subagentsByParentId.get("claude-code:main")?.map((s) => s.id),
+    ).toEqual(["claude-code:sub"]);
+    // Children join their parent's project placement.
+    expect(SUB_LOOKUP.bySessionId.get("claude-code:sub")).toEqual({
+      source: { platform: "claude-code", host: "native" },
+      projectKey: "cli_aaa",
+    });
+  });
+
+  it("isSubagentConversation flags only child sessions", () => {
+    expect(isSubagentConversation(subConv, SUB_LOOKUP)).toBe(true);
+    expect(isSubagentConversation(mainConv, SUB_LOOKUP)).toBe(false);
+    expect(isSubagentConversation(conversation(103), SUB_LOOKUP)).toBe(false);
+  });
+
+  it("collectSubagentTopics dedupes and caps the merged topics", () => {
+    const children = SUB_LOOKUP.subagentsByParentId.get("claude-code:main");
+    expect(collectSubagentTopics(children, 5)).toEqual(["检索", "归属"]);
+    expect(collectSubagentTopics(children, 1)).toEqual(["检索"]);
+    expect(collectSubagentTopics(undefined, 5)).toEqual([]);
+    const dupes = [
+      { ...session("a"), keyTopics: ["x", "y"] },
+      { ...session("b"), keyTopics: ["y", "z"] },
+    ];
+    expect(collectSubagentTopics(dupes, 5)).toEqual(["x", "y", "z"]);
+  });
+});
+
+describe("A1 subagent folding in counts and filters", () => {
+  it("buildSourceTreeModel counts main sessions only", () => {
+    const model = buildSourceTreeModel({
+      tree: SUB_TREE,
+      conversations: [mainConv, subConv],
+      topics: [],
+      lookup: SUB_LOOKUP,
+    });
+    expect(model.sources).toHaveLength(1);
+    expect(model.sources[0].count).toBe(1);
+    expect(model.sources[0].projects[0].count).toBe(1);
+  });
+
+  it("filterConversationsBySelection drops subagent rows", () => {
+    const selection: SourceSelection = {
+      kind: "source",
+      source: { platform: "claude-code", host: "native" },
+    };
+    const filtered = filterConversationsBySelection(
+      [mainConv, subConv],
+      selection,
+      SUB_LOOKUP,
+      [],
+    );
+    expect(filtered.map((row) => row.id)).toEqual([101]);
+  });
+});
+
+describe("collectTopicSubtreeIds", () => {  it("collects the node and all descendants", () => {
     expect([...collectTopicSubtreeIds(TOPICS, 1)].sort()).toEqual([1, 2]);
     expect([...collectTopicSubtreeIds(TOPICS, 2)]).toEqual([2]);
   });

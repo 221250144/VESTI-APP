@@ -10,6 +10,7 @@
 import { importExtensionBundle } from "../db/repository";
 import { logger } from "../db/logger";
 import type { ExtensionImportRequestPayload } from "../../shared/contracts";
+import { bumpDexieDataVersion } from "./dataVersion";
 
 let started = false;
 
@@ -17,6 +18,7 @@ async function handleImport(payload: ExtensionImportRequestPayload): Promise<voi
   try {
     const result = await importExtensionBundle(payload.bundle);
     // Notify the dashboard's library-data context that fresh data landed.
+    bumpDexieDataVersion();
     window.dispatchEvent(new CustomEvent("vesti:data-updated"));
     await window.vesti.reportExtensionImportResult({
       requestId: payload.requestId,

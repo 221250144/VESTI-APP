@@ -29,6 +29,11 @@ import {
   subscribeAutoClassify,
   type ClassifySuggestion,
 } from "../organize/autoClassify";
+import {
+  applyTopicGovernance,
+  runTopicGovernance,
+  type TopicGovernancePlan,
+} from "../organize/topicGovernance";
 import { scheduleUpstreamAutoExport } from "../upstream/autoExport";
 import {
   exportAllToMarkdownDirectory,
@@ -98,10 +103,16 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     wslRedetect: "重新检测",
     wslDetecting: "检测中…",
     bridgeTitle: "连接 VESTI 扩展",
-    bridgeDesc: "浏览器扩展通过本机回环服务把网页端会话导入 Vesti。生成配对码并在扩展中输入即可完成连接。",
+    bridgeDesc: "浏览器扩展通过本机回环服务把网页端会话导入 Vesti。打开扩展侧栏即可自动连接（首次需确认一次），也可使用配对码手动连接。",
     bridgeRunning: "服务运行中",
     bridgeStopped: "服务未运行",
     bridgeError: "端口冲突,扩展暂不可用",
+    bridgeAutoTitle: "自动连接（推荐）",
+    bridgeAutoDesc: "安装 VESTI 浏览器扩展后，打开扩展侧栏即自动连接；首次连接本设备会弹出一次确认，之后长期免交互。配对窗口关闭时扩展无法发起连接。",
+    bridgeOpenWindow: "打开配对窗口",
+    bridgeWindowOpen: "配对窗口开启中",
+    bridgeWindowClosed: "配对窗口已关闭，打开后扩展才能自动连接。",
+    bridgeManualTitle: "使用配对码连接（兜底）",
     bridgeGenerate: "生成配对码",
     bridgeCodeHint: "在浏览器扩展中输入此配对码",
     bridgeCodeExpired: "配对码已过期,请重新生成。",
@@ -168,6 +179,18 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     organizeAccept: "接受",
     organizeIgnore: "忽略",
     organizeAcceptAll: "全部接受",
+    organizeTidy: "整理现有话题",
+    organizeTidyDesc: "让 AI 审查现有主题树,建议合并同义主题、重命名低质名称;确认后批量执行。",
+    organizeTidyRunning: "审查中…",
+    organizeTidyEmpty: "AI 审查完成:现有主题树无需整理。",
+    organizeTidyFailed: "整理审查失败,请稍后重试。",
+    organizeTidySuggestions: "整理建议(确认后执行)",
+    organizeTidyMerge: "合并",
+    organizeTidyRename: "改名",
+    organizeTidyApply: "应用整理",
+    organizeTidyApplying: "应用中…",
+    organizeTidyCancel: "取消",
+    organizeTidyDone: "已应用整理:合并 {merged} 组、重命名 {renamed} 个主题。",
     dailyTitle: "日志",
     dailyDesc: "每天固定时间自动生成当天日报;启动 App 时会补上错过的昨天。未配置模型时使用本地模板生成。",
     dailyTime: "每日生成时间",
@@ -260,10 +283,16 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     wslRedetect: "Re-detect",
     wslDetecting: "Detecting…",
     bridgeTitle: "Connect the VESTI extension",
-    bridgeDesc: "The browser extension imports web conversations into Vesti over a loopback service. Generate a pair code and enter it in the extension to connect.",
+    bridgeDesc: "The browser extension imports web conversations into Vesti over a loopback service. Open the extension side panel to auto-connect (one-time confirmation), or use a pair code.",
     bridgeRunning: "Service running",
     bridgeStopped: "Service stopped",
     bridgeError: "Port conflict; extension bridge unavailable",
+    bridgeAutoTitle: "Auto-connect (recommended)",
+    bridgeAutoDesc: "With the VESTI browser extension installed, open its side panel to connect automatically. This device shows a one-time confirmation on first connect, then stays hands-free. The extension can only connect while the pairing window is open.",
+    bridgeOpenWindow: "Open pairing window",
+    bridgeWindowOpen: "Pairing window open",
+    bridgeWindowClosed: "Pairing window closed. Open it so the extension can auto-connect.",
+    bridgeManualTitle: "Connect with a pair code (fallback)",
     bridgeGenerate: "Generate pair code",
     bridgeCodeHint: "Enter this code in the browser extension",
     bridgeCodeExpired: "Code expired. Generate a new one.",
@@ -330,6 +359,18 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     organizeAccept: "Accept",
     organizeIgnore: "Ignore",
     organizeAcceptAll: "Accept all",
+    organizeTidy: "Tidy existing topics",
+    organizeTidyDesc: "Let AI review the topic tree and propose synonym merges and better names; applied only after your confirmation.",
+    organizeTidyRunning: "Reviewing…",
+    organizeTidyEmpty: "Review finished: the topic tree needs no tidy-up.",
+    organizeTidyFailed: "Tidy-up review failed. Please try again later.",
+    organizeTidySuggestions: "Tidy-up suggestions (applied on confirm)",
+    organizeTidyMerge: "Merge",
+    organizeTidyRename: "Rename",
+    organizeTidyApply: "Apply tidy-up",
+    organizeTidyApplying: "Applying…",
+    organizeTidyCancel: "Cancel",
+    organizeTidyDone: "Tidy-up applied: {merged} merge groups, {renamed} renames.",
     dailyTitle: "Daily log",
     dailyDesc: "Generates the day's report at a fixed time every evening; a missed yesterday is caught up at launch. Without a configured model the local template is used.",
     dailyTime: "Daily generation time",
@@ -883,6 +924,13 @@ export function SettingsPage({
   const [now, setNow] = useState(() => Date.now());
   const [classifyState, setClassifyState] = useState(getAutoClassifyState());
   const [suggestions, setSuggestions] = useState<ClassifySuggestion[]>([]);
+  // Topic governance (one-shot tidy of the existing topic tree).
+  const [tidy, setTidy] = useState<{
+    running: boolean;
+    applying: boolean;
+    plan: TopicGovernancePlan | null;
+    note: string;
+  }>({ running: false, applying: false, plan: null, note: "" });
   const [upstreamStats, setUpstreamStats] = useState<UpstreamExportStats | null>(null);
   const [upstreamBusy, setUpstreamBusy] = useState<string | null>(null);
   const [upstreamNote, setUpstreamNote] = useState("");
@@ -915,12 +963,17 @@ export function SettingsPage({
     };
   }, [load]);
 
-  // 1s ticker for the pair-code countdown.
+  // 1s ticker for the pair-code and pairing-window countdowns.
+  const pairingWindowOpen = Boolean(
+    bridge?.pairingWindow.open
+    && bridge.pairingWindow.expiresAt !== null
+    && bridge.pairingWindow.expiresAt > now,
+  );
   useEffect(() => {
-    if (!pairCode) return;
+    if (!pairCode && !pairingWindowOpen) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [pairCode]);
+  }, [pairCode, pairingWindowOpen]);
 
   // Auto-classify (P2a): run state + persisted review queue.
   useEffect(() => {
@@ -960,8 +1013,48 @@ export function SettingsPage({
     setSuggestions(await listClassifySuggestions().catch(() => []));
   }
 
+  // Topic governance: review the tree, show the plan, apply on confirm.
+  async function tidyTopicsNow() {
+    setTidy({ running: true, applying: false, plan: null, note: "" });
+    try {
+      const plan = await runTopicGovernance();
+      setTidy({
+        running: false,
+        applying: false,
+        plan,
+        note: plan ? "" : copy.organizeTidyFailed,
+      });
+    } catch {
+      setTidy({ running: false, applying: false, plan: null, note: copy.organizeTidyFailed });
+    }
+  }
+
+  async function applyTidyPlan() {
+    if (!tidy.plan || tidy.applying) return;
+    setTidy({ ...tidy, applying: true });
+    const result = await applyTopicGovernance(tidy.plan);
+    setTidy({
+      running: false,
+      applying: false,
+      plan: null,
+      note: copy.organizeTidyDone
+        .replace("{merged}", String(result.merged))
+        .replace("{renamed}", String(result.renamed)),
+    });
+  }
+
+  function cancelTidyPlan() {
+    setTidy({ running: false, applying: false, plan: null, note: "" });
+  }
+
   async function generatePairCode() {
     setPairCode(await window.vesti.createExtensionPairCode());
+    setNow(Date.now());
+  }
+
+  async function openPairingWindow() {
+    await window.vesti.openExtensionPairingWindow();
+    setBridge(await window.vesti.getExtensionBridgeStatus());
     setNow(Date.now());
   }
 
@@ -1328,24 +1421,47 @@ export function SettingsPage({
                 ? copy.bridgeError
                 : copy.bridgeStopped}
           </div>
-          <div className="flex flex-wrap items-center gap-3">
-            <button type="button" className={buttonSecondary} onClick={() => void generatePairCode()}>
-              {copy.bridgeGenerate}
-            </button>
-            {pairCode && (pairCode.expiresAt > now ? (
-              <div className="flex items-baseline gap-3">
-                <span className="font-mono text-[22px] font-semibold tracking-[0.3em] text-text-primary">
-                  {pairCode.code}
+          <div className="mb-4 rounded-xl border border-border-subtle bg-bg-primary px-4 py-3">
+            <div className="mb-1 text-[13px] font-sans font-medium text-text-primary">{copy.bridgeAutoTitle}</div>
+            <p className="mb-3 text-[12px] font-sans text-text-tertiary">{copy.bridgeAutoDesc}</p>
+            <div className="flex flex-wrap items-center gap-3">
+              <button type="button" className={buttonSecondary} onClick={() => void openPairingWindow()}>
+                {copy.bridgeOpenWindow}
+              </button>
+              {pairingWindowOpen && bridge?.pairingWindow.expiresAt ? (
+                <span className="flex items-center gap-2 text-[12px] font-sans text-text-secondary">
+                  <span className="inline-block h-2 w-2 rounded-full bg-success" />
+                  {copy.bridgeWindowOpen} · {Math.floor((bridge.pairingWindow.expiresAt - now) / 60000)}:
+                  {String(Math.floor(((bridge.pairingWindow.expiresAt - now) % 60000) / 1000)).padStart(2, "0")}
                 </span>
-                <span className="text-[12px] font-sans text-text-tertiary">
-                  {copy.bridgeCodeHint} · {Math.floor((pairCode.expiresAt - now) / 60000)}:
-                  {String(Math.floor(((pairCode.expiresAt - now) % 60000) / 1000)).padStart(2, "0")}
-                </span>
-              </div>
-            ) : (
-              <span className="text-[12px] font-sans text-text-tertiary">{copy.bridgeCodeExpired}</span>
-            ))}
+              ) : (
+                <span className="text-[12px] font-sans text-text-tertiary">{copy.bridgeWindowClosed}</span>
+              )}
+            </div>
           </div>
+          <details className="mb-4">
+            <summary className="cursor-pointer select-none text-[12px] font-sans font-medium text-text-secondary">
+              {copy.bridgeManualTitle}
+            </summary>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <button type="button" className={buttonSecondary} onClick={() => void generatePairCode()}>
+                {copy.bridgeGenerate}
+              </button>
+              {pairCode && (pairCode.expiresAt > now ? (
+                <div className="flex items-baseline gap-3">
+                  <span className="font-mono text-[22px] font-semibold tracking-[0.3em] text-text-primary">
+                    {pairCode.code}
+                  </span>
+                  <span className="text-[12px] font-sans text-text-tertiary">
+                    {copy.bridgeCodeHint} · {Math.floor((pairCode.expiresAt - now) / 60000)}:
+                    {String(Math.floor(((pairCode.expiresAt - now) % 60000) / 1000)).padStart(2, "0")}
+                  </span>
+                </div>
+              ) : (
+                <span className="text-[12px] font-sans text-text-tertiary">{copy.bridgeCodeExpired}</span>
+              ))}
+            </div>
+          </details>
           <div className="mt-4">
             <div className="mb-2 text-[12px] font-sans font-medium text-text-secondary">{copy.bridgeClients}</div>
             {!bridge || bridge.clients.length === 0 ? (
@@ -1772,6 +1888,66 @@ export function SettingsPage({
                 : copy.organizeNever}
             </span>
           </div>
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              className={buttonSecondary}
+              disabled={tidy.running || tidy.applying || !llmReady}
+              onClick={() => void tidyTopicsNow()}
+            >
+              {tidy.running ? copy.organizeTidyRunning : copy.organizeTidy}
+            </button>
+            <span className="text-[12px] font-sans text-text-tertiary">{copy.organizeTidyDesc}</span>
+          </div>
+          {tidy.plan && tidy.plan.merges.length + tidy.plan.renames.length === 0 && (
+            <p className="mt-3 text-[12px] font-sans text-text-tertiary">{copy.organizeTidyEmpty}</p>
+          )}
+          {tidy.plan && tidy.plan.merges.length + tidy.plan.renames.length > 0 && (
+            <div className="mt-3 rounded-xl border border-border-subtle bg-bg-primary px-4 py-3">
+              <div className="mb-2 text-[12px] font-sans font-medium text-text-secondary">
+                {copy.organizeTidySuggestions}
+              </div>
+              <div className="flex flex-col gap-1.5">
+                {tidy.plan.merges.map((merge) => (
+                  <div key={`merge-${merge.targetId}`} className="text-[12px] font-sans text-text-primary">
+                    <span className="mr-1.5 rounded bg-accent-primary-light px-1.5 py-0.5 text-[11px] font-medium text-accent-primary">
+                      {copy.organizeTidyMerge}
+                    </span>
+                    {merge.sourceNames.join("、")} → {merge.name ?? merge.targetName}
+                  </div>
+                ))}
+                {tidy.plan.renames.map((rename) => (
+                  <div key={`rename-${rename.id}`} className="text-[12px] font-sans text-text-primary">
+                    <span className="mr-1.5 rounded bg-accent-primary-light px-1.5 py-0.5 text-[11px] font-medium text-accent-primary">
+                      {copy.organizeTidyRename}
+                    </span>
+                    {rename.from} → {rename.to}
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className={buttonSecondary}
+                  disabled={tidy.applying}
+                  onClick={() => void applyTidyPlan()}
+                >
+                  {tidy.applying ? copy.organizeTidyApplying : copy.organizeTidyApply}
+                </button>
+                <button
+                  type="button"
+                  className={buttonSecondary}
+                  disabled={tidy.applying}
+                  onClick={cancelTidyPlan}
+                >
+                  {copy.organizeTidyCancel}
+                </button>
+              </div>
+            </div>
+          )}
+          {tidy.note && !tidy.plan && (
+            <p className="mt-3 text-[12px] font-sans text-text-tertiary">{tidy.note}</p>
+          )}
           <div className="mt-4">
             <div className="mb-2 flex items-center justify-between gap-3">
               <span className="text-[12px] font-sans font-medium text-text-secondary">

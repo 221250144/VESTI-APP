@@ -33,8 +33,33 @@ export {
   buildMessagePreviewText,
   buildMessageSidecarSummaryLines,
 } from "./lib/messagePackage";
-export { serializeRelayPackMarkdown } from "./lib/relayMarkdown";
+export {
+  findExtractedFileAnchor,
+  normalizeRelayPackPayload,
+  relayPathKey,
+  serializeRelayPackMarkdown,
+} from "./lib/relayMarkdown";
 export { sanitizeFileBaseName, serializeExtractMarkdown } from "./lib/extractMarkdown";
+export {
+  AITI_MIN_STRUCTURED_SUMMARIES,
+  computeSummaryCoverage,
+} from "./lib/summaryCoverage";
+export {
+  LEARN_TOPIC_SUGGESTION_MAX,
+  learnTopicSuggestions,
+} from "./lib/learnTopics";
+export {
+  SUMMARY_BATCH_LIMIT,
+  advanceSummaryBatch,
+  createSummaryBatchProgress,
+  isSummaryBatchComplete,
+  planSummaryBatch,
+} from "./lib/summaryBatch";
+export type { SummaryBatchProgress } from "./lib/summaryBatch";
+export type {
+  SummaryCoverageConversation,
+  SummaryCoverageSummary,
+} from "./lib/summaryCoverage";
 export type { PipelineStageState } from "./components/SummaryPipelineProgress";
 export type {
   NotionDatabaseOption,
@@ -70,6 +95,10 @@ export type {
   UpdatePromptChanges,
   PromptListFilter,
   PromptExtractionResult,
+  PromptScanSourceRef,
+  PromptScanCandidate,
+  PromptScanProgress,
+  PromptScanResult,
   PromptCompletionResult,
   PlazaPrompt,
   PlazaCategory,
@@ -78,10 +107,15 @@ export type {
   AitiAxisScore,
   AitiObsession,
   AitiImagery,
+  SummaryCoverage,
+  SummaryBatchState,
   LearnProfile,
   LearnDomain,
   LearnGlossaryEntry,
   LearnOpenLoop,
+  LearnDeepenAnalysis,
+  LearnDeepenResult,
+  RelatedConversation,
   RoundtablePersonaId,
   RoundtablePersona,
   RoundtableSeatTurn,
@@ -90,6 +124,11 @@ export type {
   RelayPack,
   RelayPackPayload,
   RelayPackKeyFile,
+  RelayPackGitState,
+  RelayPackFailedPath,
+  RelayPackVerification,
+  RelayPackConfidence,
+  RelayPackExtractedFile,
   RelayCliCommandView,
   RelayAvailability,
   ExtractCodeSnippet,
@@ -99,6 +138,8 @@ export type {
   Deposit,
   DepositScope,
   DepositTemplate,
+  DepositMaintainOp,
+  DepositMaintainOpName,
   CreateDepositInput,
   GenerateDepositInput,
   DailyLog,

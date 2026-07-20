@@ -1,8 +1,11 @@
 # 悬浮球猫头鹰皮肤素材
 
-每个子目录是一套皮肤，内含 `collapsed.png`（1024×1024 RGBA，透明背景，四角 alpha=0），
-即悬浮球折叠态的猫头鹰圆球立绘。皮肤在 `src/capsule/skins.ts` 注册，选择结果存于
-ui-prefs 的 `owlSkin`。
+每个子目录是一套皮肤，内含 `collapsed.png`（RGBA 透明背景；生成批次为 1024×1024，
+四角 alpha=0），即悬浮球折叠态的猫头鹰圆球立绘。皮肤在 `src/capsule/skins.ts` 注册，
+选择结果存于 ui-prefs 的 `owlSkin`。
+
+例外：`classic` 已换回原版线条猫头鹰 logo（512×512，来源 `绘图/output/logo_base.png`，
+宽幅线稿构图而非圆球立绘），重新解码脚本为 `绘图/decode_logo_base.py`。
 
 ## 素材来源与重新生成
 

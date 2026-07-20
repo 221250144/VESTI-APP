@@ -1,4 +1,4 @@
-﻿
+
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -11,6 +11,7 @@ import {
   Download,
   FileText,
   Filter,
+  Inbox,
   Loader2,
   MessageSquarePlus,
   PanelLeftClose,
@@ -122,6 +123,9 @@ type ExploreTabProps = {
   themeMode?: UiThemeMode;
   onOpenConversation?: (conversationId: number) => void;
   labels: ExploreLabels;
+  /** "继续深入" seed: the host hands a prefilled question (e.g. from the Learn
+   * map); the composer adopts it once per nonce and takes focus. */
+  seedQuery?: { text: string; nonce: number } | null;
 };
 
 type DrawerTab = "plan" | "tool_calls" | "sources" | "context_draft";
@@ -269,6 +273,7 @@ export function ExploreTab({
   themeMode = "light",
   onOpenConversation,
   labels,
+  seedQuery,
 }: ExploreTabProps) {
   const modeStages = labels.modeStages;
   const starterDecks = labels.starterDecks;
@@ -311,6 +316,8 @@ export function ExploreTab({
   const [starterDeckRevision, setStarterDeckRevision] = useState(0);
   const [starterDeckStatus, setStarterDeckStatus] = useState<StarterDeckStatus>("loading");
   const [starterCards, setStarterCards] = useState<StarterPromptCard[]>([]);
+  // Drives the empty-KB guidance in the starter deck (null = not loaded yet).
+  const [libraryConversationCount, setLibraryConversationCount] = useState<number | null>(null);
   const sidebarPane = useResizableWidth({
     storageKey: "vesti.explore.sidebar-width",
     defaultWidth: 256,
@@ -362,6 +369,16 @@ export function ExploreTab({
     loadSessions();
   }, []);
 
+  // Adopt a host-seeded question ("继续深入" from the Learn map) once per
+  // nonce: fill the composer and focus it so the user can edit/send at once.
+  const seededNonceRef = useRef(0);
+  useEffect(() => {
+    if (!seedQuery || seedQuery.nonce === seededNonceRef.current) return;
+    seededNonceRef.current = seedQuery.nonce;
+    setInputValue(seedQuery.text);
+    textareaRef.current?.focus();
+  }, [seedQuery]);
+
   useEffect(() => {
     if (currentSessionId) {
       if (justCreatedSessionRef.current === currentSessionId) {
@@ -403,6 +420,7 @@ export function ExploreTab({
       let nextCards = starterPrompts;
       try {
         const conversations = await storage.getConversations();
+        setLibraryConversationCount(conversations.length);
         nextCards = buildLibraryStarterPrompts(conversations, starterPrompts, starterDeckRevision, labels);
       } catch {
         nextCards = starterPrompts;
@@ -1069,6 +1087,11 @@ export function ExploreTab({
                             className="inline-flex items-center gap-1.5 rounded-full bg-bg-surface-card px-2.5 py-1 text-xs font-sans text-text-secondary transition-colors hover:bg-bg-surface-card-hover"
                           >
                             <span className="max-w-[120px] truncate">{source.title}</span>
+                            {source.fromSubagent ? (
+                              <span className="text-text-tertiary">
+                                {labels.fromSubagent ?? "（来自子代理）"}
+                              </span>
+                            ) : null}
                             <span className="text-accent-primary">
                               {getSourceBadgeLabel(source, plan, labels)}
                             </span>
@@ -1156,6 +1179,26 @@ export function ExploreTab({
               </div>
             </div>
           </section>
+
+          {libraryConversationCount === 0 ? (
+            <section className="flex items-start gap-3 rounded-[24px] border border-border-subtle bg-bg-surface-card p-4">
+              <div
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-accent-primary-light text-accent-primary"
+                aria-hidden="true"
+              >
+                <Inbox className="h-4 w-4" strokeWidth={1.75} />
+              </div>
+              <div className="min-w-0">
+                <p className="text-[13px] font-medium text-text-primary">
+                  {labels.libraryEmptyTitle ?? "Nothing to recall yet"}
+                </p>
+                <p className="mt-1 text-[12px] leading-relaxed text-text-tertiary">
+                  {labels.libraryEmptyHint ??
+                    "Sync your AI sessions first, then come back — answers are recalled across your conversation library and cited with sources."}
+                </p>
+              </div>
+            </section>
+          ) : null}
 
           <section className="space-y-3">
             <div className="flex items-end justify-between gap-3 px-1">
@@ -1423,11 +1466,11 @@ export function ExploreTab({
               {error && (
                 <div className="py-4">
                   <div className="mx-auto max-w-3xl px-4">
-                    <div className="rounded-lg border border-red-200 bg-red-50 p-4">
-                      <p className="text-sm font-sans text-red-700">{error}</p>
+                    <div className="rounded-lg border border-danger/30 bg-danger/5 p-4">
+                      <p className="text-sm font-sans text-danger">{error}</p>
                       <button
                         onClick={() => setError(null)}
-                        className="mt-2 text-xs font-sans text-red-600 hover:text-red-800"
+                        className="mt-2 text-xs font-sans text-danger/80 transition-colors hover:text-danger"
                       >
                         {labels.dismiss}
                       </button>

@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   ipcMain,
   Menu,
@@ -16,6 +17,7 @@ import { AgentService } from './main/agentService';
 import { CaptureService } from './main/captureService';
 import { CapsuleWindowService } from './main/capsuleWindowService';
 import { DigestService } from './main/digestService';
+import { ProjectMemoryService } from './main/projectMemoryService';
 import { EmbeddingService } from './main/embeddingService';
 import { ExtensionBridgeService, MAX_OUTBOX_PROMPT_CHARS } from './main/extensionBridgeService';
 import { NotionService } from './main/notionService';
@@ -23,10 +25,31 @@ import { SettingsService } from './main/settingsService';
 import { UiPrefsService } from './main/uiPrefsService';
 import { writeUpstreamExportFile } from './main/vaultExportService';
 import {
+  assembleCapsuleRelayDraft,
+  buildQuickAskTranscript,
+  CAPSULE_DRAFT_MAX_SESSIONS,
+  CAPSULE_QUICK_ASK_MAX_CHARS,
+  CAPSULE_SEARCH_LIMIT,
+  normalizePromptSnapshot,
+  normalizeRelayDraftRequest,
+  searchCapsulePrompts,
+  type CapsuleCuratedPromptInput,
+  type CapsuleDraftSessionInput,
+} from './main/capsuleDock';
+import type { RelayPackPayload } from './main/agentPrompts';
+import { resolveCuratedPrompts } from './ui/promptPlaza/commonPrompts';
+import {
   IPC,
   type AgentRunRequest,
   type AppSettingsUpdate,
   type CapturePlatform,
+  type CapsuleContextMenuLabels,
+  type CapsuleProjectView,
+  type CapsulePromptContinueResult,
+  type CapsulePromptImproveResult,
+  type CapsulePromptSnapshot,
+  type CapsuleRelayDraft,
+  type CapsuleRelaySessionView,
   type ExtensionImportRequestPayload,
   type ExtensionImportResultPayload,
   type NotionExportRequest,
@@ -49,6 +72,7 @@ let settings: SettingsService;
 let agent: AgentService;
 let embedding: EmbeddingService;
 let digest: DigestService;
+let projectMemory: ProjectMemoryService;
 let notion: NotionService;
 const uiPrefs = new UiPrefsService();
 let capsule: CapsuleWindowService;
@@ -87,6 +111,39 @@ function showMainWindow(): void {
 
 function broadcastBridgeChange(): void {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC.extensionBridgeChanged);
+}
+
+// TOFU association prompts the user denied: don't nag the same extension
+// client again for a while (in-memory only — a restart resets it).
+const ASSOCIATION_DENIAL_COOLDOWN_MS = 10 * 60 * 1000;
+const associationDenials = new Map<string, number>();
+
+/** Bridge Protocol v1.2 confirm callback: native one-tap TOFU dialog. */
+async function confirmExtensionAssociation(request: { client: string; clientId: string }): Promise<boolean> {
+  const deniedUntil = associationDenials.get(request.clientId);
+  if (deniedUntil !== undefined) {
+    if (Date.now() < deniedUntil) return false;
+    associationDenials.delete(request.clientId);
+  }
+  const target = await ensureRendererWindow();
+  if (target.isMinimized()) target.restore();
+  target.show();
+  target.focus();
+  const { response } = await dialog.showMessageBox(target, {
+    type: 'warning',
+    buttons: ['允许连接', '拒绝'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+    title: 'VESTI 扩展连接请求',
+    message: '允许 VESTI 浏览器扩展连接到此设备？',
+    detail: `${request.client}（${request.clientId}）正在请求连接。\n`
+      + '允许后，扩展会把你的网页端 AI 会话同步到本设备，此后长期免确认。\n'
+      + '仅在你刚安装了 VESTI 扩展时点击「允许连接」。',
+  });
+  const allowed = response === 0;
+  if (!allowed) associationDenials.set(request.clientId, Date.now() + ASSOCIATION_DENIAL_COOLDOWN_MS);
+  return allowed;
 }
 
 // The bridge HTTP server runs even when the main window is hidden/closed
@@ -158,7 +215,7 @@ function validSessionId(value: unknown): value is string {
 function validAgentRequest(value: unknown): value is AgentRunRequest {
   if (!value || typeof value !== 'object') return false;
   const request = value as Partial<AgentRunRequest>;
-  return (request.kind === 'summary' || request.kind === 'explore' || request.kind === 'digest' || request.kind === 'classify' || request.kind === 'relay' || request.kind === 'extract' || request.kind === 'distill' || request.kind === 'daily' || request.kind === 'persona')
+  return (request.kind === 'summary' || request.kind === 'explore' || request.kind === 'digest' || request.kind === 'classify' || request.kind === 'relay' || request.kind === 'extract' || request.kind === 'distill' || request.kind === 'deposit-maintain' || request.kind === 'daily' || request.kind === 'persona' || request.kind === 'roundtable-turn' || request.kind === 'roundtable-synthesis' || request.kind === 'learn-deepen' || request.kind === 'prompt-improve' || request.kind === 'prompt-continue')
     && validSessionId(request.sessionId)
     && (request.question === undefined || typeof request.question === 'string')
     && (request.template === undefined || (typeof request.template === 'string' && request.template.length <= 64))
@@ -316,6 +373,186 @@ function applyGeneralSettings(): void {
   });
 }
 
+// ---- P6 capsule dock helpers ----
+
+/** Draft/quick-ask text language follows the agent output language. */
+function capsuleDraftLanguage(): 'zh-CN' | 'en-US' {
+  return settings.getRuntimeAgent().outputLanguage === 'en-US' ? 'en-US' : 'zh-CN';
+}
+
+/** Prompt-catalog language follows the UI language (catalog ships zh/en). */
+function capsuleUiLanguage(): 'zh' | 'en' {
+  const value = uiPrefs.get('language') as { locale?: unknown } | undefined;
+  return value?.locale === 'zh' ? 'zh' : 'en';
+}
+
+function capsuleLlmConfigured(): boolean {
+  const llm = settings.getView(capture.activeDataDirectory).llm;
+  return llm.mode === 'demo_proxy' || llm.apiKeyConfigured;
+}
+
+// The curated catalog is locale-resolved once per language and cached; the
+// per-query filtering happens in the pure searchCapsulePrompts.
+const curatedCache = new Map<'zh' | 'en', CapsuleCuratedPromptInput[]>();
+function curatedPromptsFor(language: 'zh' | 'en'): CapsuleCuratedPromptInput[] {
+  const cached = curatedCache.get(language);
+  if (cached) return cached;
+  const resolved = resolveCuratedPrompts(language);
+  curatedCache.set(language, resolved);
+  return resolved;
+}
+
+function promptSnapshotPath(): string {
+  return path.join(capture.activeDataDirectory, 'cache', 'prompt-snapshot.json');
+}
+
+// undefined = not loaded yet; null = loaded and absent/invalid.
+let promptSnapshotCache: CapsulePromptSnapshot | null | undefined;
+
+async function readPromptSnapshot(): Promise<CapsulePromptSnapshot | null> {
+  if (promptSnapshotCache !== undefined) return promptSnapshotCache;
+  try {
+    const raw = JSON.parse(await fs.readFile(promptSnapshotPath(), 'utf8')) as unknown;
+    promptSnapshotCache = normalizePromptSnapshot(raw);
+  } catch {
+    promptSnapshotCache = null;
+  }
+  return promptSnapshotCache;
+}
+
+async function writePromptSnapshot(value: unknown): Promise<void> {
+  const snapshot = normalizePromptSnapshot(value);
+  if (!snapshot) throw new Error('提示词快照无效');
+  const filePath = promptSnapshotPath();
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const temporary = `${filePath}.tmp`;
+  await fs.writeFile(temporary, JSON.stringify(snapshot), 'utf8');
+  await fs.rm(filePath, { force: true });
+  await fs.rename(temporary, filePath);
+  promptSnapshotCache = snapshot;
+}
+
+/** Flatten the conversation tree into the capsule's project picker view. */
+function capsuleProjectViews(): CapsuleProjectView[] {
+  const tree = capture.getConversationTree();
+  const projects: CapsuleProjectView[] = [];
+  for (const source of tree.sources) {
+    for (const project of source.projects) {
+      const sorted = [...project.sessions].sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+      projects.push({
+        platform: source.platform,
+        host: source.host,
+        projectKey: project.projectKey,
+        label: project.label,
+        pathOrDomain: project.pathOrDomain,
+        sessionCount: project.sessions.length,
+        recentSessions: sorted.slice(0, 5).map(session => ({
+          sessionId: session.id,
+          title: session.title,
+          oneLiner: session.oneLiner,
+          lastActivityAt: session.lastActivityAt,
+        })),
+      });
+    }
+  }
+  // Most recently active projects first.
+  return projects.sort(
+    (a, b) => (b.recentSessions[0]?.lastActivityAt ?? 0) - (a.recentSessions[0]?.lastActivityAt ?? 0),
+  );
+}
+
+function buildCapsuleRelayDraft(request: unknown): CapsuleRelayDraft {
+  const normalized = normalizeRelayDraftRequest(request);
+  if (!normalized) throw new Error('接力范围请求无效');
+  const tree = capture.getConversationTree();
+
+  interface LocatedSession {
+    id: string;
+    title: string;
+    platform: string;
+    projectLabel: string;
+    lastActivityAt: number;
+    digest: { oneLiner: string | null; keyTopics: string[]; keyFiles: string[]; decisions: string[] } | null;
+  }
+
+  const located: LocatedSession[] = [];
+  const wanted = normalized.sessionIds?.length ? new Set(normalized.sessionIds) : null;
+  for (const source of tree.sources) {
+    for (const project of source.projects) {
+      if (!wanted && (source.platform !== normalized.platform || source.host !== normalized.host
+        || project.projectKey !== normalized.projectKey)) continue;
+      const sorted = [...project.sessions].sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+      for (const session of sorted) {
+        if (wanted ? !wanted.has(session.id) : located.length >= CAPSULE_DRAFT_MAX_SESSIONS) continue;
+        located.push({
+          id: session.id,
+          title: session.title,
+          platform: source.platform,
+          projectLabel: project.label,
+          lastActivityAt: session.lastActivityAt,
+          digest: session.oneLiner || session.keyTopics.length || session.decisions.length
+            ? {
+                oneLiner: session.oneLiner,
+                keyTopics: session.keyTopics,
+                keyFiles: session.keyFiles,
+                decisions: session.decisions,
+              }
+            : null,
+        });
+      }
+    }
+  }
+  if (located.length === 0) {
+    throw new Error(wanted ? '所选会话不存在，请先同步' : '所选项目不存在或暂无会话');
+  }
+
+  // Enrich with git fields + the full digest (open_questions never reaches
+  // the conversation tree), mirroring the renderer relay pipeline.
+  const contexts = capture.getRelaySessionContexts(located.map(session => session.id));
+  const contextById = new Map(contexts.map(context => [context.sessionId, context]));
+  const inputs: CapsuleDraftSessionInput[] = located.map((session) => {
+    const context = contextById.get(session.id);
+    const digest = context?.digest ?? (session.digest ? { ...session.digest, openQuestions: [] } : null);
+    // Sessions without a digest still contribute recent message excerpts.
+    let recentMessages: Array<{ role: string; content: string }> = [];
+    if (!digest) {
+      const detail = capture.getSession(session.id);
+      recentMessages = (detail?.messages ?? [])
+        .filter(message => message.contentText?.trim())
+        .slice(-2)
+        .map(message => ({ role: message.role, content: message.contentText ?? '' }));
+    }
+    return {
+      sessionId: session.id,
+      title: session.title,
+      platform: session.platform,
+      projectLabel: session.projectLabel,
+      lastActivityAt: session.lastActivityAt,
+      gitBranch: context?.gitBranch ?? null,
+      gitRemote: context?.gitRemote ?? null,
+      digest,
+      recentMessages,
+    };
+  });
+
+  const labels = [...new Set(inputs.map(input => input.projectLabel))];
+  const language = capsuleDraftLanguage();
+  const projectLabel = labels.length === 1
+    ? labels[0]
+    : language === 'en-US' ? 'Multiple projects' : '多个项目';
+  const { text } = assembleCapsuleRelayDraft(inputs, { language, projectLabel });
+  return {
+    text,
+    sessionCount: inputs.length,
+    sessions: inputs.map(input => ({
+      sessionId: input.sessionId,
+      title: input.title,
+      oneLiner: input.digest?.oneLiner ?? null,
+      lastActivityAt: input.lastActivityAt,
+    })),
+  };
+}
+
 function registerIpc(): void {
   // Custom title bar window controls. Resolve the sender's window so the
   // handlers stay correct no matter which window invoked them.
@@ -402,6 +639,22 @@ function registerIpc(): void {
     const item = await extensionBridge.enqueueOutbox(request.prompt);
     return { id: item.id };
   });
+  ipcMain.handle(IPC.relaySessionContexts, (_event, sessionIds: unknown) => {
+    if (!Array.isArray(sessionIds) || sessionIds.length > 50
+      || !sessionIds.every(validSessionId)) {
+      throw new Error('交接上下文请求无效');
+    }
+    return capture.getRelaySessionContexts(sessionIds);
+  });
+  ipcMain.handle(IPC.relayFileTouches, (_event, sessionIds: unknown) => {
+    // Subagent sessions ride along with selected parents, so the id list can
+    // legitimately exceed the raw selection size — allow a wider fan-out.
+    if (!Array.isArray(sessionIds) || sessionIds.length > 200
+      || !sessionIds.every(validSessionId)) {
+      throw new Error('文件锚点请求无效');
+    }
+    return capture.getRelayFileTouches(sessionIds);
+  });
   ipcMain.handle(IPC.clearAgentResults, async () => {
     await agent.clearResults();
   });
@@ -419,6 +672,19 @@ function registerIpc(): void {
   ipcMain.handle(IPC.agentResults, () => agent.listResults());
   ipcMain.handle(IPC.exportConversations, () => capture.exportConversations());
   ipcMain.handle(IPC.conversationTree, () => capture.getConversationTree());
+  ipcMain.handle(IPC.projectStates, () => capture.listProjectStates());
+  ipcMain.handle(IPC.projectBrief, (_event, projectKey: unknown) => {
+    if (typeof projectKey !== 'string' || !projectKey.trim()) throw new Error('Invalid project key');
+    return capture.getProjectBrief(projectKey.trim());
+  });
+  ipcMain.handle(IPC.fileTimeline, (_event, query: unknown) => {
+    const input = (query ?? {}) as { projectKey?: unknown; filePath?: unknown };
+    if (typeof input.filePath !== 'string' || !input.filePath.trim()) throw new Error('Invalid file path');
+    return capture.getFileTimeline({
+      projectKey: typeof input.projectKey === 'string' && input.projectKey.trim() ? input.projectKey : undefined,
+      filePath: input.filePath.trim(),
+    });
+  });
   ipcMain.handle(IPC.recallSessions, async (_event, query: unknown, topK: unknown) => {
     if (typeof query !== 'string' || !query.trim()) throw new Error('Invalid recall query');
     const limit = typeof topK === 'number' && Number.isInteger(topK) && topK >= 1 && topK <= 20 ? topK : 5;
@@ -429,6 +695,7 @@ function registerIpc(): void {
   });
   ipcMain.handle(IPC.extensionBridgeStatus, () => extensionBridge.getStatus());
   ipcMain.handle(IPC.extensionPairCodeCreate, () => extensionBridge.createPairCode());
+  ipcMain.handle(IPC.extensionPairingWindowOpen, () => extensionBridge.openPairingWindow());
   ipcMain.handle(IPC.extensionClientDisconnect, (_event, clientId: unknown) => {
     if (typeof clientId !== 'string' || !clientId) throw new Error('Invalid client id');
     return extensionBridge.disconnectClient(clientId);
@@ -477,20 +744,119 @@ function registerIpc(): void {
     if (typeof x === 'number' && typeof y === 'number') await capsule.handleDragEnd(x, y);
   });
   ipcMain.on(IPC.capsuleContextMenu, (_event, labels: unknown) => {
+    // The capsule renderer sends localized labels; fall back to zh defaults.
+    const fallback: CapsuleContextMenuLabels = {
+      open: '打开 Vesti',
+      sync: '立即同步',
+      watching: '实时采集',
+      hide: '隐藏悬浮球',
+    };
     const candidate = labels && typeof labels === 'object'
-      ? labels as Record<string, unknown>
+      ? (labels as Partial<CapsuleContextMenuLabels>)
       : {};
-    const label = (key: string, fallback: string) =>
-      typeof candidate[key] === 'string' && candidate[key].trim()
-        ? candidate[key].trim().slice(0, 80)
-        : fallback;
+    const pick = (value: unknown, fallbackValue: string) =>
+      typeof value === 'string' && value.trim() ? value.trim().slice(0, 40) : fallbackValue;
     capsule.showContextMenu({
-      open: label('open', '打开 Vesti'),
-      sync: label('sync', '立即同步'),
-      watching: label('watching', '实时采集'),
-      hide: label('hide', '隐藏悬浮球'),
+      open: pick(candidate.open, fallback.open),
+      sync: pick(candidate.sync, fallback.sync),
+      watching: pick(candidate.watching, fallback.watching),
+      hide: pick(candidate.hide, fallback.hide),
     });
   });
+
+  // ---- P6 capsule dock ----
+  ipcMain.handle(IPC.capsuleDockStatus, async () => {
+    // getOverview re-detects sources; only fetched when the panel opens.
+    const overview = await capture.getOverview().catch(() => null);
+    return {
+      llmConfigured: capsuleLlmConfigured(),
+      extensionConnected: extensionBridge.getStatus().clients.length > 0,
+      sourceCount: overview
+        ? overview.sources.filter(source => source.enabled && source.installed).length
+        : 0,
+    };
+  });
+  ipcMain.handle(IPC.capsuleQuickAsk, async (_event, question: unknown) => {
+    if (typeof question !== 'string' || !question.trim() || question.length > CAPSULE_QUICK_ASK_MAX_CHARS) {
+      throw new Error('问题内容无效');
+    }
+    const query = question.trim();
+    // Query vector is best-effort, mirroring the recall IPC above.
+    const vector = await embedding.embed([query]).then(vectors => vectors[0] ?? null).catch(() => null);
+    const hits = capture.recallSessions(query, 5, vector);
+    const transcript = buildQuickAskTranscript(
+      hits.map(hit => ({ title: hit.title, oneLiner: hit.oneLiner, snippet: hit.snippet })),
+      { language: capsuleDraftLanguage() },
+    );
+    const result = await agent.run({
+      kind: 'explore',
+      sessionId: `capsule-ask:${Date.now()}`,
+      question: query,
+      transcriptOverride: transcript,
+      persist: false,
+    }, { persist: false });
+    return { answer: result.content, recalled: hits.length };
+  });
+  ipcMain.handle(IPC.capsuleProjects, () => capsuleProjectViews());
+  ipcMain.handle(IPC.capsuleRelayDraft, (_event, request: unknown) => buildCapsuleRelayDraft(request));
+  ipcMain.handle(IPC.capsuleRelayPolish, async (_event, draft: unknown) => {
+    if (typeof draft !== 'string' || !draft.trim() || draft.length > 30_000) {
+      throw new Error('交接草稿无效');
+    }
+    const result = await agent.run({
+      kind: 'relay',
+      sessionId: `capsule-relay:${Date.now()}`,
+      transcriptOverride: draft,
+      persist: false,
+    }, { persist: false });
+    const payload = JSON.parse(result.content) as RelayPackPayload;
+    return { title: payload.title, suggestedPrompt: payload.suggested_prompt };
+  });
+  ipcMain.handle(IPC.capsuleSearchPrompts, async (_event, query: unknown) => {
+    const normalized = typeof query === 'string' ? query.slice(0, 200) : '';
+    const snapshot = await readPromptSnapshot();
+    return searchCapsulePrompts({
+      query: normalized,
+      curated: curatedPromptsFor(capsuleUiLanguage()),
+      snapshot,
+      limit: CAPSULE_SEARCH_LIMIT,
+    });
+  });
+  // Capsule prompt assistant: AI refine / continue for the picked prompt.
+  // Both run through agentService with persist:false — nothing is logged.
+  ipcMain.handle(IPC.capsulePromptImprove, async (_event, body: unknown) => {
+    if (typeof body !== 'string' || !body.trim() || body.length > 8_000) {
+      throw new Error('提示词内容无效');
+    }
+    const result = await agent.run({
+      kind: 'prompt-improve',
+      sessionId: `capsule-prompt:${Date.now()}`,
+      transcriptOverride: body.trim(),
+      persist: false,
+    }, { persist: false });
+    // parse() in the kind definition already validated the strict JSON shape.
+    return JSON.parse(result.content) as CapsulePromptImproveResult;
+  });
+  ipcMain.handle(IPC.capsulePromptContinue, async (_event, body: unknown) => {
+    if (typeof body !== 'string' || !body.trim() || body.length > 8_000) {
+      throw new Error('提示词内容无效');
+    }
+    const result = await agent.run({
+      kind: 'prompt-continue',
+      sessionId: `capsule-prompt:${Date.now()}`,
+      transcriptOverride: body.trim(),
+      persist: false,
+    }, { persist: false });
+    return { continued: result.content } satisfies CapsulePromptContinueResult;
+  });
+  ipcMain.handle(IPC.capsulePromptSnapshotGet, () => readPromptSnapshot());
+  ipcMain.handle(IPC.capsulePromptSnapshotSave, (_event, value: unknown) => writePromptSnapshot(value));
+  ipcMain.handle(IPC.capsuleCopyText, (_event, text: unknown) => {
+    if (typeof text !== 'string' || text.length > 200_000) throw new Error('复制内容无效');
+    clipboard.writeText(text);
+  });
+  ipcMain.handle(IPC.capsulePanelHeight, (_event, height: unknown) =>
+    capsule.setPanelHeight(typeof height === 'number' && Number.isFinite(height) ? height : null));
 }
 
 async function createWindow(): Promise<void> {
@@ -585,10 +951,15 @@ app.whenReady().then(async () => {
   await capture.initialize(broadcastChange, settings.dataDirectory, settings.capture.enabledPlatforms);
   agent = new AgentService(capture, settings);
   embedding = new EmbeddingService(settings);
-  digest = new DigestService(capture, agent, embedding);
+  digest = new DigestService(capture, agent, embedding, () => settings.isLlmConfigured());
   notion = new NotionService(settings);
-  capture.setSyncCompletedListener(() => digest.requestScan());
+  projectMemory = new ProjectMemoryService(capture, agent);
+  capture.setSyncCompletedListener(() => {
+    digest.requestScan();
+    projectMemory.requestScan();
+  });
   digest.start();
+  projectMemory.requestScan();
   extensionBridge = new ExtensionBridgeService({
     appVersion: app.getVersion(),
     port: settings.getBridgePort(),
@@ -608,6 +979,9 @@ app.whenReady().then(async () => {
         maxCapturedAt: result.maxCapturedAt,
       })),
     onClientsChanged: broadcastBridgeChange,
+    onPairingWindowChanged: broadcastBridgeChange,
+    confirmAssociation: confirmExtensionAssociation,
+    loadOriginAllowlist: () => settings.getBridgeOriginAllowlist(),
     log: line => console.log(`[vesti] ${line}`),
   });
   registerIpc();

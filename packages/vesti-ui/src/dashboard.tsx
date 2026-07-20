@@ -17,13 +17,19 @@ import { ExploreTab } from "./tabs/explore-tab";
 import { AitiCard } from "./components/AitiCard";
 import { LearnCard } from "./components/LearnCard";
 import { RoundtablePanel } from "./components/RoundtablePanel";
+import { learnTopicSuggestions } from "./lib/learnTopics";
 import { DepositsTab } from "./tabs/deposits-tab";
 import { DailyTab } from "./tabs/daily-tab";
 import { LibraryTab } from "./tabs/library-tab";
 import { NetworkTab } from "./tabs/network-tab";
 import { PromptsTab } from "./tabs/prompts-tab";
-import type { AitiImagery, AitiProfile, DashboardLabels, LearnProfile, PlazaData, StorageApi, UiThemeMode } from "./types";
+import type { AitiImagery, AitiProfile, DashboardLabels, LearnProfile, PlazaData, StorageApi, SummaryBatchState, SummaryCoverage, UiThemeMode } from "./types";
 import type { NotionDatabaseOption, NotionSettings } from "./notion-integration";
+import {
+  advanceSummaryBatch,
+  createSummaryBatchProgress,
+  planSummaryBatch,
+} from "./lib/summaryBatch";
 import {
   connectToNotion,
   disconnectNotion,
@@ -38,6 +44,7 @@ import {
 export type Tab = "library" | "explore" | "network" | "prompts" | "deposits" | "daily";
 type DrawerView = "settings" | "data";
 type ReturnTab = Exclude<Tab, "library">;
+type ExploreSubMode = "ask" | "aiti" | "learn" | "roundtable";
 type DashboardNavRequest = {
   tab?: unknown;
   requestedAt?: unknown;
@@ -45,6 +52,16 @@ type DashboardNavRequest = {
 type ThemeSyncStatus = "idle" | "syncing" | "error";
 
 const DASHBOARD_NAV_REQUEST_KEY = "vesti_dashboard_open_tab";
+/** Explore pill 选择记忆: reopening the app returns to the last sub-mode. */
+const EXPLORE_MODE_STORAGE_KEY = "vesti.explore.mode";
+
+function readStoredExploreMode(): ExploreSubMode {
+  if (typeof window === "undefined") return "ask";
+  const raw = window.localStorage.getItem(EXPLORE_MODE_STORAGE_KEY);
+  return raw === "ask" || raw === "aiti" || raw === "learn" || raw === "roundtable"
+    ? raw
+    : "ask";
+}
 
 const DEFAULT_LABELS: DashboardLabels = {
   tabs: { library: "LIBRARY", explore: "EXPLORE", network: "KNOWLEDGE GRAPH", prompts: "PROMPTS", deposits: "DEPOSITS", daily: "DAILY" },
@@ -339,6 +356,8 @@ const DEFAULT_LABELS: DashboardLabels = {
     multipleConversationsSelected: "{count} conversations selected",
     newChat: "New Chat",
     noConversationsYet: "No conversations yet",
+    libraryEmptyTitle: "Nothing to recall yet",
+    libraryEmptyHint: "Sync your AI sessions first, then come back — answers are recalled across your conversation library and cited with sources.",
     today: "Today",
     yesterday: "Yesterday",
     earlier: "Earlier",
@@ -372,11 +391,11 @@ const DEFAULT_LABELS: DashboardLabels = {
     starterDeck3Description: "Use a starter prompt to get a compact answer, then inspect the source conversations if you need verification.",
     modeStages: {
       agent: [
-        "Planning the route...",
-        "Scanning lightweight library cues...",
-        "Collecting source evidence...",
-        "Compiling context draft...",
-        "Synthesizing a longer answer...",
+        "Understanding your question...",
+        "Recalling relevant sessions...",
+        "Organizing recalled sources...",
+        "Generating the answer from sources...",
+        "Polishing the final answer...",
       ],
       classic: [
         "Understanding your question...",
@@ -662,6 +681,12 @@ const DEFAULT_LABELS: DashboardLabels = {
     gapInsightTemplate: "You explored {a} and {b} but never linked them",
     conceptMentionedIn: "Across {count} conversations",
     relatedConversations: "Related conversations",
+    groupByLabel: "Group by",
+    groupByPlatform: "Platform",
+    groupByTopic: "Topic",
+    groupByProject: "Project",
+    groupOther: "Ungrouped",
+    clusterConversationCount: "{count} conversations",
   },
   prompts: {
     title: "Prompt Library",
@@ -749,6 +774,25 @@ const DEFAULT_LABELS: DashboardLabels = {
     selectedCount: "{n} selected",
     deleteSelected: "Delete",
     clearSelection: "Cancel",
+    scanLibrary: "Scan library",
+    scanning: "Scanning…",
+    scanTooltip: "Scan every archived conversation (agent sessions and browser chats) for prompts you reuse",
+    scanProgress: "Scanning {done}/{total}…",
+    scanResultsTitle: "Scan results",
+    scanSummary: "Scanned {conversations} conversations and {inputs} of your inputs — {n} candidates found",
+    scanEmpty: "No reusable prompt patterns found — reuse similar instructions a few more times, then scan again.",
+    scanFailed: "Scan failed.",
+    scanPrivacy: "Only your own archived inputs on this device are scanned; with no LLM configured it runs fully offline — with one, candidate titles get a single naming call.",
+    scanTruncated: "Large library — only the most recent conversations were scanned this time.",
+    scanUsedCount: "{n}×",
+    scanSourceCount: "{n} chats",
+    scanAdopt: "Adopt",
+    scanAdopted: "Adopted",
+    scanIgnore: "Ignore",
+    scanInLibrary: "In library",
+    scanOriginAgent: "Agent",
+    scanOriginBrowser: "Browser",
+    scanClose: "Close results",
   },
   aiti: {
     modeAsk: "Ask",
@@ -756,7 +800,7 @@ const DEFAULT_LABELS: DashboardLabels = {
     modeRoundtable: "Roundtable",
     title: "Your AITI — your thinking strengths",
     subtitle: "Computed locally from your own conversations. A reflection of your strengths, not a verdict.",
-    insufficient: "Your imagery has not taken shape yet — a few more conversations with AI and it will emerge.",
+    insufficient: "Your imagery has not taken shape yet — it needs at least 5 conversation summaries as signal. Generate summaries below, or keep chatting with your AI and it will emerge.",
     sample: "Drawn from {n} of your conversations",
     typeSeparator: " · ",
     strengthsTitle: "Your thinking strengths",
@@ -787,30 +831,67 @@ const DEFAULT_LABELS: DashboardLabels = {
     axisSignalFaint: "Faint signal",
     imageryFaint: "The outline is still faint — some axes are gathering signal; read it lightly.",
     personaNoteLabel: "Recent footnote",
+    mindMapTitle: "Thinking map",
+    repoQrCaption: "Open source — scan for the repo",
     evidenceBecause: "This is so you, because…",
     evidenceConversation: "Conversation #{id}",
     exportCard: "Export imagery card",
+    coverageSummary: "Summarized {x} of {y} conversations ({z} structured)",
+    coverageNeedMore: "The imagery needs at least 5 structured summaries — {n} more to go.",
+    coverageEmpty: "No conversations yet — sync your AI sessions first, then summaries can be generated.",
+    generateSummaries: "Generate summaries",
+    generatingSummaries: "Generating {done}/{total}…",
+    cancelGeneration: "Stop",
+    summariesResult: "Finished: {done} generated, {failed} failed.",
+    llmMissing: "No model configured — set up an LLM in Settings first, then generate summaries.",
+    allSummarized: "Every conversation already has a structured summary.",
   },
   learn: {
     modeLearn: "Learn",
     title: "What you've been learning",
     subtitle: "Your conversations, organized as a personal curriculum. Computed locally.",
-    insufficient: "Not enough conversations yet — keep chatting and your learning map will fill in.",
+    intro: "This is your learning map: it automatically reads the summaries of your AI conversations and lays out what you've been studying, how deep it went, and what is still open.",
+    sourceLine: "Based on {n} analyzed conversations · covering {m} topics",
+    insufficient: "Not enough conversations yet — with at least 3 captured conversations your learning map starts to grow here. Ask a few questions in the Ask tab first.",
     sample: "From {n} analyzed conversations",
     domainsTitle: "Knowledge domains",
     uncategorized: "Uncategorized",
     domainConversations: "{n} conversations",
+    representativesTitle: "Representative conversations",
+    deepen: "Go deeper",
+    deepenPrompt: "Around \"{topic}\": what should I dig into next? Lay out a learning path from my past conversations.",
     glossaryTitle: "Things you've learned",
     openLoopsTitle: "Open loops",
     openLoopsEmpty: "No unresolved threads — nicely closed out.",
+    weakHint: "Still a thin sample — generate summaries for more conversations (see the AITI tab) and this map will fill in.",
+    weakAction: "Generate summaries on the AITI tab",
+    loading: "Putting your learning map together…",
+    deepenAi: "AI deep-dive",
+    deepenAiRunning: "Digging deeper into \"{topic}\"…",
+    deepenAiTitle: "AI learning-trajectory analysis",
+    mastered: "What you've mastered",
+    blindSpots: "Blind spots",
+    learningPath: "Suggested path",
+    deepenAiFailed: "Deep-dive failed",
+    llmMissing: "No model configured — set up an LLM in Settings first; the AI deep-dive needs one to analyze.",
+    groundedHint: "Grounded in {n} of your past conversations",
+    savedHint: "Saved to your Ask history — replay it anytime from the Ask tab.",
   },
   roundtable: {
     title: "AI Roundtable",
     subtitle: "Convene a panel of perspectives on your question, then a moderated synthesis.",
+    comingSoonTitle: "AI Roundtable — coming soon",
+    comingSoonBody: "The plan: convene several AI panelists with distinct perspectives on your question, then have a moderator synthesize the consensus, the disagreements, and a recommendation. The multi-turn orchestration is still being polished — until it is real, we'd rather not show you a fake run.",
     questionPlaceholder: "Ask a judgment-call question to debate…",
-    personasLabel: "Panelists (pick up to 3)",
+    intro: "The roundtable convenes several AI panelists with distinct perspectives on your question, then a moderator distills the consensus, the disagreements and a recommendation — grounded in your past conversations when recall finds relevant ones.",
+    topicsLabel: "Pick a topic from your learning domains",
+    topicPrompt: "Around \"{topic}\": what is the most worthwhile direction for me to invest in next?",
+    personasLabel: "Panelists (pick 2-4)",
     run: "Convene panel",
+    rerun: "Run it again",
     running: "The panel is deliberating…",
+    seatsProgress: "{done}/{total} panelists have spoken",
+    synthesisRunning: "The moderator is synthesizing…",
     latencyHint: "Each seat answers in turn, so this takes a little while.",
     needQuestion: "Type a question first.",
     seatsTitle: "Panel",
@@ -820,11 +901,17 @@ const DEFAULT_LABELS: DashboardLabels = {
     recommendation: "Recommendation",
     openQuestions: "Open questions",
     empty: "Ask a question and convene the panel to see perspectives + a synthesis.",
+    llmMissing: "No model configured — set up an LLM in Settings first; the panel needs one to deliberate.",
+    seatFailed: "Turn failed",
+    savedHint: "Saved to your Ask history — replay it anytime from the Ask tab.",
+    groundedHint: "Grounded in {n} of your past conversations",
     personaSkeptic: "Skeptic",
     personaOptimist: "Optimist",
     personaPragmatist: "Pragmatist",
     personaDomainExpert: "Domain Expert",
     personaDevilsAdvocate: "Devil's Advocate",
+    deepen: "Go deeper",
+    deepenPrompt: "In the roundtable on \"{question}\", {persona} argued: \"{excerpt}\". Dig into this viewpoint against my past conversations — where does it hold, where does it not?",
   },
 };
 
@@ -846,6 +933,8 @@ type DashboardProps = {
   aitiEmblemUrl?: string;
   aitiPersonaNote?: string | null;
   learn?: LearnProfile;
+  /** Transcript/persona language for the roundtable runs ("zh" default). */
+  lang?: "zh" | "en";
   /** Controlled active tab (desktop dock rail). Uncontrolled when omitted. */
   tab?: Tab;
   onTabChange?: (tab: Tab) => void;
@@ -868,6 +957,7 @@ export function VestiDashboard({
   aitiEmblemUrl,
   aitiPersonaNote,
   learn,
+  lang = "zh",
   tab: controlledTab,
   onTabChange,
 }: DashboardProps) {
@@ -900,7 +990,90 @@ export function VestiDashboard({
   useEffect(() => {
     if (controlledTab) setInternalTab(controlledTab);
   }, [controlledTab]);
-  const [exploreMode, setExploreMode] = useState<"ask" | "aiti" | "learn" | "roundtable">("ask");
+  const [exploreMode, setExploreMode] = useState<ExploreSubMode>(() => readStoredExploreMode());
+  // Explore 子模式记忆: persist the pill choice so a restart lands back on it.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(EXPLORE_MODE_STORAGE_KEY, exploreMode);
+  }, [exploreMode]);
+
+  // Learn → Ask handoff ("继续深入"): seed the Ask composer with a follow-up
+  // question and switch the pane; the nonce makes repeat clicks re-seed.
+  const [askSeed, setAskSeed] = useState<{ text: string; nonce: number } | null>(null);
+  const handleExploreTopic = useCallback((text: string) => {
+    setAskSeed({ text, nonce: Date.now() });
+    setExploreMode("ask");
+  }, []);
+  const handleGoAiti = useCallback(() => setExploreMode("aiti"), []);
+
+  // AITI 摘要覆盖率 + 立即生成摘要 batch state (undefined coverage → the
+  // host storage doesn't implement the coverage API and the header hides).
+  const summaryCoverageSupported = Boolean(storage.getSummaryCoverage);
+  const [aitiCoverage, setAitiCoverage] = useState<SummaryCoverage | null>(null);
+  const [aitiCoverageFailed, setAitiCoverageFailed] = useState(false);
+  const [llmConfigured, setLlmConfigured] = useState<boolean | undefined>(undefined);
+  const [summaryBatch, setSummaryBatch] = useState<SummaryBatchState | null>(null);
+  const summaryBatchCancelRef = useRef(false);
+
+  const refreshAitiCoverage = useCallback(async () => {
+    if (!storage.getSummaryCoverage) return;
+    try {
+      const coverage = await storage.getSummaryCoverage();
+      setAitiCoverage(coverage);
+      setAitiCoverageFailed(false);
+    } catch {
+      // Hide the header on failure rather than spinning forever.
+      setAitiCoverageFailed(true);
+    }
+    if (storage.getLlmConfigured) {
+      const configured = await storage.getLlmConfigured().catch(() => false);
+      setLlmConfigured(configured);
+    }
+  }, [storage]);
+
+  useEffect(() => {
+    if (exploreMode !== "aiti" || !summaryCoverageSupported) return;
+    void refreshAitiCoverage();
+    // Stay in step with capture syncs (and with our own batch completion,
+    // which fires the same event) while the aiti pane is visible.
+    const handler = () => void refreshAitiCoverage();
+    window.addEventListener("vesti:data-updated", handler);
+    return () => window.removeEventListener("vesti:data-updated", handler);
+  }, [exploreMode, refreshAitiCoverage, summaryCoverageSupported]);
+
+  // 立即生成摘要: strictly sequential (concurrency 1), capped by
+  // planSummaryBatch; failures are counted and the run continues.
+  const handleGenerateSummaries = useCallback(async () => {
+    if (!storage.generateSummary || !aitiCoverage || summaryBatch?.status === "running") return;
+    const ids = planSummaryBatch(aitiCoverage.pendingConversationIds);
+    if (ids.length === 0) return;
+    summaryBatchCancelRef.current = false;
+    let progress = createSummaryBatchProgress(ids.length);
+    setSummaryBatch({ status: "running", ...progress });
+    for (const id of ids) {
+      if (summaryBatchCancelRef.current) break;
+      let outcome: "ok" | "failed" = "ok";
+      try {
+        await storage.generateSummary(id);
+      } catch (error) {
+        console.error("[Explore] Summary generation failed for conversation", id, error);
+        outcome = "failed";
+      }
+      progress = advanceSummaryBatch(progress, outcome);
+      setSummaryBatch({ status: "running", ...progress });
+    }
+    setSummaryBatch({ status: "done", ...progress });
+    // Same recompute trigger as a capture sync: the host recomputes AITI /
+    // Learn from the freshly written summaries when it hears this.
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("vesti:data-updated"));
+    }
+    await refreshAitiCoverage();
+  }, [storage, aitiCoverage, summaryBatch?.status, refreshAitiCoverage]);
+
+  const handleCancelSummaryBatch = useCallback(() => {
+    summaryBatchCancelRef.current = true;
+  }, []);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerView, setDrawerView] = useState<DrawerView>("settings");
@@ -1394,6 +1567,7 @@ export function VestiDashboard({
                   themeMode={themeMode}
                   onOpenConversation={handleOpenConversation}
                   labels={labels.explore}
+                  seedQuery={askSeed}
                 />
               </div>
               {exploreMode === "aiti" && (
@@ -1407,6 +1581,15 @@ export function VestiDashboard({
                     onOpenConversation={handleOpenConversation}
                     storage={storage}
                     sendToLabels={labels.library}
+                    coverage={
+                      summaryCoverageSupported && !aitiCoverageFailed ? aitiCoverage : undefined
+                    }
+                    llmConfigured={llmConfigured}
+                    summaryBatch={summaryBatch}
+                    onGenerateSummaries={
+                      storage.generateSummary ? handleGenerateSummaries : undefined
+                    }
+                    onCancelSummaryBatch={handleCancelSummaryBatch}
                   />
                 </div>
               )}
@@ -1416,8 +1599,11 @@ export function VestiDashboard({
                     profile={learn}
                     labels={labels.learn}
                     onOpenConversation={handleOpenConversation}
+                    onOpenAiti={handleGoAiti}
+                    onExploreTopic={handleExploreTopic}
                     storage={storage}
                     sendToLabels={labels.library}
+                    lang={lang}
                   />
                 </div>
               )}
@@ -1428,6 +1614,12 @@ export function VestiDashboard({
                     themeMode={themeMode}
                     labels={labels.roundtable}
                     sendToLabels={labels.library}
+                    lang={lang}
+                    onOpenConversation={handleOpenConversation}
+                    topicSuggestions={
+                      learn?.available ? learnTopicSuggestions(learn) : undefined
+                    }
+                    onExploreTopic={handleExploreTopic}
                   />
                 </div>
               )}

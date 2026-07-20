@@ -108,7 +108,12 @@ export class AdapterManager extends EventEmitter {
       const detected = await adapter.detect();
       if (!detected.installed) continue;
 
-      const patterns = adapter.getWatchPatterns();
+      // UNC (WSL) roots are excluded: Node fs.watch cannot watch UNC
+      // directories (EISDIR), so WSL sources rely on the polling fallback in
+      // CaptureService instead of chokidar events.
+      const patterns = adapter
+        .getWatchPatterns()
+        .filter((p) => !p.startsWith('\\\\') && !p.startsWith('//'));
       if (patterns.length === 0) continue;
 
       const watcher = chokidar.watch(patterns, {
@@ -122,6 +127,9 @@ export class AdapterManager extends EventEmitter {
 
       watcher.on('add', (fp) => onChange(platform, fp));
       watcher.on('change', (fp) => onChange(platform, fp));
+      // A watcher error must never surface as an unhandled rejection — the
+      // sync/polling paths remain the source of truth.
+      watcher.on('error', () => {});
 
       this.watchers.push({ watcher, platform });
     }

@@ -4,7 +4,7 @@ export const jaDesktopCompletion = {
     tabs: { deposits: "ナレッジ", daily: "デイリー" },
     library: {
       digestKeyFiles: "主要ファイル",
-      digestKeyDecisions: "決定事項",
+      digestKeyDecisions: "決定事項", subagents: "サブエージェント", subagentHighlights: "サブエージェントの要点",
       moveToTopic: "トピックへ移動",
       noTopic: "トピックなし",
       sourceTree: { sectionLabel: "ソース", notes: "マイノート", browser: "ブラウザー", wslBadge: "WSL" },
@@ -32,6 +32,7 @@ export const jaDesktopCompletion = {
         cliTitle: "CLI セッションを開始", cliPrepare: "パックを書き込みコマンドを表示", preparing: "準備中…", copyCommand: "コピー",
         injectBrowser: "ブラウザーへ送信", injecting: "送信中…", injected: "キューに追加しました。次回のポーリングで拡張機能が取得します。",
         extensionMissing: "先にブラウザー拡張機能をペアリングしてください。", loadFailed: "失敗: {message}",
+        sectionCompleted: "完了", sectionInProgress: "進行中", sectionGit: "Git 状態", gitBranch: "ブランチ", gitDirty: "未コミットの変更", gitCommits: "最近のコミット", sectionFailedPaths: "失敗した経路", failedWhy: "失敗理由", sectionVerification: "検証", sectionConfidence: "信頼度", confidenceLowAreas: "低信頼度の領域",
       },
       knowledgeExtract: {
         generate: "ナレッジを抽出", generating: "抽出中…", title: "ナレッジ抽出", conversationsFrom: "ソース会話 {count} 件",
@@ -59,7 +60,7 @@ export const jaDesktopCompletion = {
       exportMarkdown: ".md をフォルダーへ出力…", exportedTo: "{path} に出力しました", emptyTitle: "テンプレートまたはナレッジを選択",
       emptyHint: "会話の範囲から要約ドキュメントを生成するか、左側の保存済みナレッジを確認できます。", untitled: "無題", failed: "失敗: {message}",
       scopeDescProject: "プロジェクト: {label}", scopeDescTopic: "トピック: {label}", scopeDescTimerange: "期間: {start} ～ {end}",
-      scopeDescSelection: "手動選択: {count} 件の会話",
+      scopeDescSelection: "手動選択: {count} 件の会話", opsBadge: "変更 {total} 件：追加 {added}・更新 {updated}・削除 {deleted}", opAdd: "追加", opUpdate: "更新", opDelete: "削除", opNoop: "維持", opsReason: "理由",
     },
     daily: {
       title: "デイリーログ", subtitle: "毎晩まとめられる AI 活動。", unavailable: "現在の環境ではデイリーログを利用できません。",
@@ -75,6 +76,16 @@ export const jaDesktopCompletion = {
     aiti: {
       axisSignalFaint: "弱いシグナル", imageryFaint: "輪郭はまだ淡く、一部の軸はシグナルを集めている途中です。軽い参考として読んでください。",
       personaNoteLabel: "最近の注記", evidenceBecause: "あなたらしさが表れている理由…", evidenceConversation: "会話 #{id}", exportCard: "イメージカードを出力",
+      mindMapTitle: "思考マップ", repoQrCaption: "オープンソース — スキャンしてリポジトリへ", coverageSummary: "{y} 件中 {x} 件を要約済み（構造化 {z} 件）", coverageNeedMore: "イメージには構造化要約が 5 件必要です。あと {n} 件です。", coverageEmpty: "会話がまだありません。先に AI セッションを同期すると要約を生成できます。", generateSummaries: "要約を生成", generatingSummaries: "生成中 {done}/{total}…", cancelGeneration: "停止", summariesResult: "完了：{done} 件生成、{failed} 件失敗。", llmMissing: "モデルが未設定です。先に設定で LLM を構成してから要約を生成してください。", allSummarized: "すべての会話に構造化要約があります。",
+    },
+    explore: {
+      libraryEmptyTitle: "まだ呼び出せるものがありません", libraryEmptyHint: "先に AI セッションを同期してください。回答は会話ライブラリ全体から呼び出され、出典付きで示されます。", fromSubagent: "（サブエージェントより）",
+    },
+    learn: {
+      weakHint: "サンプルがまだ薄い状態です。AITI タブでさらに要約を生成すると、このマップが埋まっていきます。",
+    },
+    roundtable: {
+      comingSoonTitle: "AI 円卓会議 — 近日公開", comingSoonBody: "構想：異なる視点を持つ AI パネリストを招へいし、モデレーターが合意・相違点・提言をまとめます。マルチターンの調整は現在も磨き上げ中です。本物になるまで、見せかけの実行は表示しません。",
     },
   },
 };
@@ -83,7 +94,7 @@ export const koDesktopCompletion = {
   dashboard: {
     tabs: { deposits: "지식 보관함", daily: "일일 로그" },
     library: {
-      digestKeyFiles: "주요 파일", digestKeyDecisions: "결정 사항", moveToTopic: "주제로 이동", noTopic: "주제 없음",
+      digestKeyFiles: "주요 파일", digestKeyDecisions: "결정 사항", subagents: "서브 에이전트", subagentHighlights: "서브 에이전트 핵심", moveToTopic: "주제로 이동", noTopic: "주제 없음",
       sourceTree: { sectionLabel: "소스", notes: "내 노트", browser: "브라우저", wslBadge: "WSL" },
       organize: {
         button: "정리", title: "라이브러리 정리", subtitle: "로컬 규칙만 사용하며 데이터는 기기 밖으로 나가지 않습니다.",
@@ -109,6 +120,7 @@ export const koDesktopCompletion = {
         preparing: "준비 중…", copyCommand: "복사", injectBrowser: "브라우저로 보내기", injecting: "보내는 중…",
         injected: "대기열에 추가했습니다. 다음 폴링에서 확장 프로그램이 가져옵니다.", extensionMissing: "먼저 브라우저 확장 프로그램을 페어링하세요.",
         loadFailed: "실패: {message}",
+        sectionCompleted: "완료됨", sectionInProgress: "진행 중", sectionGit: "Git 상태", gitBranch: "브랜치", gitDirty: "커밋되지 않은 변경", gitCommits: "최근 커밋", sectionFailedPaths: "실패한 경로", failedWhy: "실패 이유", sectionVerification: "검증", sectionConfidence: "신뢰도", confidenceLowAreas: "낮은 신뢰도 영역",
       },
       knowledgeExtract: {
         generate: "지식 추출", generating: "추출 중…", title: "지식 추출", conversationsFrom: "소스 대화 {count}개",
@@ -135,7 +147,7 @@ export const koDesktopCompletion = {
       exportMarkdown: ".md를 폴더로 내보내기…", exportedTo: "{path}(으)로 내보냄", emptyTitle: "템플릿 또는 지식 문서 선택",
       emptyHint: "대화 범위에서 정제 문서를 생성하거나 왼쪽에서 저장된 지식 문서를 검토하세요.", untitled: "제목 없음", failed: "실패: {message}",
       scopeDescProject: "프로젝트: {label}", scopeDescTopic: "주제: {label}", scopeDescTimerange: "기간: {start} ~ {end}",
-      scopeDescSelection: "직접 선택: 대화 {count}개",
+      scopeDescSelection: "직접 선택: 대화 {count}개", opsBadge: "변경 {total}건: 추가 {added} · 업데이트 {updated} · 삭제 {deleted}", opAdd: "추가", opUpdate: "업데이트", opDelete: "삭제", opNoop: "유지", opsReason: "이유",
     },
     daily: {
       title: "일일 로그", subtitle: "매일 저녁 요약되는 AI 활동입니다.", unavailable: "현재 환경에서는 일일 로그를 사용할 수 없습니다.",
@@ -151,6 +163,16 @@ export const koDesktopCompletion = {
     aiti: {
       axisSignalFaint: "희미한 신호", imageryFaint: "윤곽이 아직 희미합니다. 일부 축은 신호를 모으는 중이므로 가볍게 참고하세요.",
       personaNoteLabel: "최근 각주", evidenceBecause: "이 모습이 당신다운 이유…", evidenceConversation: "대화 #{id}", exportCard: "이미지 카드 내보내기",
+      mindMapTitle: "사고 지도", repoQrCaption: "오픈 소스 — 스캔하여 저장소로 이동", coverageSummary: "대화 {y}개 중 {x}개 요약됨(구조화 {z}개)", coverageNeedMore: "이미지를 만들려면 구조화된 요약이 5개 필요합니다. {n}개 남았습니다.", coverageEmpty: "아직 대화가 없습니다. 먼저 AI 세션을 동기화하면 요약을 생성할 수 있습니다.", generateSummaries: "요약 생성", generatingSummaries: "생성 중 {done}/{total}…", cancelGeneration: "중지", summariesResult: "완료: {done}개 생성, {failed}개 실패.", llmMissing: "모델이 구성되지 않았습니다. 먼저 설정에서 LLM을 구성한 뒤 요약을 생성하세요.", allSummarized: "모든 대화에 구조화된 요약이 있습니다.",
+    },
+    explore: {
+      libraryEmptyTitle: "아직 불러올 내용이 없습니다", libraryEmptyHint: "먼저 AI 세션을 동기화하세요. 답변은 대화 라이브러리 전체에서 불러오며 출처와 함께 표시됩니다.", fromSubagent: "(서브 에이전트에서)",
+    },
+    learn: {
+      weakHint: "아직 샘플이 부족합니다. AITI 탭에서 더 많은 요약을 생성하면 이 지도가 채워집니다.",
+    },
+    roundtable: {
+      comingSoonTitle: "AI 라운드테이블 — 출시 예정", comingSoonBody: "계획: 서로 다른 관점을 가진 AI 패널들이 질문을 논의하고, 진행자가 합의·이견·제안을 정리합니다. 멀티턴 오케스트레이션은 아직 다듬는 중이므로, 진짜가 되기 전까지는 가짜 실행을 보여주지 않겠습니다.",
     },
   },
 };

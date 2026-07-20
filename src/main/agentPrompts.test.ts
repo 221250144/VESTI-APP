@@ -7,7 +7,12 @@ import {
   parseExtractPayload,
   parseRelayPayload,
   registerAgentKind,
+  RELAY_HANDOFF_PREFIX_EN,
+  RELAY_HANDOFF_PREFIX_ZH,
+  RELAY_HANDOFF_RULE_EN,
+  RELAY_HANDOFF_RULE_ZH,
 } from './agentPrompts';
+import { parseDepositMaintainPayload } from '../shared/depositMaintain';
 import type { RuntimeAgentSettings } from './settingsService';
 
 const zhPreferences: RuntimeAgentSettings = {
@@ -18,21 +23,21 @@ const zhPreferences: RuntimeAgentSettings = {
 };
 
 describe('agent kind registry', () => {
-  it('builds the summary prompt verbatim (zh-CN, no custom instructions)', () => {
+  it('builds the summary prompt with the ConversationSummaryV2 JSON contract (zh-CN)', () => {
     const messages = getAgentKindDefinition('summary').buildPrompt({
       transcript: 'TRANSCRIPT',
       preferences: zhPreferences,
     });
-    expect(messages).toEqual([
-      {
-        role: 'system',
-        content: '你是 Vesti 的会话总结助手。只能依据提供的会话，不补造事实。使用清晰、简洁的中文 Markdown。',
-      },
-      {
-        role: 'user',
-        content: '请总结下面的会话，包含：主题、关键结论、已做决定、未解决问题、建议的下一步。没有内容的栏目请写“无”。\n\nTRANSCRIPT',
-      },
-    ]);
+    expect(messages[0]).toEqual({
+      role: 'system',
+      content: '你是 Vesti 的会话总结助手。只能依据提供的会话，不补造事实。使用清晰、简洁的中文 Markdown。',
+    });
+    expect(messages[1].role).toBe('user');
+    expect(messages[1].content).toContain('core_question');
+    expect(messages[1].content).toContain('thinking_journey');
+    expect(messages[1].content).toContain('meta_observations');
+    expect(messages[1].content).toContain('JSON');
+    expect(messages[1].content).toContain('TRANSCRIPT');
   });
 
   it('honors en-US output and appends custom instructions', () => {
@@ -91,6 +96,23 @@ describe('digest agent kind', () => {
     expect(messages[0].content).toContain('严格 JSON');
     expect(messages[1].content).toContain('one_liner');
     expect(messages[1].content).toContain('TRANSCRIPT');
+  });
+
+  it('pins numeric-fidelity rules with concrete counterexamples', () => {
+    const messages = getAgentKindDefinition('digest').buildPrompt({
+      transcript: 'TRANSCRIPT',
+      preferences: zhPreferences,
+    });
+    const prompt = messages[1].content;
+    // Hard rule: values/units must be kept verbatim, never generalized.
+    expect(prompt).toContain('必须原样保留数值与单位');
+    expect(prompt).toContain('版本号');
+    // Counterexamples stay in the prompt (bench C: numeric coverage 6.4%).
+    expect(prompt).toContain('超时时间定为 30s');
+    expect(prompt).toContain('v2.5.0');
+    expect(prompt).toContain('1500 元');
+    // one_liner / key_topics / decisions are all named as in-scope.
+    expect(prompt).toContain('one_liner、key_topics 和 decisions');
   });
 
   it('parses and normalizes a valid payload', () => {
@@ -206,49 +228,139 @@ describe('relay agent kind', () => {
     expect(messages[1].content).toContain('suggested_prompt');
     expect(messages[1].content).toContain('key_files');
     expect(messages[1].content).toContain('800 字以内');
+    // schema v2 fields
+    expect(messages[1].content).toContain('completed');
+    expect(messages[1].content).toContain('in_progress');
+    expect(messages[1].content).toContain('git_state');
+    expect(messages[1].content).toContain('failed_paths');
+    expect(messages[1].content).toContain('verification');
+    expect(messages[1].content).toContain('confidence');
     expect(messages[1].content).toContain('TRANSCRIPT');
   });
 
-  it('parses and normalizes a valid payload', () => {
+  it('pins the verify-first handoff rule into the prompt (zh and en)', () => {
+    const zh = getAgentKindDefinition('relay').buildPrompt({
+      transcript: 'T',
+      preferences: zhPreferences,
+    });
+    expect(zh[1].content).toContain(RELAY_HANDOFF_RULE_ZH);
+    expect(zh[1].content).toContain('原样结尾');
+    const en = getAgentKindDefinition('relay').buildPrompt({
+      transcript: 'T',
+      preferences: { ...zhPreferences, outputLanguage: 'en-US' },
+    });
+    expect(en[1].content).toContain(RELAY_HANDOFF_RULE_EN);
+    expect(en[1].content).toContain('MUST end with this exact fixed sentence');
+  });
+
+  it('pins the handoff framing prefix into the prompt (zh and en)', () => {
+    const zh = getAgentKindDefinition('relay').buildPrompt({
+      transcript: 'T',
+      preferences: zhPreferences,
+    });
+    expect(zh[1].content).toContain(RELAY_HANDOFF_PREFIX_ZH);
+    expect(zh[1].content).toContain('原样开头');
+    const en = getAgentKindDefinition('relay').buildPrompt({
+      transcript: 'T',
+      preferences: { ...zhPreferences, outputLanguage: 'en-US' },
+    });
+    expect(en[1].content).toContain(RELAY_HANDOFF_PREFIX_EN);
+    expect(en[1].content).toContain('MUST start with this exact fixed sentence');
+  });
+
+  it('pins key_files to the extracted anchor list and failed_paths to retention', () => {
+    const zh = getAgentKindDefinition('relay').buildPrompt({
+      transcript: 'T',
+      preferences: zhPreferences,
+    });
+    expect(zh[1].content).toContain('关键文件（程序提取，带锚点）');
+    expect(zh[1].content).toContain('不得虚构清单之外的文件');
+    expect(zh[1].content).toContain('失败尝试与否决原因');
+    const en = getAgentKindDefinition('relay').buildPrompt({
+      transcript: 'T',
+      preferences: { ...zhPreferences, outputLanguage: 'en-US' },
+    });
+    expect(en[1].content).toContain('never invent files beyond it');
+    expect(en[1].content).toContain('failed attempt and rejection reason');
+  });
+
+  it('parses and normalizes a valid v2 payload', () => {
     const parsed = parseRelayPayload(JSON.stringify({
       title: '  播放器重构交接  ',
       goal: '把播放器迁移到新架构',
-      current_state: '已完成解码层拆分',
-      key_decisions: ['采用插件化解码', ' ', 42],
+      completed: ['解码层拆分', ' ', 42],
+      in_progress: ['渲染层接入（卡在字幕同步）'],
+      git_state: { branch: ' feature/player ', dirty_files: ['src/player/render.ts'], last_commits: ['拆分解码层'] },
+      key_decisions: ['采用插件化解码'],
       key_files: [
         { path: ' src/player/decoder.ts ', why: '解码入口', last_state: '已拆分', extra: 'ignored' },
         { path: '   ', why: 'x', last_state: 'y' },
         'not-an-object',
       ],
+      failed_paths: [{ approach: '直接重写渲染线程', why_failed: '丢帧严重' }, { approach: '', why_failed: 'x' }],
       open_issues: ['字幕同步偶发漂移'],
+      verification: { commands: ['pnpm test'], last_results: ['通过 42 项'] },
       next_steps: ['接入新渲染层'],
+      confidence: { overall: 1.4, low_areas: ['字幕同步'] },
       suggested_prompt: '背景：正在重构播放器……',
       extra: 'ignored',
     }));
     expect(parsed).toEqual({
       title: '播放器重构交接',
       goal: '把播放器迁移到新架构',
-      current_state: '已完成解码层拆分',
+      current_state: '',
+      completed: ['解码层拆分'],
+      in_progress: ['渲染层接入（卡在字幕同步）'],
+      git_state: { branch: 'feature/player', dirty_files: ['src/player/render.ts'], last_commits: ['拆分解码层'] },
       key_decisions: ['采用插件化解码'],
       key_files: [{ path: 'src/player/decoder.ts', why: '解码入口', last_state: '已拆分' }],
+      failed_paths: [{ approach: '直接重写渲染线程', why_failed: '丢帧严重' }],
       open_issues: ['字幕同步偶发漂移'],
+      verification: { commands: ['pnpm test'], last_results: ['通过 42 项'] },
       next_steps: ['接入新渲染层'],
+      confidence: { overall: 1, low_areas: ['字幕同步'] },
       suggested_prompt: '背景：正在重构播放器……',
     });
   });
 
-  it('accepts fenced JSON and surrounding prose', () => {
-    const parsed = parseRelayPayload('结果：\n```json\n{"title":"交接","goal":"g","current_state":"c","suggested_prompt":"p"}\n```');
-    expect(parsed).toEqual({
+  it('stays backward compatible: v1 payloads parse with empty v2 defaults', () => {
+    const parsed = parseRelayPayload(JSON.stringify({
       title: '交接',
       goal: 'g',
-      current_state: 'c',
-      key_decisions: [],
+      current_state: '已完成解码层拆分',
+      key_decisions: ['采用插件化解码'],
       key_files: [],
       open_issues: [],
       next_steps: [],
       suggested_prompt: 'p',
+    }));
+    expect(parsed).toEqual({
+      title: '交接',
+      goal: 'g',
+      current_state: '已完成解码层拆分',
+      completed: [],
+      in_progress: [],
+      git_state: { dirty_files: [], last_commits: [] },
+      key_decisions: ['采用插件化解码'],
+      key_files: [],
+      failed_paths: [],
+      open_issues: [],
+      verification: { commands: [], last_results: [] },
+      next_steps: [],
+      suggested_prompt: 'p',
     });
+    // confidence stays absent without a usable number (no misleading badge)
+    expect(parsed.confidence).toBeUndefined();
+    expect(parseRelayPayload(JSON.stringify({
+      title: 't', goal: 'g', suggested_prompt: 'p', confidence: { low_areas: ['x'] },
+    })).confidence).toBeUndefined();
+  });
+
+  it('accepts fenced JSON and surrounding prose', () => {
+    const parsed = parseRelayPayload('结果：\n```json\n{"title":"交接","goal":"g","suggested_prompt":"p"}\n```');
+    expect(parsed.title).toBe('交接');
+    expect(parsed.completed).toEqual([]);
+    expect(parsed.verification).toEqual({ commands: [], last_results: [] });
   });
 
   it('caps the suggested prompt at 800 chars', () => {
@@ -265,7 +377,6 @@ describe('relay agent kind', () => {
     expect(() => parseRelayPayload('完全不是 JSON')).toThrow('relay 输出不是 JSON');
     expect(() => parseRelayPayload('{"goal":"g","current_state":"c","suggested_prompt":"p"}')).toThrow('relay 输出缺少 title');
     expect(() => parseRelayPayload('{"title":"t","current_state":"c","suggested_prompt":"p"}')).toThrow('relay 输出缺少 goal');
-    expect(() => parseRelayPayload('{"title":"t","goal":"g","suggested_prompt":"p"}')).toThrow('relay 输出缺少 current_state');
     expect(() => parseRelayPayload('{"title":"t","goal":"g","current_state":"c","suggested_prompt":"  "}')).toThrow('relay 输出缺少 suggested_prompt');
     expect(() => parseRelayPayload('[1,2,3]')).toThrow();
   });
@@ -277,11 +388,80 @@ describe('relay agent kind', () => {
       title: 't',
       goal: 'g',
       current_state: 'c',
+      completed: [],
+      in_progress: [],
+      git_state: { dirty_files: [], last_commits: [] },
       key_decisions: ['a'],
       key_files: [],
+      failed_paths: [],
       open_issues: [],
+      verification: { commands: [], last_results: [] },
       next_steps: [],
       suggested_prompt: 'p',
+    });
+    expect(() => definition.parse?.('坏输出')).toThrow();
+  });
+});
+
+describe('deposit-maintain agent kind', () => {
+  it('builds a strict-JSON prompt referencing both documents', () => {
+    const messages = getAgentKindDefinition('deposit-maintain').buildPrompt({
+      transcript: '【旧版本沉淀内容】\nOLD\n\n【新提炼内容】\nNEW',
+      preferences: zhPreferences,
+    });
+    expect(messages[0].content).toContain('严格 JSON');
+    expect(messages[1].content).toContain('ADD|UPDATE|DELETE|NOOP');
+    expect(messages[1].content).toContain('merged_markdown');
+    expect(messages[1].content).toContain('OLD');
+    expect(messages[1].content).toContain('NEW');
+  });
+
+  it('parses and normalizes a valid payload', () => {
+    const parsed = parseDepositMaintainPayload(JSON.stringify({
+      ops: [
+        { op: 'ADD', section: ' 技能栈 ', new_text: '熟悉 pnpm monorepo', reason: '新会话提到' },
+        { op: 'UPDATE', section: '偏好', old_text: '喜欢简洁回复', new_text: '喜欢简洁、带例子的回复', reason: '偏好细化' },
+        { op: 'DELETE', section: '工具', old_text: '使用 yarn', reason: '已迁移 pnpm' },
+        { op: 'NOOP', section: '禁忌', reason: '仍然成立' },
+      ],
+      merged_markdown: '# 背景知识\n\n……',
+    }));
+    expect(parsed.ops).toHaveLength(4);
+    expect(parsed.ops[0]).toEqual({
+      op: 'ADD',
+      section: '技能栈',
+      old_text: undefined,
+      new_text: '熟悉 pnpm monorepo',
+      reason: '新会话提到',
+    });
+    expect(parsed.merged_markdown).toBe('# 背景知识\n\n……');
+  });
+
+  it('rejects a bad op enum and an empty section', () => {
+    expect(() => parseDepositMaintainPayload(JSON.stringify({
+      ops: [{ op: 'MERGE', section: 'x', reason: 'r' }],
+      merged_markdown: 'm',
+    }))).toThrow('未知 op');
+    expect(() => parseDepositMaintainPayload(JSON.stringify({
+      ops: [{ op: 'ADD', section: '  ', reason: 'r' }],
+      merged_markdown: 'm',
+    }))).toThrow('缺少 section');
+  });
+
+  it('rejects missing or empty merged_markdown and non-JSON output', () => {
+    expect(() => parseDepositMaintainPayload(JSON.stringify({ ops: [] })))
+      .toThrow('缺少 merged_markdown');
+    expect(() => parseDepositMaintainPayload(JSON.stringify({ ops: [], merged_markdown: '  ' })))
+      .toThrow('缺少 merged_markdown');
+    expect(() => parseDepositMaintainPayload('不是 JSON')).toThrow('不是 JSON');
+  });
+
+  it('the kind parse returns a normalized JSON string', () => {
+    const definition = getAgentKindDefinition('deposit-maintain');
+    const normalized = definition.parse?.('```json\n{"ops":[{"op":"ADD","section":"s","reason":"r"}],"merged_markdown":" body "}\n```');
+    expect(JSON.parse(normalized ?? '')).toEqual({
+      ops: [{ op: 'ADD', section: 's', old_text: undefined, new_text: undefined, reason: 'r' }],
+      merged_markdown: 'body',
     });
     expect(() => definition.parse?.('坏输出')).toThrow();
   });
@@ -459,5 +639,67 @@ describe('persona kind (P5 思维意象)', () => {
     expect(definition.parse?.('  蝴蝶最近总绕着\n向量检索 飞。 \n')).toBe('蝴蝶最近总绕着 向量检索 飞。');
     expect(definition.parse?.('x'.repeat(260))).toHaveLength(200);
     expect(() => definition.parse?.('   \n ')).toThrow('persona 输出为空');
+  });
+});
+
+
+describe('roundtable kinds (AI 圆桌)', () => {
+  it('roundtable-turn wraps the prebuilt transcript with the roundtable preamble', () => {
+    const messages = getAgentKindDefinition('roundtable-turn').buildPrompt({
+      transcript: '你的角色设定：怀疑者……\n\n圆桌话题：要不要重写？',
+      preferences: zhPreferences,
+    });
+    expect(messages[0].role).toBe('system');
+    expect(messages[0].content).toContain('圆桌讨论助手');
+    expect(messages[0].content).toContain('使用清晰、简洁的中文 Markdown。');
+    expect(messages[1]).toEqual({
+      role: 'user',
+      content: '你的角色设定：怀疑者……\n\n圆桌话题：要不要重写？',
+    });
+  });
+
+  it('roundtable-turn follows the en-US output language', () => {
+    const messages = getAgentKindDefinition('roundtable-turn').buildPrompt({
+      transcript: 'T',
+      preferences: { ...zhPreferences, outputLanguage: 'en-US' },
+    });
+    expect(messages[0].content).toContain('Respond in clear English Markdown.');
+  });
+
+  it('roundtable-turn parses leniently: strips fences, trims, caps at 4000, rejects empty', () => {
+    const definition = getAgentKindDefinition('roundtable-turn');
+    expect(definition.parse?.('```markdown\n\n发言正文。\n```')).toBe('发言正文。');
+    expect(definition.parse?.('x'.repeat(4100))).toHaveLength(4000);
+    expect(() => definition.parse?.('  \n ')).toThrow('roundtable-turn 输出为空');
+  });
+
+  it('roundtable-synthesis demands JSON in the preamble and parses leniently', () => {
+    const definition = getAgentKindDefinition('roundtable-synthesis');
+    const messages = definition.buildPrompt({ transcript: 'T', preferences: zhPreferences });
+    expect(messages[0].content).toContain('圆桌主持助手');
+    expect(messages[0].content).toContain('严格 JSON');
+    expect(messages[1]).toEqual({ role: 'user', content: 'T' });
+    expect(definition.parse?.('```json\n{"consensus": []}\n```')).toBe('{"consensus": []}');
+    expect(() => definition.parse?.('   ')).toThrow('roundtable-synthesis 输出为空');
+  });
+
+  it('learn-deepen wraps the prebuilt transcript with the learning-analysis preamble', () => {
+    const definition = getAgentKindDefinition('learn-deepen');
+    const messages = definition.buildPrompt({
+      transcript: '学习领域：前端\n\n本地统计：……',
+      preferences: zhPreferences,
+    });
+    expect(messages[0].role).toBe('system');
+    expect(messages[0].content).toContain('学习脉络分析助手');
+    expect(messages[0].content).toContain('严格 JSON');
+    expect(messages[0].content).toContain('使用清晰、简洁的中文 Markdown。');
+    expect(messages[1]).toEqual({ role: 'user', content: '学习领域：前端\n\n本地统计：……' });
+  });
+
+  it('learn-deepen parses leniently: strips fences, trims, caps at 4000, rejects empty', () => {
+    const definition = getAgentKindDefinition('learn-deepen');
+    expect(definition.parse?.('```json\n{"mastered": []}\n```')).toBe('{"mastered": []}');
+    expect(definition.parse?.('x'.repeat(4100))).toHaveLength(4000);
+    expect(() => definition.parse?.('  \n ')).toThrow('learn-deepen 输出为空');
   });
 });

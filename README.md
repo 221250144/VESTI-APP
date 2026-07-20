@@ -11,7 +11,7 @@ Vesti 的本地优先桌面端：自动发现并归档本机 AI 编程工具的�
 - 捕获 Codex、Cursor、Kimi Code、Claude Code 的本地会话（`@vesti/capture-core` 另内置 aider 适配器，App 默认采集清单暂未启用）。
 - 启动时增量同步，并持续监听后续文件变化；原始会话文件以 gzip 全量保留在本地 vault。
 - WSL 检测与采集：自动枚举发行版与用户 home，经 `\\wsl$` UNC 路径读取；WSL 会话以 `wsl:<distro>` host 标记区分，文件事件不可靠时以 60 秒轮询兜底。
-- 浏览器扩展桥：loopback HTTP 服务（`127.0.0.1:28765`，Bridge Protocol v1.1），配对后接收扩展的全量/每日增量导入，网页端对话与 CLI 会话在同一会话树中呈现。
+- 浏览器扩展桥：loopback HTTP 服务（`127.0.0.1:28765`，Bridge Protocol v1.2），一键 TOFU 自动连接（App 弹一次确认，之后免交互；6 位配对码兜底），连接后接收扩展的全量/每日增量导入，网页端对话与 CLI 会话在同一会话树中呈现。
 - 对话树索引与 digest：`project_registry` 支撑来源→项目→会话树；`session_digests` 保存 LLM 压缩摘要与向量 embedding，无模型服务时逐级降级，不阻塞采集。
 
 ### 知识整理空间
@@ -70,10 +70,11 @@ pnpm start
 
 ### 连接 VESTI 浏览器扩展
 
-1. 设置 →「连接 VESTI 扩展」→ 生成配对码。配对码为 6 位数字，5 分钟内有效，一次性使用；生成新码会使旧码立即失效。
-2. 在扩展设置页的「连接桌面」卡片输入配对码完成配对。App 侧只保存加密后的 token，扩展侧 token 不出扩展存储。
-3. 配对成功后扩展首次做全量导入，之后按每日增量同步（以服务端返回的 cursor 为游标），也可在扩展侧手动立即同步。
-4. 协议细节见 [docs/bridge-protocol.md](docs/bridge-protocol.md)。
+1. **自动连接（推荐）**：保持 App 运行（启动后配对窗口自动开启 10 分钟），安装并打开 VESTI 扩展侧栏，App 会弹一次「允许连接？」确认，允许后即完成连接，之后长期免交互。窗口已关闭时，在 设置 →「连接 VESTI 扩展」→「打开配对窗口」（5 分钟有效）后重试即可。
+2. **配对码兜底**：自动连接不可用时，在设置页「使用配对码连接」生成 6 位配对码（5 分钟内有效，一次性；生成新码使旧码立即失效），在扩展设置页的「连接桌面」卡片输入完成配对。
+3. App 侧只保存加密后的 token，扩展侧 token 不出扩展存储。同一客户端重复连接会轮换 token（旧 token 立即失效）。
+4. 连接成功后扩展首次做全量导入，之后按每日增量同步（以服务端返回的 cursor 为游标），也可在扩展侧手动立即同步。
+5. 协议细节见 [docs/bridge-protocol.md](docs/bridge-protocol.md)。
 
 ### WSL 来源采集
 
@@ -120,7 +121,7 @@ out/installer/Vesti-0.3.0-Setup.exe
 
 - 应用行为：开机启动、开机时隐藏窗口、关闭到托盘、显示桌面悬浮球。
 - 采集引擎：启动时实时采集，Codex、Cursor、Kimi Code、Claude Code 独立开关，WSL 来源状态。
-- 连接 VESTI 扩展：生成配对码、查看/断开已配对客户端。
+- 连接 VESTI 扩展：配对窗口状态与手动开窗（自动连接）、配对码兜底、查看/断开已配对客户端。
 - 内容数据与隐私：选择/打开内容目录、清空 Agent 历史结果。
 - 上游导出：Obsidian 库目录与 Notion token / 目标页面。
 - 模型服务：Demo Proxy、自定义 OpenAI 兼容接口、模型参数和加密 API Key。
@@ -150,7 +151,7 @@ out/installer/Vesti-0.3.0-Setup.exe
 
 - Renderer 开启 `contextIsolation` 和 sandbox，并关闭 `nodeIntegration`。
 - 采集引擎只读取已启用工具的本地会话文件，不做键盘监听、屏幕录制或进程注入。
-- 扩展桥仅绑定 `127.0.0.1`，不监听任何外部网卡；配对码一次性、5 分钟过期；bridge token 经 Electron `safeStorage` 加密后才落盘。
+- 扩展桥仅绑定 `127.0.0.1`，不监听任何外部网卡；新连接采用一键 TOFU——仅配对窗口开启时可发起，且每次都需用户在 App 弹窗中确认一次（窗口启动后自动开 10 分钟，拒绝后冷却 10 分钟，associate 按客户端限流）；配对码一次性、5 分钟过期；bridge token 经 Electron `safeStorage` 加密后才落盘。
 - API Key 与 Notion token 同样使用 `safeStorage` 加密；Renderer 无法读取保存后的明文。
 - 上游导出受限写盘：目标路径必须严格落在用户选择的导出根目录内，拒绝绝对路径与 `..` 越界，写盘采用临时文件 + 原子重命名。
 - 浏览和归档完全在本地完成。
@@ -193,7 +194,7 @@ App 只依赖 `@vesti/capture-core` 的包接口，不直接引用 CLI 命令。
 
 ### 扩展配对失败
 
-确认 App 正在运行且设置页「连接 VESTI 扩展」中 bridge 状态正常（端口被占用时会显示错误）。配对码 5 分钟过期且一次性，超时或输错后请重新生成。
+确认 App 正在运行且设置页「连接 VESTI 扩展」中 bridge 状态正常（端口被占用时会显示错误）。自动连接要求配对窗口开启（启动后 10 分钟内自动开启，超时后在设置页手动「打开配对窗口」），并在 App 弹窗中点击「允许连接」；拒绝后同一客户端 10 分钟内不再弹窗。配对码 5 分钟过期且一次性，超时或输错后请重新生成。
 
 ### WSL 会话没有出现
 
@@ -211,4 +212,5 @@ App 只依赖 `@vesti/capture-core` 的包接口，不直接引用 CLI 命令。
 
 - [docs/architecture.md](docs/architecture.md)：分层、安全边界、迁移机制、WSL 抽象与 AgentService 约定。
 - [docs/collection-engine.md](docs/collection-engine.md)：收集引擎设计——适配器矩阵、统一数据模型、增量同步与 vault、树索引与 digest、检索融合。
-- [docs/bridge-protocol.md](docs/bridge-protocol.md)：Bridge Protocol v1.1 完整协议（端点、鉴权、配对流、增量游标、outbox、错误码）。
+- [docs/bridge-protocol.md](docs/bridge-protocol.md)：Bridge Protocol v1.2 完整协议（端点、鉴权、TOFU 自动连接与配对窗口、配对流、增量游标、outbox、CORS/限流、错误码）。
+- [docs/memory-system/](docs/memory-system/)：记忆系统 v2 归档——[agent-formats](docs/memory-system/agent-formats.md)（各大 agent 存储规范建模）、[design](docs/memory-system/design.md)（L0–L3 分级说明系统设计）、[bench](docs/memory-system/bench.md)（评测方案与基线）、[references](docs/memory-system/references.md)（参考文献与工具）。

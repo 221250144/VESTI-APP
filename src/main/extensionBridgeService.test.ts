@@ -38,6 +38,10 @@ async function startHarness(overrides?: {
   pairCodeTtlMs?: number;
   importTimeoutMs?: number;
   seedClients?: BridgeClientRecord[];
+  confirmAssociation?: (request: { client: string; clientId: string }) => Promise<boolean>;
+  associateConfirmTimeoutMs?: number;
+  startupPairingWindowMs?: number;
+  loadOriginAllowlist?: () => string[];
 }): Promise<Harness> {
   const clients = [...(overrides?.seedClients ?? [])];
   const savedSnapshots: BridgeClientRecord[][] = [];
@@ -58,6 +62,12 @@ async function startHarness(overrides?: {
     maxImportBodyBytes: overrides?.maxImportBodyBytes,
     pairCodeTtlMs: overrides?.pairCodeTtlMs,
     importTimeoutMs: overrides?.importTimeoutMs,
+    // Tests opt into the startup window explicitly so associate cases are
+    // deterministic about whether the pairing window is open.
+    startupPairingWindowMs: overrides?.startupPairingWindowMs ?? 0,
+    associateConfirmTimeoutMs: overrides?.associateConfirmTimeoutMs,
+    confirmAssociation: overrides?.confirmAssociation,
+    loadOriginAllowlist: overrides?.loadOriginAllowlist,
   });
   await service.start();
   const status = service.getStatus();
@@ -82,6 +92,14 @@ async function pair(harness: Harness): Promise<string> {
   return body.token;
 }
 
+function associate(harness: Harness, payload: { client: string; clientId: string }, origin?: string) {
+  return fetch(`${harness.baseUrl}/v1/associate`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...(origin ? { origin } : {}) },
+    body: JSON.stringify(payload),
+  });
+}
+
 describe('ExtensionBridgeService', () => {
   let harness: Harness | null = null;
 
@@ -101,7 +119,8 @@ describe('ExtensionBridgeService', () => {
       app: 'vesti-desktop',
       version: '0.3.0',
       protocol: 1,
-      capabilities: ['pair', 'import', 'outbox'],
+      capabilities: ['pair', 'import', 'outbox', 'associate'],
+      pairing_window: 'closed',
     });
   });
 
@@ -422,5 +441,201 @@ describe('ExtensionBridgeService', () => {
     expect(body.items).toHaveLength(50);
     expect(body.items[0].prompt).toBe('prompt-6');
     expect(body.items[49].prompt).toBe('prompt-55');
+  });
+
+  // ---- Bridge Protocol v1.2: one-tap TOFU associate ----
+
+  it('opens the pairing window at startup and reports it in status', async () => {
+    harness = await startHarness({ startupPairingWindowMs: 60_000 });
+    const response = await fetch(`${harness.baseUrl}/v1/status`);
+    expect((await response.json() as { pairing_window: string }).pairing_window).toBe('open');
+    const status = harness.service.getStatus();
+    expect(status.pairingWindow.open).toBe(true);
+    expect(status.pairingWindow.expiresAt).toBeTypeOf('number');
+  });
+
+  it('rejects associate with 409 while the pairing window is closed', async () => {
+    harness = await startHarness({ confirmAssociation: async () => true });
+    const response = await associate(harness, { client: 'VESTI Chrome', clientId: 'chrome-1' });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: 'pairing_window_closed' });
+    expect(harness.clients).toHaveLength(0);
+  });
+
+  it('associates on user allow and the token works for import', async () => {
+    const confirmed: Array<{ client: string; clientId: string }> = [];
+    harness = await startHarness({
+      confirmAssociation: async (request) => {
+        confirmed.push(request);
+        return true;
+      },
+    });
+    harness.service.openPairingWindow();
+    const response = await associate(harness, { client: 'VESTI Chrome', clientId: 'chrome-1' });
+    expect(response.status).toBe(200);
+    expect(confirmed).toEqual([{ client: 'VESTI Chrome', clientId: 'chrome-1' }]);
+    const { token } = await response.json() as { token: string };
+
+    const importResponse = await fetch(`${harness.baseUrl}/v1/import`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}` },
+      body: JSON.stringify({ format: 'vesti_export.v1', data: {} }),
+    });
+    expect(importResponse.status).toBe(200);
+    expect(harness.clients).toHaveLength(1);
+  });
+
+  it('rejects associate with 403 when the user denies', async () => {
+    harness = await startHarness({ confirmAssociation: async () => false });
+    harness.service.openPairingWindow();
+    const response = await associate(harness, { client: 'VESTI Chrome', clientId: 'chrome-1' });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: 'association_rejected' });
+    expect(harness.clients).toHaveLength(0);
+  });
+
+  it('rejects associate with 403 when no confirm callback is wired', async () => {
+    harness = await startHarness();
+    harness.service.openPairingWindow();
+    const response = await associate(harness, { client: 'VESTI Chrome', clientId: 'chrome-1' });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: 'association_rejected' });
+  });
+
+  it('answers 403 association_timeout when the confirm callback stalls', async () => {
+    harness = await startHarness({
+      associateConfirmTimeoutMs: 50,
+      confirmAssociation: () => new Promise<boolean>(() => {}),
+    });
+    harness.service.openPairingWindow();
+    const response = await associate(harness, { client: 'VESTI Chrome', clientId: 'chrome-1' });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: 'association_timeout' });
+    expect(harness.clients).toHaveLength(0);
+  });
+
+  it('rotates the token when an already-paired clientId re-associates', async () => {
+    let confirmCalls = 0;
+    harness = await startHarness({
+      confirmAssociation: async () => {
+        confirmCalls += 1;
+        return true;
+      },
+    });
+    harness.service.openPairingWindow();
+    const first = await associate(harness, { client: 'VESTI Chrome', clientId: 'chrome-1' });
+    const { token: firstToken } = await first.json() as { token: string };
+
+    const second = await associate(harness, { client: 'VESTI Chrome', clientId: 'chrome-1' });
+    expect(second.status).toBe(200);
+    const { token: secondToken } = await second.json() as { token: string };
+    expect(secondToken).not.toBe(firstToken);
+    expect(confirmCalls).toBe(2);
+    expect(harness.clients).toHaveLength(1);
+
+    const oldToken = await fetch(`${harness.baseUrl}/v1/import`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${firstToken}` },
+      body: JSON.stringify({ format: 'vesti_export.v1', data: {} }),
+    });
+    expect(oldToken.status).toBe(401);
+    const newToken = await fetch(`${harness.baseUrl}/v1/import`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${secondToken}` },
+      body: JSON.stringify({ format: 'vesti_export.v1', data: {} }),
+    });
+    expect(newToken.status).toBe(200);
+  });
+
+  it('rate limits associate attempts per clientId', async () => {
+    harness = await startHarness({ confirmAssociation: async () => true });
+    // Window stays closed: attempts still count, so the 4th is a 429.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const response = await associate(harness, { client: 'x', clientId: 'chrome-1' });
+      expect(response.status).toBe(409);
+    }
+    const limited = await associate(harness, { client: 'x', clientId: 'chrome-1' });
+    expect(limited.status).toBe(429);
+    expect(await limited.json()).toEqual({ error: 'rate_limited' });
+    // Other clientIds have their own bucket.
+    const other = await associate(harness, { client: 'x', clientId: 'chrome-2' });
+    expect(other.status).toBe(409);
+  });
+
+  it('allows only one pending association at a time', async () => {
+    let resolveConfirm: (allowed: boolean) => void = () => {};
+    harness = await startHarness({
+      confirmAssociation: () => new Promise<boolean>((resolve) => {
+        resolveConfirm = resolve;
+      }),
+    });
+    harness.service.openPairingWindow();
+    const first = associate(harness, { client: 'VESTI Chrome', clientId: 'chrome-1' });
+    // Let the first request reach the pending state before the second arrives.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const busy = await associate(harness, { client: 'VESTI Firefox', clientId: 'firefox-1' });
+    expect(busy.status).toBe(409);
+    expect(await busy.json()).toEqual({ error: 'associate_busy' });
+    resolveConfirm(true);
+    const firstResponse = await first;
+    expect(firstResponse.status).toBe(200);
+  });
+
+  it('answers PNA/CORS preflights only on browser-facing endpoints', async () => {
+    harness = await startHarness();
+    const preflight = await fetch(`${harness.baseUrl}/v1/associate`, {
+      method: 'OPTIONS',
+      headers: {
+        origin: 'chrome-extension://abc',
+        'access-control-request-private-network': 'true',
+      },
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get('access-control-allow-private-network')).toBe('true');
+    expect(preflight.headers.get('access-control-allow-origin')).toBe('chrome-extension://abc');
+    expect(preflight.headers.get('access-control-allow-methods')).toContain('POST');
+
+    // Token-authenticated channels stay CORS-free.
+    const importPreflight = await fetch(`${harness.baseUrl}/v1/import`, {
+      method: 'OPTIONS',
+      headers: { origin: 'chrome-extension://abc' },
+    });
+    expect(importPreflight.status).toBe(404);
+    expect(importPreflight.headers.get('access-control-allow-origin')).toBeNull();
+    await harness.service.stop();
+
+    // Actual responses echo the extension origin too.
+    harness = await startHarness({ confirmAssociation: async () => true });
+    harness.service.openPairingWindow();
+    const response = await associate(
+      harness,
+      { client: 'VESTI Chrome', clientId: 'chrome-1' },
+      'chrome-extension://abc',
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get('access-control-allow-origin')).toBe('chrome-extension://abc');
+  });
+
+  it('enforces the optional origin allowlist when configured', async () => {
+    harness = await startHarness({
+      confirmAssociation: async () => true,
+      loadOriginAllowlist: () => ['chrome-extension://good'],
+    });
+    harness.service.openPairingWindow();
+    const denied = await associate(
+      harness,
+      { client: 'VESTI Chrome', clientId: 'chrome-1' },
+      'chrome-extension://evil',
+    );
+    expect(denied.status).toBe(403);
+    expect(await denied.json()).toEqual({ error: 'origin_not_allowed' });
+    expect(harness.clients).toHaveLength(0);
+
+    const allowed = await associate(
+      harness,
+      { client: 'VESTI Chrome', clientId: 'chrome-1' },
+      'chrome-extension://good',
+    );
+    expect(allowed.status).toBe(200);
   });
 });

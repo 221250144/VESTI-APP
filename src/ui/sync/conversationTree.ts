@@ -18,6 +18,7 @@ import type {
   ConversationTreeSource,
   VestiDesktopApi,
 } from "../../shared/contracts";
+import { getDexieDataVersion } from "./dataVersion";
 
 export type { ConversationTree };
 
@@ -79,33 +80,136 @@ async function buildBrowserSubtree(): Promise<ConversationTreeSource | null> {
   return { platform: BROWSER_SOURCE_PLATFORM, host: "browser", projects };
 }
 
-let cache: ConversationTree | null = null;
+type TreeCache = {
+  tree: ConversationTree;
+  /** Value of getDexieDataVersion() when browserSubtree was built. */
+  dexieVersion: number;
+  /** Fingerprint of the CLI tree the merged tree was built from. */
+  cliFingerprint: number;
+  browserSubtree: ConversationTreeSource | null;
+};
+
+let cache: TreeCache | null = null;
 let loading: Promise<ConversationTree> | null = null;
 
-/** Full merged tree: main-process CLI tree + renderer browser subtree. */
-export async function loadConversationTree(): Promise<ConversationTree> {
+/**
+ * Cheap O(sessions) fingerprint of the CLI tree: session identity, counts,
+ * activity stamps and digest presence/length. Rebuilding the merged tree is
+ * skipped when this matches the cache — the digest pipeline updating
+ * one-liners without touching conversations still changes it.
+ */
+function fingerprintCliTree(tree: ConversationTree | null): number {
+  let hash = 5381;
+  const mix = (value: number) => {
+    hash = ((hash * 33) ^ (value | 0)) >>> 0;
+  };
+  const mixText = (text: string) => {
+    for (let index = 0; index < text.length; index += 1) {
+      mix(text.charCodeAt(index));
+    }
+  };
+  for (const source of tree?.sources ?? []) {
+    mixText(`${source.platform}|${source.host}`);
+    for (const project of source.projects) {
+      mixText(project.projectKey);
+      for (const session of project.sessions) {
+        mixText(session.id);
+        mix(session.messageCount);
+        mix(session.lastActivityAt);
+        mix(session.oneLiner?.length ?? -1);
+      }
+    }
+  }
+  return hash >>> 0;
+}
+
+function mergeTree(
+  cliTree: ConversationTree | null,
+  browserSubtree: ConversationTreeSource | null
+): ConversationTree {
+  const sources = [...(cliTree?.sources ?? [])];
+  if (browserSubtree) sources.push(browserSubtree);
+  return {
+    generatedAt: cliTree?.generatedAt ?? new Date().toISOString(),
+    sources,
+  };
+}
+
+async function fetchCliTree(api: VestiDesktopApi | null) {
+  return api ? await api.getConversationTree().catch(() => null) : null;
+}
+
+/**
+ * Full merged tree: main-process CLI tree + renderer browser subtree.
+ *
+ * Cached by (Dexie data version, CLI-tree fingerprint): when neither the
+ * renderer tables nor the CLI tree changed since the last load, the cached
+ * merge is returned without re-scanning Dexie or re-merging; a Dexie-only
+ * change rebuilds just the browser subtree. `force` bypasses the gates for
+ * callers that must observe writes made in the same tick (relay/extract).
+ */
+export async function loadConversationTree(options?: {
+  force?: boolean;
+}): Promise<ConversationTree> {
   if (loading) return loading;
   loading = (async () => {
     const api = vestiApi();
-    const cliTree = api
-      ? await api.getConversationTree().catch(() => null)
-      : null;
-    const browserSubtree = await buildBrowserSubtree().catch(() => null);
-    const sources = [...(cliTree?.sources ?? [])];
-    if (browserSubtree) sources.push(browserSubtree);
+    const dexieVersion = getDexieDataVersion();
+    if (!options?.force && cache && cache.dexieVersion === dexieVersion) {
+      const cliTree = await fetchCliTree(api);
+      const cliFingerprint = fingerprintCliTree(cliTree);
+      // Re-read the version after the IPC await: a sync that landed in
+      // between must not be served the stale browser subtree.
+      if (
+        getDexieDataVersion() === dexieVersion &&
+        cliFingerprint === cache.cliFingerprint
+      ) {
+        return cache.tree;
+      }
+      if (getDexieDataVersion() === dexieVersion) {
+        // CLI side moved (e.g. fresh digests); the browser subtree is keyed
+        // on the unchanged Dexie version, so reuse it and only re-merge.
+        cache = {
+          tree: mergeTree(cliTree, cache.browserSubtree),
+          dexieVersion,
+          cliFingerprint,
+          browserSubtree: cache.browserSubtree,
+        };
+        return cache.tree;
+      }
+      // Dexie changed mid-flight: rebuild the browser subtree fresh and
+      // merge with the CLI tree we already fetched.
+      const browserSubtree = await buildBrowserSubtree().catch(() => null);
+      cache = {
+        tree: mergeTree(cliTree, browserSubtree),
+        dexieVersion: getDexieDataVersion(),
+        cliFingerprint,
+        browserSubtree,
+      };
+      return cache.tree;
+    }
+    const [cliTree, browserSubtree] = await Promise.all([
+      fetchCliTree(api),
+      buildBrowserSubtree().catch(() => null),
+    ]);
     cache = {
-      generatedAt: cliTree?.generatedAt ?? new Date().toISOString(),
-      sources,
+      tree: mergeTree(cliTree, browserSubtree),
+      dexieVersion,
+      cliFingerprint: fingerprintCliTree(cliTree),
+      browserSubtree,
     };
-    loading = null;
-    return cache;
+    return cache.tree;
   })();
-  return loading;
+  try {
+    return await loading;
+  } finally {
+    loading = null;
+  }
 }
 
 /** Last loaded tree, null before the first loadConversationTree() call. */
 export function getCachedConversationTree(): ConversationTree | null {
-  return cache;
+  return cache?.tree ?? null;
 }
 
 export type ConversationTreeListener = (tree: ConversationTree) => void;

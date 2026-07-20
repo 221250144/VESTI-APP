@@ -102,6 +102,11 @@ export interface KimiSessionState {
   }>;
   workDir?: string;
   lastPrompt?: string;
+  /**
+   * Fork lineage: session id (session directory name) this session was
+   * forked from. Absent on non-forked sessions.
+   */
+  forkedFrom?: string | { sessionId?: string } | null;
   custom?: Record<string, unknown>;
 }
 

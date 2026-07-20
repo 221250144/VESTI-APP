@@ -119,9 +119,19 @@ export class KimiCodeAdapter implements AgentAdapter {
   private stateToMeta(state: KimiSessionState | null, agentName: string): Record<string, unknown> {
     const meta: Record<string, unknown> = {};
     if (!state) return meta;
-    if (state.title && state.title !== 'New Session') meta.first_prompt = state.title;
-    else if (state.lastPrompt) meta.first_prompt = state.lastPrompt;
+    if (state.title && state.title !== 'New Session') {
+      // Title chain (memory v2): an explicit state.json title outranks the
+      // first-user-message fallback, so it travels its own meta key.
+      meta.session_title = state.title;
+      meta.first_prompt = state.title;
+    } else if (state.lastPrompt) meta.first_prompt = state.lastPrompt;
     if (state.isCustomTitle) meta.custom_title = true;
+    // Fork lineage: state.json forkedFrom names the parent session directory.
+    // Only meaningful for the main wire; subagents inherit the session dir.
+    const forkedFrom = typeof state.forkedFrom === 'string'
+      ? state.forkedFrom
+      : state.forkedFrom?.sessionId;
+    if (agentName === 'main' && forkedFrom) meta.forked_from = forkedFrom;
     const agentInfo = state.agents?.[agentName];
     if (agentInfo?.type) meta.agent_type = agentInfo.type;
     if (agentInfo?.swarmItem) meta.swarm_item = agentInfo.swarmItem;

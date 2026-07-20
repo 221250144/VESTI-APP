@@ -5,6 +5,7 @@ import {
 } from "./timestamps"
 import type { ConversationFilters } from "./protocol"
 import { normalizePlatform, SUPPORTED_PLATFORMS } from "./platform"
+import { bumpDexieDataVersion } from "../sync/dataVersion"
 import {
   buildExportJsonV1,
   buildExportMdV1,
@@ -21,6 +22,7 @@ import type {
   DashboardStats,
   DataOverviewSnapshot,
   Deposit,
+  DepositMaintainOp,
   DepositScope,
   DepositTemplate,
   ExploreAgentMeta,
@@ -1159,6 +1161,121 @@ export async function createTopic(payload: {
   }
 }
 
+/**
+ * Rename a topic, keeping the same sibling-uniqueness rule as createTopic.
+ * Used by the topic-governance flow (settings page) to fix low-quality names.
+ */
+export async function renameTopic(id: number, name: string): Promise<Topic> {
+  const normalizedName = name.trim()
+  if (!normalizedName) {
+    throw new Error("TOPIC_NAME_EMPTY")
+  }
+  const topic = await db.topics.get(id)
+  if (!topic || topic.id === undefined) {
+    throw new Error("TOPIC_NOT_FOUND")
+  }
+
+  const parentId = topic.parent_id ?? null
+  const conflict =
+    parentId === null
+      ? await db.topics
+          .where("name")
+          .equals(normalizedName)
+          .and((record) => record.parent_id === null && record.id !== id)
+          .first()
+      : await db.topics
+          .where("[parent_id+name]")
+          .equals([parentId, normalizedName])
+          .and((record) => record.id !== id)
+          .first()
+  if (conflict) {
+    throw new Error("TOPIC_ALREADY_EXISTS")
+  }
+
+  await enforceStorageWriteGuard()
+  const updatedAt = Date.now()
+  await db.topics.update(id, { name: normalizedName, updated_at: updatedAt })
+  return toTopic({ ...topic, name: normalizedName, updated_at: updatedAt })
+}
+
+/**
+ * Merge several topics into one target topic (topic-governance "synonym
+ * merge"): every conversation filed under a source moves to the target, the
+ * source's children are re-parented onto the target (recursively absorbed
+ * into a same-named child when one already exists there), and the source
+ * topic is deleted. Sources that are ancestors of the target are skipped so
+ * no cycle can form. The auto_classified marker on moved conversations is
+ * left untouched — the conversation-to-topic assignment itself did not
+ * change hands.
+ */
+export async function mergeTopics(
+  targetId: number,
+  sourceIds: number[]
+): Promise<{ moved: number; removed: number }> {
+  const target = await db.topics.get(targetId)
+  if (!target) {
+    throw new Error("TOPIC_NOT_FOUND")
+  }
+  const uniqueSourceIds = [...new Set(sourceIds)].filter((id) => id !== targetId)
+  if (uniqueSourceIds.length === 0) {
+    return { moved: 0, removed: 0 }
+  }
+
+  await enforceStorageWriteGuard()
+  let moved = 0
+  let removed = 0
+  await db.transaction("rw", db.topics, db.conversations, async () => {
+    const isAncestorOf = async (ancestorId: number, id: number): Promise<boolean> => {
+      let current = await db.topics.get(id)
+      const guard = new Set<number>()
+      while (current?.parent_id != null && !guard.has(current.id as number)) {
+        guard.add(current.id as number)
+        if (current.parent_id === ancestorId) return true
+        current = await db.topics.get(current.parent_id)
+      }
+      return false
+    }
+
+    const absorb = async (intoId: number, fromId: number): Promise<void> => {
+      const source = await db.topics.get(fromId)
+      if (!source) return
+      // Never merge a topic into one of its own descendants: the re-parented
+      // children would form a cycle.
+      if (await isAncestorOf(fromId, intoId)) return
+
+      const now = Date.now()
+      moved += await db.conversations
+        .where("topic_id")
+        .equals(fromId)
+        .modify({ topic_id: intoId, updated_at: now })
+
+      const children = await db.topics.where("parent_id").equals(fromId).toArray()
+      for (const child of children) {
+        if (child.id === undefined) continue
+        const sibling = await db.topics
+          .where("[parent_id+name]")
+          .equals([intoId, child.name])
+          .first()
+        if (sibling && sibling.id !== undefined && sibling.id !== child.id) {
+          // A same-named child already sits under the new parent: fold this
+          // child into it instead of creating a duplicate sibling.
+          await absorb(sibling.id, child.id)
+        } else {
+          await db.topics.update(child.id, { parent_id: intoId, updated_at: now })
+        }
+      }
+
+      await db.topics.delete(fromId)
+      removed += 1
+    }
+
+    for (const sourceId of uniqueSourceIds) {
+      await absorb(targetId, sourceId)
+    }
+  })
+  return { moved, removed }
+}
+
 export async function updateConversationTopic(
   id: number,
   topic_id: number | null
@@ -1381,6 +1498,10 @@ export async function bulkSetConversationFlags(
       record.updated_at = now
       updated += 1
     })
+
+  // Trash/archive flips change which conversations the cached conversation
+  // tree and library views include — invalidate the versioned caches.
+  if (updated > 0) bumpDexieDataVersion()
 
   return updated
 }
@@ -1726,6 +1847,7 @@ export async function deleteConversation(id: number): Promise<boolean> {
       await db.conversations.delete(id)
     }
   )
+  bumpDexieDataVersion()
   return true
 }
 
@@ -1753,6 +1875,7 @@ export async function updateConversationTitle(
   }
 
   await db.conversations.update(id, { title: normalizedTitle })
+  bumpDexieDataVersion()
   return toConversation({
     ...existing,
     title: normalizedTitle,
@@ -3091,9 +3214,14 @@ function toRelayPack(record: RelayPackRecord & { id: number }): RelayPack {
     title: record.title,
     goal: "",
     current_state: "",
+    completed: [],
+    in_progress: [],
+    git_state: { dirty_files: [], last_commits: [] },
     key_decisions: [],
     key_files: [],
+    failed_paths: [],
     open_issues: [],
+    verification: { commands: [], last_results: [] },
     next_steps: [],
     suggested_prompt: record.suggested_prompt
   }
@@ -3102,6 +3230,8 @@ function toRelayPack(record: RelayPackRecord & { id: number }): RelayPack {
     createdAt: record.created_at,
     title: record.title,
     conversationIds: parseRelayPackJson<number[]>(record.conversation_ids, []),
+    // Stored v1 packs lack the v2 fields; the render layer normalizes them
+    // (@vesti/ui normalizeRelayPackPayload).
     pack: parseRelayPackJson<RelayPackPayload>(record.pack, emptyPack),
     suggestedPrompt: record.suggested_prompt,
     source: "manual"
@@ -3164,6 +3294,9 @@ export interface CreateDepositInput {
   version?: number
   prevId?: number | null
   customInstruction?: string | null
+  /** mem0-style maintain ops behind this version (null when stored without a
+   * maintain pass). Persisted as a non-indexed JSON string. */
+  lastOps?: DepositMaintainOp[] | null
 }
 
 const DEPOSIT_TEMPLATES: readonly DepositTemplate[] = [
@@ -3187,6 +3320,35 @@ function normalizeDepositScope(value: unknown): DepositScope {
   return { kind: "selection", conversationIds: [] }
 }
 
+function parseDepositLastOps(value: string | null | undefined): DepositMaintainOp[] | null {
+  if (!value) return null
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (!Array.isArray(parsed)) return null
+    const ops: DepositMaintainOp[] = []
+    for (const item of parsed) {
+      if (!item || typeof item !== "object") return null
+      const entry = item as Partial<DepositMaintainOp>
+      if (
+        (entry.op !== "ADD" && entry.op !== "UPDATE" && entry.op !== "DELETE" && entry.op !== "NOOP") ||
+        typeof entry.section !== "string"
+      ) {
+        return null
+      }
+      ops.push({
+        op: entry.op,
+        section: entry.section,
+        old_text: typeof entry.old_text === "string" ? entry.old_text : undefined,
+        new_text: typeof entry.new_text === "string" ? entry.new_text : undefined,
+        reason: typeof entry.reason === "string" ? entry.reason : ""
+      })
+    }
+    return ops
+  } catch {
+    return null
+  }
+}
+
 function toDeposit(record: DepositRecord & { id: number }): Deposit {
   return {
     id: record.id,
@@ -3198,7 +3360,8 @@ function toDeposit(record: DepositRecord & { id: number }): Deposit {
     contentMarkdown: record.content_markdown,
     version: Number.isFinite(record.version) && record.version > 0 ? Math.floor(record.version) : 1,
     prevId: typeof record.prev_id === "number" ? record.prev_id : null,
-    customInstruction: record.custom_instruction ?? null
+    customInstruction: record.custom_instruction ?? null,
+    lastOps: parseDepositLastOps(record.last_ops)
   }
 }
 
@@ -3215,7 +3378,8 @@ export async function createDeposit(input: CreateDepositInput): Promise<Deposit>
     content_markdown: input.contentMarkdown,
     version: input.version ?? 1,
     prev_id: input.prevId ?? null,
-    custom_instruction: input.customInstruction ?? null
+    custom_instruction: input.customInstruction ?? null,
+    last_ops: input.lastOps?.length ? JSON.stringify(input.lastOps) : null
   })
   const record = await db.deposits.get(id)
   if (!record || record.id === undefined) {

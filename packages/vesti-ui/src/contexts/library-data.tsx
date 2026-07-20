@@ -6,6 +6,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -13,6 +14,7 @@ import type {
   Conversation,
   ConversationDigest,
   ConversationTree,
+  ProjectStateView,
   Topic,
   StorageApi,
 } from "../types";
@@ -30,6 +32,8 @@ type LibraryDataContextValue = {
   /** Desktop conversation tree for the source-tree nav (P2b); null when the
    * platform has no capture pipeline (extension). */
   conversationTree: ConversationTree | null;
+  /** Memory v2 L0 cards keyed by projectKey; empty without a capture pipeline. */
+  projectStateByKey: Map<string, ProjectStateView>;
   refresh: () => Promise<void>;
   updateConversationInState: (payload: ConversationUpdatedPayload) => void;
 };
@@ -77,15 +81,19 @@ export function LibraryDataProvider({
   >(new Map());
   const [conversationTree, setConversationTree] =
     useState<ConversationTree | null>(null);
+  const [projectStateByKey, setProjectStateByKey] = useState<
+    Map<string, ProjectStateView>
+  >(new Map());
 
   const refresh = useCallback(async () => {
     try {
-      const [topicData, conversationData, digestData, treeData] =
+      const [topicData, conversationData, digestData, treeData, projectStates] =
         await Promise.all([
           storage.getTopics(),
           storage.getConversations(),
           storage.getConversationDigests?.() ?? Promise.resolve([]),
           storage.getConversationTree?.() ?? Promise.resolve(null),
+          storage.getProjectStates?.() ?? Promise.resolve([]),
         ]);
       setTopics(topicData);
       setConversations(conversationData);
@@ -93,10 +101,57 @@ export function LibraryDataProvider({
         new Map(digestData.map((digest) => [digest.conversationId, digest]))
       );
       setConversationTree(treeData);
+      setProjectStateByKey(
+        new Map(projectStates.map((state) => [state.projectKey, state]))
+      );
     } catch (error) {
       console.error("[dashboard] Failed to load library data", error);
     }
   }, [storage]);
+
+  // Event-driven refresh scheduler. Data-update events arrive in storms
+  // (capture sync → auto-classify → its own follow-up event, ...); a naive
+  // listener would run the five-way reload above once per event and stack
+  // overlapping runs. Events are coalesced with a short debounce, concurrent
+  // runs are de-duplicated, and an event landing mid-run schedules exactly
+  // one trailing run so nothing is lost.
+  const REFRESH_DEBOUNCE_MS = 150;
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refreshRunningRef = useRef<Promise<void> | null>(null);
+  const refreshQueuedRef = useRef(false);
+
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimerRef.current !== null) {
+      clearTimeout(refreshTimerRef.current);
+    }
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null;
+      if (refreshRunningRef.current) {
+        refreshQueuedRef.current = true;
+        return;
+      }
+      const running = (async () => {
+        try {
+          await refresh();
+        } finally {
+          refreshRunningRef.current = null;
+          if (refreshQueuedRef.current) {
+            refreshQueuedRef.current = false;
+            scheduleRefresh();
+          }
+        }
+      })();
+      refreshRunningRef.current = running;
+    }, REFRESH_DEBOUNCE_MS);
+  }, [refresh]);
+
+  useEffect(() => {
+    return () => {
+      if (refreshTimerRef.current !== null) {
+        clearTimeout(refreshTimerRef.current);
+      }
+    };
+  }, [scheduleRefresh]);
 
   const updateConversationInState = useCallback(
     (payload: ConversationUpdatedPayload) => {
@@ -141,7 +196,7 @@ export function LibraryDataProvider({
     // Desktop (Electron): captureSync dispatches this DOM event after each
     // successful SQLite→Dexie import; in the extension this branch is inert.
     const onDesktopUpdate = () => {
-      void refresh();
+      scheduleRefresh();
     };
     if (typeof window !== "undefined") {
       window.addEventListener("vesti:data-updated", onDesktopUpdate);
@@ -159,7 +214,7 @@ export function LibraryDataProvider({
         message &&
         (message as { type?: string }).type === "VESTI_DATA_UPDATED"
       ) {
-        void refresh();
+        scheduleRefresh();
       }
     };
     chrome.runtime.onMessage.addListener(handler);
@@ -169,7 +224,7 @@ export function LibraryDataProvider({
         window.removeEventListener("vesti:data-updated", onDesktopUpdate);
       }
     };
-  }, [refresh]);
+  }, [scheduleRefresh]);
 
   useExtensionSync(updateConversationInState);
 
@@ -179,6 +234,7 @@ export function LibraryDataProvider({
       conversations,
       digestByConversationId,
       conversationTree,
+      projectStateByKey,
       refresh,
       updateConversationInState,
     }),
@@ -187,6 +243,7 @@ export function LibraryDataProvider({
       conversations,
       digestByConversationId,
       conversationTree,
+      projectStateByKey,
       refresh,
       updateConversationInState,
     ]
