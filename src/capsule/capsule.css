@@ -94,6 +94,8 @@ body,
   justify-content: center;
   cursor: pointer;
   user-select: none;
+  /* Required for pointer capture to receive move events from touch/pen. */
+  touch-action: none;
   animation: capsule-enter 200ms ease-out;
   transition: transform 160ms ease-out;
 }
@@ -181,6 +183,8 @@ body,
   padding: 14px 14px 10px;
   cursor: grab;
   user-select: none;
+  /* Same pointer-capture drag as the collapsed ball. */
+  touch-action: none;
 }
 
 .capsule-panel-header img {

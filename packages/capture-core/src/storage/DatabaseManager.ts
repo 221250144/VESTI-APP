@@ -869,6 +869,37 @@ export class DatabaseManager {
     return (this.getDb().prepare(sql).all(...params) as any[]).map(r => this.rowToSessionMessage(r));
   }
 
+  /**
+   * Batch variant of getSessionMessages: one query per 500-id chunk instead
+   * of one round trip per session. Full-snapshot export over a few thousand
+   * sessions otherwise issues that many individual SELECTs (N+1). Returns
+   * messages grouped by session id; each group's ordering matches
+   * getSessionMessages (sequence, timestamp).
+   */
+  getSessionMessagesBatch(sessionIds: string[]): Map<string, SessionMessage[]> {
+    const grouped = new Map<string, SessionMessage[]>();
+    if (sessionIds.length === 0) return grouped;
+    const db = this.getDb();
+    const CHUNK_SIZE = 500; // SQLite's default host-variable limit is 999
+    for (let offset = 0; offset < sessionIds.length; offset += CHUNK_SIZE) {
+      const chunk = sessionIds.slice(offset, offset + CHUNK_SIZE);
+      const placeholders = chunk.map(() => '?').join(',');
+      const rows = db.prepare(
+        `SELECT * FROM messages WHERE session_id IN (${placeholders}) ORDER BY session_id, sequence, timestamp`
+      ).all(...chunk) as any[];
+      for (const row of rows) {
+        const message = this.rowToSessionMessage(row);
+        const list = grouped.get(message.sessionId);
+        if (list) {
+          list.push(message);
+        } else {
+          grouped.set(message.sessionId, [message]);
+        }
+      }
+    }
+    return grouped;
+  }
+
   getSessionMessageCount(sessionId: string): number {
     const row = this.getDb().prepare(
       'SELECT COUNT(*) as cnt FROM messages WHERE session_id = ?'

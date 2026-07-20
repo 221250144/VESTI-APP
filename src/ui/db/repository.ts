@@ -5,6 +5,7 @@ import {
 } from "./timestamps"
 import type { ConversationFilters } from "./protocol"
 import { normalizePlatform, SUPPORTED_PLATFORMS } from "./platform"
+import { bumpDexieDataVersion } from "../sync/dataVersion"
 import {
   buildExportJsonV1,
   buildExportMdV1,
@@ -1160,6 +1161,121 @@ export async function createTopic(payload: {
   }
 }
 
+/**
+ * Rename a topic, keeping the same sibling-uniqueness rule as createTopic.
+ * Used by the topic-governance flow (settings page) to fix low-quality names.
+ */
+export async function renameTopic(id: number, name: string): Promise<Topic> {
+  const normalizedName = name.trim()
+  if (!normalizedName) {
+    throw new Error("TOPIC_NAME_EMPTY")
+  }
+  const topic = await db.topics.get(id)
+  if (!topic || topic.id === undefined) {
+    throw new Error("TOPIC_NOT_FOUND")
+  }
+
+  const parentId = topic.parent_id ?? null
+  const conflict =
+    parentId === null
+      ? await db.topics
+          .where("name")
+          .equals(normalizedName)
+          .and((record) => record.parent_id === null && record.id !== id)
+          .first()
+      : await db.topics
+          .where("[parent_id+name]")
+          .equals([parentId, normalizedName])
+          .and((record) => record.id !== id)
+          .first()
+  if (conflict) {
+    throw new Error("TOPIC_ALREADY_EXISTS")
+  }
+
+  await enforceStorageWriteGuard()
+  const updatedAt = Date.now()
+  await db.topics.update(id, { name: normalizedName, updated_at: updatedAt })
+  return toTopic({ ...topic, name: normalizedName, updated_at: updatedAt })
+}
+
+/**
+ * Merge several topics into one target topic (topic-governance "synonym
+ * merge"): every conversation filed under a source moves to the target, the
+ * source's children are re-parented onto the target (recursively absorbed
+ * into a same-named child when one already exists there), and the source
+ * topic is deleted. Sources that are ancestors of the target are skipped so
+ * no cycle can form. The auto_classified marker on moved conversations is
+ * left untouched — the conversation-to-topic assignment itself did not
+ * change hands.
+ */
+export async function mergeTopics(
+  targetId: number,
+  sourceIds: number[]
+): Promise<{ moved: number; removed: number }> {
+  const target = await db.topics.get(targetId)
+  if (!target) {
+    throw new Error("TOPIC_NOT_FOUND")
+  }
+  const uniqueSourceIds = [...new Set(sourceIds)].filter((id) => id !== targetId)
+  if (uniqueSourceIds.length === 0) {
+    return { moved: 0, removed: 0 }
+  }
+
+  await enforceStorageWriteGuard()
+  let moved = 0
+  let removed = 0
+  await db.transaction("rw", db.topics, db.conversations, async () => {
+    const isAncestorOf = async (ancestorId: number, id: number): Promise<boolean> => {
+      let current = await db.topics.get(id)
+      const guard = new Set<number>()
+      while (current?.parent_id != null && !guard.has(current.id as number)) {
+        guard.add(current.id as number)
+        if (current.parent_id === ancestorId) return true
+        current = await db.topics.get(current.parent_id)
+      }
+      return false
+    }
+
+    const absorb = async (intoId: number, fromId: number): Promise<void> => {
+      const source = await db.topics.get(fromId)
+      if (!source) return
+      // Never merge a topic into one of its own descendants: the re-parented
+      // children would form a cycle.
+      if (await isAncestorOf(fromId, intoId)) return
+
+      const now = Date.now()
+      moved += await db.conversations
+        .where("topic_id")
+        .equals(fromId)
+        .modify({ topic_id: intoId, updated_at: now })
+
+      const children = await db.topics.where("parent_id").equals(fromId).toArray()
+      for (const child of children) {
+        if (child.id === undefined) continue
+        const sibling = await db.topics
+          .where("[parent_id+name]")
+          .equals([intoId, child.name])
+          .first()
+        if (sibling && sibling.id !== undefined && sibling.id !== child.id) {
+          // A same-named child already sits under the new parent: fold this
+          // child into it instead of creating a duplicate sibling.
+          await absorb(sibling.id, child.id)
+        } else {
+          await db.topics.update(child.id, { parent_id: intoId, updated_at: now })
+        }
+      }
+
+      await db.topics.delete(fromId)
+      removed += 1
+    }
+
+    for (const sourceId of uniqueSourceIds) {
+      await absorb(targetId, sourceId)
+    }
+  })
+  return { moved, removed }
+}
+
 export async function updateConversationTopic(
   id: number,
   topic_id: number | null
@@ -1382,6 +1498,10 @@ export async function bulkSetConversationFlags(
       record.updated_at = now
       updated += 1
     })
+
+  // Trash/archive flips change which conversations the cached conversation
+  // tree and library views include — invalidate the versioned caches.
+  if (updated > 0) bumpDexieDataVersion()
 
   return updated
 }
@@ -1727,6 +1847,7 @@ export async function deleteConversation(id: number): Promise<boolean> {
       await db.conversations.delete(id)
     }
   )
+  bumpDexieDataVersion()
   return true
 }
 
@@ -1754,6 +1875,7 @@ export async function updateConversationTitle(
   }
 
   await db.conversations.update(id, { title: normalizedTitle })
+  bumpDexieDataVersion()
   return toConversation({
     ...existing,
     title: normalizedTitle,

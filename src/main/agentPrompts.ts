@@ -848,6 +848,36 @@ registerAgentKind('roundtable-synthesis', {
   },
 });
 
+/** AI 深化 (Learn deep-dive): one recall-grounded pass over a learning domain.
+ * Same wiring as the roundtable kinds — the transcriptOverride (assembled in
+ * src/ui/learn/learnDeepen) already carries the domain stats, the optional
+ * recall context and the strict-JSON contract; this registration only wraps
+ * it with the assistant preamble + a lenient parse. */
+registerAgentKind('learn-deepen', {
+  buildPrompt({ transcript, preferences }) {
+    const { language, custom } = promptAffixes(preferences);
+    return [
+      {
+        role: 'system',
+        content: `你是 Vesti 的学习脉络分析助手。只依据给出的本地统计与背景资料做分析，不编造资料中没有的具体事实；输出严格 JSON（不要 Markdown 代码围栏、不要任何额外文字）。${language}${custom}`,
+      },
+      {
+        role: 'user',
+        content: transcript,
+      },
+    ];
+  },
+  parse(raw) {
+    const cleaned = raw
+      .trim()
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/, '')
+      .trim();
+    if (!cleaned) throw new Error('learn-deepen 输出为空');
+    return cleaned.slice(0, 4000);
+  },
+});
+
 /**
  * Capsule prompt assistant (P6 follow-up): refine a prompt the user picked in
  * the floating dock. Two kinds, both fed through transcriptOverride (the

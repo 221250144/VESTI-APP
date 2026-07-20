@@ -215,7 +215,7 @@ function validSessionId(value: unknown): value is string {
 function validAgentRequest(value: unknown): value is AgentRunRequest {
   if (!value || typeof value !== 'object') return false;
   const request = value as Partial<AgentRunRequest>;
-  return (request.kind === 'summary' || request.kind === 'explore' || request.kind === 'digest' || request.kind === 'classify' || request.kind === 'relay' || request.kind === 'extract' || request.kind === 'distill' || request.kind === 'deposit-maintain' || request.kind === 'daily' || request.kind === 'persona' || request.kind === 'roundtable-turn' || request.kind === 'roundtable-synthesis' || request.kind === 'prompt-improve' || request.kind === 'prompt-continue')
+  return (request.kind === 'summary' || request.kind === 'explore' || request.kind === 'digest' || request.kind === 'classify' || request.kind === 'relay' || request.kind === 'extract' || request.kind === 'distill' || request.kind === 'deposit-maintain' || request.kind === 'daily' || request.kind === 'persona' || request.kind === 'roundtable-turn' || request.kind === 'roundtable-synthesis' || request.kind === 'learn-deepen' || request.kind === 'prompt-improve' || request.kind === 'prompt-continue')
     && validSessionId(request.sessionId)
     && (request.question === undefined || typeof request.question === 'string')
     && (request.template === undefined || (typeof request.template === 'string' && request.template.length <= 64))

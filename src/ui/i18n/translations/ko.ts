@@ -1205,7 +1205,7 @@ export const koTranslations = {
     },
     network: {
       emptyTitle: "시간순 네트워크가 여기에 표시됩니다.",
-      emptyDesc: "먼저 몇 개의 대화를 캡처한 다음, 네트워크를 다시 열어 그래프가 시간에 따라 변화하는 모습을 살펴보세요.",
+      emptyDesc: "데스크톱 앱과 브라우저 확장에서 캡처한 대화가 자동으로 여기에 표시됩니다. 몇 개만 캡처하면 프로젝트/주제별로 묶인 그래프가 자라나고, 유사도 인덱싱이 완료되면 시맨틱 링크도 나타납니다.",
       noConversationsYet: "아직 캡처된 대화가 없습니다.",
       replayInfo: "이 재생은 모든 것이 오늘 캡처된 경우에도 전체 타임라인을 8초 만에 재생합니다.",
       newConversationOn: "+ {platform}의 새 대화",
@@ -1235,12 +1235,18 @@ export const koTranslations = {
       conversationN: "대화 {id}",
       thinkingMapView: "사고 지도",
       conversationMapView: "대화 그래프",
-      thinkingMapEmpty: "먼저 라이브러리에서 대화 요약을 생성하세요. 사고 지도는 그 안의 핵심 인사이트로 만들어집니다.",
+      thinkingMapEmpty: "이 보기는 요약과 digest로 만들어집니다. 먼저 라이브러리에서 요약을 생성하면 사고 지도가 핵심 주제의 흐름을 그려 줍니다.",
       loadingThinkingMap: "사고 지도를 만드는 중...",
       gapInsightTitle: "아직 연결하지 않은 흐름",
       gapInsightTemplate: "{a} 와(과) {b} 를(을) 탐색했지만 아직 연결하지 않았어요",
       conceptMentionedIn: "{count}개의 대화에 등장",
-      relatedConversations: "관련 대화"
+      relatedConversations: "관련 대화",
+      groupByLabel: "그룹",
+      groupByPlatform: "플랫폼별",
+      groupByTopic: "주제별",
+      groupByProject: "프로젝트별",
+      groupOther: "그룹 없음",
+      clusterConversationCount: "대화 {count}개",
     },
     prompts: {
       title: "자주 쓰는 프롬프트",
@@ -1401,12 +1407,25 @@ export const koTranslations = {
       openLoopsTitle: "미완의 루프",
       openLoopsEmpty: "미해결 스레드가 없습니다 — 깔끔하게 마무리되었습니다.",
       weakAction: "AITI 탭에서 요약 생성",
-      loading: "학습 지도를 정리하는 중…"
+      loading: "학습 지도를 정리하는 중…",
+      deepenAi: "AI 심화",
+      deepenAiRunning: "「{topic}」을(를) 심층 분석하는 중…",
+      deepenAiTitle: "AI 학습 궤적 분석",
+      mastered: "현재 마스터한 포인트",
+      blindSpots: "이해의 사각지대",
+      learningPath: "추천 학습 경로",
+      deepenAiFailed: "심화 분석 실패",
+      llmMissing: "모델이 설정되지 않았습니다 — 먼저 「설정」에서 LLM을 설정하세요. AI 심화에는 모델이 필요합니다.",
+      groundedHint: "과거 대화 {n}개를 배경으로 사용",
+      savedHint: "이 분석은 「Ask」 기록에 저장되었습니다. 언제든 다시 볼 수 있습니다."
     },
     roundtable: {
       title: "AI 원탁회의",
       subtitle: "당신의 질문에 대해 다양한 관점의 패널을 소집하고, 사회자가 종합합니다.",
       questionPlaceholder: "논의할 판단이 필요한 질문을 입력…",
+      intro: "AI 원탁회의는 당신의 질문에 대해 관점이 다른 멤버들이 순서대로 발언하고, 사회자가 합의점·이견·권장 사항을 정리합니다. 관련된 과거 대화가 있으면 배경으로 활용합니다.",
+      topicsLabel: "학습 영역에서 주제 선택",
+      topicPrompt: "「{topic}」에 대해 다음으로 투자할 가장 가치 있는 방향은 무엇일까요?",
       personasLabel: "패널(2-4명)",
       run: "패널 소집",
       rerun: "다시 토론",
@@ -1430,7 +1449,9 @@ export const koTranslations = {
       personaOptimist: "낙관론자",
       personaPragmatist: "실용주의자",
       personaDomainExpert: "분야 전문가",
-      personaDevilsAdvocate: "악마의 변호인"
+      personaDevilsAdvocate: "악마의 변호인",
+      deepen: "더 깊이 파기",
+      deepenPrompt: "「{question}」 원탁 토론에서 {persona}은(는) 이렇게 주장했습니다: 「{excerpt}」. 지난 대화를 바탕으로 이 관점을 심층 분석해 주세요 — 어디서 성립하고 어디서 성립하지 않는지."
     }
   },
   platforms: {

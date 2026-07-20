@@ -17,6 +17,7 @@ import { ExploreTab } from "./tabs/explore-tab";
 import { AitiCard } from "./components/AitiCard";
 import { LearnCard } from "./components/LearnCard";
 import { RoundtablePanel } from "./components/RoundtablePanel";
+import { learnTopicSuggestions } from "./lib/learnTopics";
 import { DepositsTab } from "./tabs/deposits-tab";
 import { DailyTab } from "./tabs/daily-tab";
 import { LibraryTab } from "./tabs/library-tab";
@@ -680,6 +681,12 @@ const DEFAULT_LABELS: DashboardLabels = {
     gapInsightTemplate: "You explored {a} and {b} but never linked them",
     conceptMentionedIn: "Across {count} conversations",
     relatedConversations: "Related conversations",
+    groupByLabel: "Group by",
+    groupByPlatform: "Platform",
+    groupByTopic: "Topic",
+    groupByProject: "Project",
+    groupOther: "Ungrouped",
+    clusterConversationCount: "{count} conversations",
   },
   prompts: {
     title: "Prompt Library",
@@ -859,6 +866,16 @@ const DEFAULT_LABELS: DashboardLabels = {
     weakHint: "Still a thin sample — generate summaries for more conversations (see the AITI tab) and this map will fill in.",
     weakAction: "Generate summaries on the AITI tab",
     loading: "Putting your learning map together…",
+    deepenAi: "AI deep-dive",
+    deepenAiRunning: "Digging deeper into \"{topic}\"…",
+    deepenAiTitle: "AI learning-trajectory analysis",
+    mastered: "What you've mastered",
+    blindSpots: "Blind spots",
+    learningPath: "Suggested path",
+    deepenAiFailed: "Deep-dive failed",
+    llmMissing: "No model configured — set up an LLM in Settings first; the AI deep-dive needs one to analyze.",
+    groundedHint: "Grounded in {n} of your past conversations",
+    savedHint: "Saved to your Ask history — replay it anytime from the Ask tab.",
   },
   roundtable: {
     title: "AI Roundtable",
@@ -866,6 +883,9 @@ const DEFAULT_LABELS: DashboardLabels = {
     comingSoonTitle: "AI Roundtable — coming soon",
     comingSoonBody: "The plan: convene several AI panelists with distinct perspectives on your question, then have a moderator synthesize the consensus, the disagreements, and a recommendation. The multi-turn orchestration is still being polished — until it is real, we'd rather not show you a fake run.",
     questionPlaceholder: "Ask a judgment-call question to debate…",
+    intro: "The roundtable convenes several AI panelists with distinct perspectives on your question, then a moderator distills the consensus, the disagreements and a recommendation — grounded in your past conversations when recall finds relevant ones.",
+    topicsLabel: "Pick a topic from your learning domains",
+    topicPrompt: "Around \"{topic}\": what is the most worthwhile direction for me to invest in next?",
     personasLabel: "Panelists (pick 2-4)",
     run: "Convene panel",
     rerun: "Run it again",
@@ -890,6 +910,8 @@ const DEFAULT_LABELS: DashboardLabels = {
     personaPragmatist: "Pragmatist",
     personaDomainExpert: "Domain Expert",
     personaDevilsAdvocate: "Devil's Advocate",
+    deepen: "Go deeper",
+    deepenPrompt: "In the roundtable on \"{question}\", {persona} argued: \"{excerpt}\". Dig into this viewpoint against my past conversations — where does it hold, where does it not?",
   },
 };
 
@@ -1581,6 +1603,7 @@ export function VestiDashboard({
                     onExploreTopic={handleExploreTopic}
                     storage={storage}
                     sendToLabels={labels.library}
+                    lang={lang}
                   />
                 </div>
               )}
@@ -1593,6 +1616,10 @@ export function VestiDashboard({
                     sendToLabels={labels.library}
                     lang={lang}
                     onOpenConversation={handleOpenConversation}
+                    topicSuggestions={
+                      learn?.available ? learnTopicSuggestions(learn) : undefined
+                    }
+                    onExploreTopic={handleExploreTopic}
                   />
                 </div>
               )}

@@ -28,6 +28,11 @@ import {
   subscribeAutoClassify,
   type ClassifySuggestion,
 } from "../organize/autoClassify";
+import {
+  applyTopicGovernance,
+  runTopicGovernance,
+  type TopicGovernancePlan,
+} from "../organize/topicGovernance";
 import { scheduleUpstreamAutoExport } from "../upstream/autoExport";
 import {
   exportAllToMarkdownDirectory,
@@ -161,6 +166,18 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     organizeAccept: "接受",
     organizeIgnore: "忽略",
     organizeAcceptAll: "全部接受",
+    organizeTidy: "整理现有话题",
+    organizeTidyDesc: "让 AI 审查现有主题树,建议合并同义主题、重命名低质名称;确认后批量执行。",
+    organizeTidyRunning: "审查中…",
+    organizeTidyEmpty: "AI 审查完成:现有主题树无需整理。",
+    organizeTidyFailed: "整理审查失败,请稍后重试。",
+    organizeTidySuggestions: "整理建议(确认后执行)",
+    organizeTidyMerge: "合并",
+    organizeTidyRename: "改名",
+    organizeTidyApply: "应用整理",
+    organizeTidyApplying: "应用中…",
+    organizeTidyCancel: "取消",
+    organizeTidyDone: "已应用整理:合并 {merged} 组、重命名 {renamed} 个主题。",
     dailyTitle: "日志",
     dailyDesc: "每天固定时间自动生成当天日报;启动 App 时会补上错过的昨天。未配置模型时使用本地模板生成。",
     dailyTime: "每日生成时间",
@@ -329,6 +346,18 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     organizeAccept: "Accept",
     organizeIgnore: "Ignore",
     organizeAcceptAll: "Accept all",
+    organizeTidy: "Tidy existing topics",
+    organizeTidyDesc: "Let AI review the topic tree and propose synonym merges and better names; applied only after your confirmation.",
+    organizeTidyRunning: "Reviewing…",
+    organizeTidyEmpty: "Review finished: the topic tree needs no tidy-up.",
+    organizeTidyFailed: "Tidy-up review failed. Please try again later.",
+    organizeTidySuggestions: "Tidy-up suggestions (applied on confirm)",
+    organizeTidyMerge: "Merge",
+    organizeTidyRename: "Rename",
+    organizeTidyApply: "Apply tidy-up",
+    organizeTidyApplying: "Applying…",
+    organizeTidyCancel: "Cancel",
+    organizeTidyDone: "Tidy-up applied: {merged} merge groups, {renamed} renames.",
     dailyTitle: "Daily log",
     dailyDesc: "Generates the day's report at a fixed time every evening; a missed yesterday is caught up at launch. Without a configured model the local template is used.",
     dailyTime: "Daily generation time",
@@ -560,6 +589,13 @@ export function SettingsPage({
   const [now, setNow] = useState(() => Date.now());
   const [classifyState, setClassifyState] = useState(getAutoClassifyState());
   const [suggestions, setSuggestions] = useState<ClassifySuggestion[]>([]);
+  // Topic governance (one-shot tidy of the existing topic tree).
+  const [tidy, setTidy] = useState<{
+    running: boolean;
+    applying: boolean;
+    plan: TopicGovernancePlan | null;
+    note: string;
+  }>({ running: false, applying: false, plan: null, note: "" });
   const [upstreamStats, setUpstreamStats] = useState<UpstreamExportStats | null>(null);
   const [upstreamBusy, setUpstreamBusy] = useState<string | null>(null);
   const [upstreamNote, setUpstreamNote] = useState("");
@@ -640,6 +676,40 @@ export function SettingsPage({
   async function acceptAllSuggestions() {
     await acceptAllClassifySuggestions();
     setSuggestions(await listClassifySuggestions().catch(() => []));
+  }
+
+  // Topic governance: review the tree, show the plan, apply on confirm.
+  async function tidyTopicsNow() {
+    setTidy({ running: true, applying: false, plan: null, note: "" });
+    try {
+      const plan = await runTopicGovernance();
+      setTidy({
+        running: false,
+        applying: false,
+        plan,
+        note: plan ? "" : copy.organizeTidyFailed,
+      });
+    } catch {
+      setTidy({ running: false, applying: false, plan: null, note: copy.organizeTidyFailed });
+    }
+  }
+
+  async function applyTidyPlan() {
+    if (!tidy.plan || tidy.applying) return;
+    setTidy({ ...tidy, applying: true });
+    const result = await applyTopicGovernance(tidy.plan);
+    setTidy({
+      running: false,
+      applying: false,
+      plan: null,
+      note: copy.organizeTidyDone
+        .replace("{merged}", String(result.merged))
+        .replace("{renamed}", String(result.renamed)),
+    });
+  }
+
+  function cancelTidyPlan() {
+    setTidy({ running: false, applying: false, plan: null, note: "" });
   }
 
   async function generatePairCode() {
@@ -1481,6 +1551,66 @@ export function SettingsPage({
                 : copy.organizeNever}
             </span>
           </div>
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              className={buttonSecondary}
+              disabled={tidy.running || tidy.applying || !llmReady}
+              onClick={() => void tidyTopicsNow()}
+            >
+              {tidy.running ? copy.organizeTidyRunning : copy.organizeTidy}
+            </button>
+            <span className="text-[12px] font-sans text-text-tertiary">{copy.organizeTidyDesc}</span>
+          </div>
+          {tidy.plan && tidy.plan.merges.length + tidy.plan.renames.length === 0 && (
+            <p className="mt-3 text-[12px] font-sans text-text-tertiary">{copy.organizeTidyEmpty}</p>
+          )}
+          {tidy.plan && tidy.plan.merges.length + tidy.plan.renames.length > 0 && (
+            <div className="mt-3 rounded-xl border border-border-subtle bg-bg-primary px-4 py-3">
+              <div className="mb-2 text-[12px] font-sans font-medium text-text-secondary">
+                {copy.organizeTidySuggestions}
+              </div>
+              <div className="flex flex-col gap-1.5">
+                {tidy.plan.merges.map((merge) => (
+                  <div key={`merge-${merge.targetId}`} className="text-[12px] font-sans text-text-primary">
+                    <span className="mr-1.5 rounded bg-accent-primary-light px-1.5 py-0.5 text-[11px] font-medium text-accent-primary">
+                      {copy.organizeTidyMerge}
+                    </span>
+                    {merge.sourceNames.join("、")} → {merge.name ?? merge.targetName}
+                  </div>
+                ))}
+                {tidy.plan.renames.map((rename) => (
+                  <div key={`rename-${rename.id}`} className="text-[12px] font-sans text-text-primary">
+                    <span className="mr-1.5 rounded bg-accent-primary-light px-1.5 py-0.5 text-[11px] font-medium text-accent-primary">
+                      {copy.organizeTidyRename}
+                    </span>
+                    {rename.from} → {rename.to}
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className={buttonSecondary}
+                  disabled={tidy.applying}
+                  onClick={() => void applyTidyPlan()}
+                >
+                  {tidy.applying ? copy.organizeTidyApplying : copy.organizeTidyApply}
+                </button>
+                <button
+                  type="button"
+                  className={buttonSecondary}
+                  disabled={tidy.applying}
+                  onClick={cancelTidyPlan}
+                >
+                  {copy.organizeTidyCancel}
+                </button>
+              </div>
+            </div>
+          )}
+          {tidy.note && !tidy.plan && (
+            <p className="mt-3 text-[12px] font-sans text-text-tertiary">{tidy.note}</p>
+          )}
           <div className="mt-4">
             <div className="mb-2 flex items-center justify-between gap-3">
               <span className="text-[12px] font-sans font-medium text-text-secondary">

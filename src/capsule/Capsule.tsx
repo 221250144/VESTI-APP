@@ -93,6 +93,12 @@ export function Capsule() {
 
   const handlePointerDown = useCallback((event: React.PointerEvent) => {
     if (event.button !== 0) return;
+    // Capture the pointer so move/up events keep targeting this element even
+    // when the cursor leaves the small window mid-drag. Without capture the
+    // drag stalls as soon as the cursor exits the ball rect (no more dragMove
+    // IPC), pointerup is lost, and the stale drag offset left in the main
+    // process made the ball jump on the next drag.
+    event.currentTarget.setPointerCapture(event.pointerId);
     dragRef.current = {
       pointerId: event.pointerId,
       startX: event.screenX,

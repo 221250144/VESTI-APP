@@ -85,9 +85,11 @@ function Shell() {
   }, []);
 
   // AITI / Learn are computed locally from stored summaries; recompute after
-  // every successful capture import (signalled by captureSync).
+  // every successful capture import (signalled by captureSync). Debounced:
+  // data-updated arrives in storms and each recompute reads three tables.
   useEffect(() => {
     let cancelled = false;
+    let debounce: ReturnType<typeof setTimeout> | null = null;
     const recompute = () => {
       void Promise.all([getAllSummaries(), getTopics(), listConversations()])
         .then(([summaries, topics, conversations]) => {
@@ -101,11 +103,19 @@ function Shell() {
           setLearn({ available: false, sampleSize: 0, domains: [], glossary: [], openLoops: [] });
         });
     };
+    const scheduleRecompute = () => {
+      if (debounce !== null) clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        debounce = null;
+        recompute();
+      }, 300);
+    };
     recompute();
-    window.addEventListener("vesti:data-updated", recompute);
+    window.addEventListener("vesti:data-updated", scheduleRecompute);
     return () => {
       cancelled = true;
-      window.removeEventListener("vesti:data-updated", recompute);
+      if (debounce !== null) clearTimeout(debounce);
+      window.removeEventListener("vesti:data-updated", scheduleRecompute);
     };
   }, []);
 

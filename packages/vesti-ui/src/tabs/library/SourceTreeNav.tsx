@@ -12,9 +12,7 @@ import {
   ChevronDown,
   FileText,
   Folder,
-  Globe,
   Hash,
-  Terminal,
 } from "lucide-react";
 import type {
   SourceRef,
@@ -24,7 +22,6 @@ import type {
   SourceTreeTopicNode,
 } from "./sourceTree";
 import {
-  BROWSER_SOURCE,
   isWslHost,
   sourcePlatformLabel,
   wslDistro,
@@ -290,7 +287,6 @@ export function SourceTreeNav({
       {model.sources.map((source) => {
         const ref: SourceRef = { platform: source.platform, host: source.host };
         const key = `source:${source.platform}|${source.host}`;
-        const isBrowser = source.platform === BROWSER_SOURCE.platform;
         const collapsed = isCollapsed(key, false);
         const sourceSelection: SourceSelection = { kind: "source", source: ref };
         return (
@@ -299,19 +295,7 @@ export function SourceTreeNav({
               depth={0}
               selected={selectionEquals(selection, sourceSelection)}
               onClick={() => onSelect(sourceSelection)}
-              icon={
-                isBrowser ? (
-                  <Globe
-                    strokeWidth={1.75}
-                    className="h-4 w-4 shrink-0 text-text-secondary"
-                  />
-                ) : (
-                  <Terminal
-                    strokeWidth={1.75}
-                    className="h-4 w-4 shrink-0 text-text-secondary"
-                  />
-                )
-              }
+              icon={null}
               label={sourcePlatformLabel(source.platform, labels.browser)}
               count={source.count}
               badge={<WslBadge host={source.host} label={labels.wslBadge} />}

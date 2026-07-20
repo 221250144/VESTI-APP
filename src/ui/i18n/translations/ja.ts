@@ -1205,7 +1205,7 @@ export const jaTranslations = {
     },
     network: {
       emptyTitle: "時系列ネットワークがここに表示されます。",
-      emptyDesc: "まずいくつか会話をキャプチャしてから、ネットワークを再度開いて、グラフが時間とともに変化する様子をご覧ください。",
+      emptyDesc: "デスクトップアプリとブラウザ拡張でキャプチャした会話は自動的にここに現れます。いくつかキャプチャすれば、プロジェクト/トピックごとに色分けされたグラフが育ち、類似度インデックスの完了とともにセマンティックリンクも表示されます。",
       noConversationsYet: "まだ会話がキャプチャされていません。",
       replayInfo: "このリプレイは、すべてが今日キャプチャされた場合でも、タイムライン全体を 8 秒で再生します。",
       newConversationOn: "+ {platform} の新しい会話",
@@ -1235,12 +1235,18 @@ export const jaTranslations = {
       conversationN: "会話 {id}",
       thinkingMapView: "思考マップ",
       conversationMapView: "会話グラフ",
-      thinkingMapEmpty: "まずライブラリで会話の要約を作成してください。思考マップはその中の重要なインサイトから生成されます。",
+      thinkingMapEmpty: "このビューは要約と digest から生成されます。まずライブラリで要約を作成すると、思考マップがキートピックの推移を描きます。",
       loadingThinkingMap: "思考マップを構築しています...",
       gapInsightTitle: "まだつながっていない思考",
       gapInsightTemplate: "{a} と {b} を掘り下げましたが、まだ結びつけていません",
       conceptMentionedIn: "{count} 件の会話に登場",
-      relatedConversations: "関連する会話"
+      relatedConversations: "関連する会話",
+      groupByLabel: "グループ",
+      groupByPlatform: "プラットフォーム別",
+      groupByTopic: "トピック別",
+      groupByProject: "プロジェクト別",
+      groupOther: "未分類",
+      clusterConversationCount: "{count} 件の会話",
     },
     prompts: {
       title: "よく使うプロンプト",
@@ -1401,12 +1407,25 @@ export const jaTranslations = {
       openLoopsTitle: "未完のループ",
       openLoopsEmpty: "未解決の論点はありません — きれいに片付いています。",
       weakAction: "AITI タブで要約を生成",
-      loading: "学習マップを整理しています…"
+      loading: "学習マップを整理しています…",
+      deepenAi: "AI 深化",
+      deepenAiRunning: "「{topic}」を深く分析しています…",
+      deepenAiTitle: "AI 学習軌跡の分析",
+      mastered: "現在の習得ポイント",
+      blindSpots: "理解の盲点",
+      learningPath: "推奨する学習パス",
+      deepenAiFailed: "深化分析に失敗しました",
+      llmMissing: "モデルが未設定です — 先に「設定」で LLM を設定してください。AI 深化にはモデルが必要です。",
+      groundedHint: "過去の会話 {n} 件を背景にしています",
+      savedHint: "この分析は「Ask」履歴に保存されました。いつでも見返せます。"
     },
     roundtable: {
       title: "AI 円卓会議",
       subtitle: "あなたの質問について多様な視点のパネルを招集し、司会付きで総括します。",
       questionPlaceholder: "議論したい判断が必要な質問を入力…",
+      intro: "AI 円卓会議は、あなたの質問について視点の異なるメンバーが順に発言し、司会者が合意点・相違点・推奨をまとめます。関連する過去の会話が見つかれば、背景として取り込みます。",
+      topicsLabel: "学習領域からトピックを選ぶ",
+      topicPrompt: "「{topic}」について、次に投資すべき最有力の方向はどれですか？",
       personasLabel: "パネリスト（2〜4 名）",
       run: "パネルを招集",
       rerun: "もう一度議論",
@@ -1430,7 +1449,9 @@ export const jaTranslations = {
       personaOptimist: "楽観派",
       personaPragmatist: "現実派",
       personaDomainExpert: "分野の専門家",
-      personaDevilsAdvocate: "あえての反対役"
+      personaDevilsAdvocate: "あえての反対役",
+      deepen: "さらに深める",
+      deepenPrompt: "「{question}」の円卓会議で、{persona}は次のように主張しました：「{excerpt}」。過去の会話を踏まえてこの視点を深く分析してください — どこで成り立ち、どこで成り立たないか。"
     }
   },
   platforms: {

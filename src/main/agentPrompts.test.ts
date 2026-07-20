@@ -682,4 +682,24 @@ describe('roundtable kinds (AI 圆桌)', () => {
     expect(definition.parse?.('```json\n{"consensus": []}\n```')).toBe('{"consensus": []}');
     expect(() => definition.parse?.('   ')).toThrow('roundtable-synthesis 输出为空');
   });
+
+  it('learn-deepen wraps the prebuilt transcript with the learning-analysis preamble', () => {
+    const definition = getAgentKindDefinition('learn-deepen');
+    const messages = definition.buildPrompt({
+      transcript: '学习领域：前端\n\n本地统计：……',
+      preferences: zhPreferences,
+    });
+    expect(messages[0].role).toBe('system');
+    expect(messages[0].content).toContain('学习脉络分析助手');
+    expect(messages[0].content).toContain('严格 JSON');
+    expect(messages[0].content).toContain('使用清晰、简洁的中文 Markdown。');
+    expect(messages[1]).toEqual({ role: 'user', content: '学习领域：前端\n\n本地统计：……' });
+  });
+
+  it('learn-deepen parses leniently: strips fences, trims, caps at 4000, rejects empty', () => {
+    const definition = getAgentKindDefinition('learn-deepen');
+    expect(definition.parse?.('```json\n{"mastered": []}\n```')).toBe('{"mastered": []}');
+    expect(definition.parse?.('x'.repeat(4100))).toHaveLength(4000);
+    expect(() => definition.parse?.('  \n ')).toThrow('learn-deepen 输出为空');
+  });
 });

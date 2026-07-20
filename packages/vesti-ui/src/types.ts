@@ -487,6 +487,14 @@ export type StorageApi = {
       onSeatComplete?: (turn: RoundtableSeatTurn) => void;
     }
   ) => Promise<RoundtableResult>;
+  /** AI 深化 (Learn): one LLM pass over a learning domain with recall
+   * grounding (current mastery / blind spots / suggested path), archived into
+   * the Ask history like a roundtable run. Optional — the Learn card hides the
+   * AI-deepen affordance when the host doesn't implement it. */
+  runLearnDeepen?: (
+    domain: LearnDomain,
+    opts?: { lang?: "zh" | "en" }
+  ) => Promise<LearnDeepenResult>;
   getSummary?: (conversationId: number) => Promise<ChatSummaryData | null>;
   generateSummary?: (conversationId: number) => Promise<ChatSummaryData>;
   /** AITI coverage: how many live conversations already have a (structured)
@@ -796,6 +804,10 @@ export interface ConversationDigest {
   keyTopics: string[];
   keyFiles: string[];
   decisions: string[];
+  /** L0 project linkage (memory v2) — lets the knowledge graph group sessions
+   * by project. Absent for conversations outside any project registry. */
+  projectKey?: string;
+  projectLabel?: string;
 }
 
 // ---- P4a AI relay (handoff packs) -----------------------------------------
@@ -1796,6 +1808,12 @@ export interface DashboardLabels {
     gapInsightTemplate: string;
     conceptMentionedIn: string;
     relatedConversations: string;
+    groupByLabel: string;
+    groupByPlatform: string;
+    groupByTopic: string;
+    groupByProject: string;
+    groupOther: string;
+    clusterConversationCount: string;
   };
   prompts: {
     title: string;
@@ -2008,6 +2026,24 @@ export interface DashboardLabels {
     weakAction: string;
     /** Shown while the host is still computing the profile. */
     loading: string;
+    /** "AI 深化": run an LLM deep-dive on one domain (recall-grounded). */
+    deepenAi: string;
+    /** Progress line while the deep-dive runs; "{topic}" = domain name. */
+    deepenAiRunning: string;
+    /** Heading above the deep-dive result inside the domain card. */
+    deepenAiTitle: string;
+    /** Deep-dive sections: what's mastered / blind spots / suggested path. */
+    mastered: string;
+    blindSpots: string;
+    learningPath: string;
+    /** Deep-dive failure line (followed by the error message). */
+    deepenAiFailed: string;
+    /** Disabled-state guidance when no LLM is configured (deep-dive needs one). */
+    llmMissing: string;
+    /** Grounding note when recall context fed the deep-dive: "{n}" conversations. */
+    groundedHint: string;
+    /** Note that the deep-dive was archived into the Ask history. */
+    savedHint: string;
   };
   roundtable: {
     title: string;
@@ -2017,6 +2053,12 @@ export interface DashboardLabels {
     comingSoonTitle: string;
     comingSoonBody: string;
     questionPlaceholder: string;
+    /** One-sentence "这是什么": what the panel is and how it works (info bar). */
+    intro: string;
+    /** Caption above the learning-domain topic suggestion chips. */
+    topicsLabel: string;
+    /** Question-box template when a topic chip is picked; "{topic}" = domain name. */
+    topicPrompt: string;
     personasLabel: string;
     run: string;
     /** Run-button label once a result is on screen ("重新讨论"). */
@@ -2048,6 +2090,11 @@ export interface DashboardLabels {
     personaPragmatist: string;
     personaDomainExpert: string;
     personaDevilsAdvocate: string;
+    /** "继续深入": jump to Ask with a prefilled follow-up on a seat's viewpoint. */
+    deepen: string;
+    /** Prefilled Ask template; "{question}" = topic, "{persona}" = seat name,
+     * "{excerpt}" = a short excerpt of that seat's viewpoint. */
+    deepenPrompt: string;
   };
 }
 
@@ -2166,6 +2213,27 @@ export interface LearnProfile {
   domains: LearnDomain[];
   glossary: LearnGlossaryEntry[];
   openLoops: LearnOpenLoop[];
+}
+
+/** AI 深化 (Learn) — an LLM deep-dive into one learning domain, grounded by
+ * cross-session recall and archived into the Ask history. */
+export interface LearnDeepenAnalysis {
+  /** What the learner already has a grip on. */
+  mastered: string[];
+  /** Gaps and key questions not yet touched. */
+  blindSpots: string[];
+  /** Suggested next steps, in order. */
+  path: string[];
+}
+export interface LearnDeepenResult {
+  domain: string;
+  lang: "zh" | "en";
+  grounded: boolean;
+  /** null when the model output wasn't usable JSON — `raw` still carries it. */
+  analysis: LearnDeepenAnalysis | null;
+  raw: string;
+  sources: RelatedConversation[];
+  durationMs: number;
 }
 
 // ---- AI 圆桌 (Roundtable) ----

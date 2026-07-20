@@ -1,13 +1,30 @@
+import { useEffect, useState } from "react";
 import { BookOpen, Compass, Loader2, MessagesSquare, Sparkles } from "lucide-react";
-import type { DashboardLabels, LearnProfile, StorageApi } from "../types";
+import type { DashboardLabels, LearnDeepenResult, LearnDomain, LearnProfile, StorageApi } from "../types";
 import { SendToMenu } from "./SendToMenu";
 import { buildLearnMarkdown } from "../lib/exploreMarkdown";
+import {
+  ExploreBulletSection,
+  ExploreEmptyState,
+  ExploreGateNote,
+  ExploreInfoBar,
+  ExploreSourceChips,
+} from "./ExploreBits";
 
 // "学习 Learn": presentational view of the locally-computed learning map —
 // knowledge domains (with a depth mix + representative conversations + a
 // "继续深入" jump into Ask), a glossary of things learned, and open loops.
 // The host computes the profile + passes localized labels; `profile`
 // undefined means the host is still computing (loading state).
+//
+// AI 深化 (borrowed from the roundtable): when the host implements
+// storage.runLearnDeepen and an LLM is configured, each named domain card
+// also offers an "AI 深化" run — one recall-grounded LLM pass (current
+// mastery / blind spots / suggested path) rendered inside the domain card,
+// with the roundtable's progress-row + grounded-sources + saved-hint
+// patterns. Without a configured LLM the gate note explains instead of
+// offering a dead button. The uncategorized bucket gets no AI 深化 — a
+// "uncategorized" recall query would ground on nothing meaningful.
 
 /** Below this many analyzed summaries the map is technically available but
  * thin — say so and point at generating more (same guidance as AITI). */
@@ -23,7 +40,14 @@ interface LearnCardProps {
   onExploreTopic?: (question: string) => void;
   storage?: StorageApi;
   sendToLabels?: DashboardLabels["library"];
+  /** Transcript/analysis language for AI 深化 runs; defaults to "zh". */
+  lang?: "zh" | "en";
 }
+
+type DeepenState =
+  | { status: "running" }
+  | { status: "done"; result: LearnDeepenResult }
+  | { status: "error"; message: string };
 
 /** Weak-data call-to-action, shared by the empty state and the thin-sample
  * hint: the way forward is always "generate more summaries on the AITI pane". */
@@ -49,7 +73,48 @@ export function LearnCard({
   onExploreTopic,
   storage,
   sendToLabels,
+  lang = "zh",
 }: LearnCardProps) {
+  // undefined = still probing; false = gate AI 深化 and say why (same probe as
+  // the roundtable panel).
+  const [llmConfigured, setLlmConfigured] = useState<boolean | undefined>(undefined);
+  const [deepenByDomain, setDeepenByDomain] = useState<Record<string, DeepenState>>({});
+
+  useEffect(() => {
+    let alive = true;
+    if (!storage?.getLlmConfigured) {
+      setLlmConfigured(undefined);
+      return;
+    }
+    storage
+      .getLlmConfigured()
+      .then((configured) => {
+        if (alive) setLlmConfigured(configured);
+      })
+      .catch(() => {
+        if (alive) setLlmConfigured(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [storage]);
+
+  const deepenSupported = Boolean(storage?.runLearnDeepen);
+
+  const runDeepen = async (key: string, domain: LearnDomain) => {
+    if (!storage?.runLearnDeepen || deepenByDomain[key]?.status === "running") return;
+    setDeepenByDomain((prev) => ({ ...prev, [key]: { status: "running" } }));
+    try {
+      const result = await storage.runLearnDeepen(domain, { lang });
+      setDeepenByDomain((prev) => ({ ...prev, [key]: { status: "done", result } }));
+    } catch (e) {
+      setDeepenByDomain((prev) => ({
+        ...prev,
+        [key]: { status: "error", message: (e as Error)?.message ?? "Failed" },
+      }));
+    }
+  };
+
   // Loading: the host recomputes the profile after every data update; until
   // the first result arrives show a quiet spinner, not the empty state.
   if (!profile) {
@@ -63,17 +128,12 @@ export function LearnCard({
 
   if (!profile.available) {
     return (
-      <div className="flex h-full flex-col items-center justify-center p-10 text-center">
-        <div
-          className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-accent-primary-light text-accent-primary"
-          aria-hidden="true"
-        >
-          <BookOpen className="h-5 w-5" strokeWidth={1.75} />
-        </div>
-        <h3 className="text-[15px] font-medium text-text-primary">{labels.title}</h3>
-        <p className="mt-2 max-w-md text-[13px] text-text-tertiary">{labels.insufficient}</p>
-        <WeakAction labels={labels} onOpenAiti={onOpenAiti} />
-      </div>
+      <ExploreEmptyState
+        Icon={BookOpen}
+        title={labels.title}
+        body={labels.insufficient}
+        action={<WeakAction labels={labels} onOpenAiti={onOpenAiti} />}
+      />
     );
   }
 
@@ -97,23 +157,24 @@ export function LearnCard({
         <p className="mt-1 text-[12px] text-text-tertiary">{labels.subtitle}</p>
 
         {/* 这是什么 + 数据来源: what this map is, and what it is built from. */}
-        <div className="mt-3 flex items-start gap-2.5 rounded-xl border border-border-subtle bg-bg-surface-card px-3.5 py-3">
-          <BookOpen className="mt-0.5 h-4 w-4 shrink-0 text-accent-primary" strokeWidth={1.75} />
-          <div className="min-w-0">
-            <p className="text-[12px] leading-relaxed text-text-secondary">{labels.intro}</p>
-            <p className="mt-1 text-[11.5px] text-text-tertiary">
-              {labels.sourceLine
-                .replace("{n}", String(profile.sampleSize))
-                .replace("{m}", String(topicCount))}
-            </p>
-          </div>
-        </div>
+        <ExploreInfoBar
+          Icon={BookOpen}
+          intro={labels.intro}
+          sourceLine={labels.sourceLine
+            .replace("{n}", String(profile.sampleSize))
+            .replace("{m}", String(topicCount))}
+        />
 
         {profile.sampleSize < WEAK_SAMPLE_THRESHOLD ? (
           <div className="mt-2 rounded-lg border border-border-subtle bg-bg-surface-card px-3 py-2">
             <p className="text-[11.5px] leading-relaxed text-text-tertiary">{labels.weakHint}</p>
             <WeakAction labels={labels} onOpenAiti={onOpenAiti} />
           </div>
+        ) : null}
+
+        {/* LLM gate (AI 深化 only — the local map itself works without one). */}
+        {deepenSupported && llmConfigured === false ? (
+          <ExploreGateNote text={labels.llmMissing} className="mt-2" />
         ) : null}
 
         {/* Domains */}
@@ -126,9 +187,14 @@ export function LearnCard({
                 const deepPct = Math.round((d.deep / total) * 100);
                 const modPct = Math.round((d.moderate / total) * 100);
                 const domainName = d.name || labels.uncategorized;
+                const domainKey = `${d.topicId ?? "null"}`;
+                const deepenState = deepenByDomain[domainKey];
+                // The uncategorized bucket gets no AI 深化 (see header note).
+                const showDeepenAi =
+                  deepenSupported && llmConfigured !== false && d.topicId !== null;
                 return (
                   <div
-                    key={`${d.topicId ?? "null"}`}
+                    key={domainKey}
                     className="rounded-xl border border-border-subtle bg-bg-surface-card p-3"
                   >
                     <div className="flex items-baseline justify-between gap-2">
@@ -168,18 +234,99 @@ export function LearnCard({
                       </div>
                     ) : null}
 
-                    {/* 继续深入: seed Ask with a follow-up on this domain. */}
-                    {onExploreTopic ? (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          onExploreTopic(labels.deepenPrompt.replace("{topic}", domainName))
-                        }
-                        className="mt-2.5 inline-flex items-center gap-1.5 rounded-lg border border-border-subtle px-2.5 py-1 text-[11.5px] font-medium text-accent-primary transition-colors hover:bg-accent-primary-light"
-                      >
-                        <Compass className="h-3.5 w-3.5" strokeWidth={1.75} />
-                        {labels.deepen}
-                      </button>
+                    <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                      {/* 继续深入: seed Ask with a follow-up on this domain. */}
+                      {onExploreTopic ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onExploreTopic(labels.deepenPrompt.replace("{topic}", domainName))
+                          }
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-border-subtle px-2.5 py-1 text-[11.5px] font-medium text-accent-primary transition-colors hover:bg-accent-primary-light"
+                        >
+                          <Compass className="h-3.5 w-3.5" strokeWidth={1.75} />
+                          {labels.deepen}
+                        </button>
+                      ) : null}
+                      {/* AI 深化: one recall-grounded LLM pass, rendered in place. */}
+                      {showDeepenAi ? (
+                        <button
+                          type="button"
+                          onClick={() => void runDeepen(domainKey, d)}
+                          disabled={deepenState?.status === "running"}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-border-subtle px-2.5 py-1 text-[11.5px] font-medium text-accent-primary transition-colors hover:bg-accent-primary-light disabled:opacity-50"
+                        >
+                          <Sparkles className="h-3.5 w-3.5" strokeWidth={1.75} />
+                          {labels.deepenAi}
+                        </button>
+                      ) : null}
+                    </div>
+
+                    {/* Progress row while the deep-dive runs (roundtable style). */}
+                    {deepenState?.status === "running" ? (
+                      <div className="mt-2.5 flex items-center gap-2.5">
+                        <Loader2
+                          className="h-3.5 w-3.5 animate-spin text-accent-primary"
+                          strokeWidth={1.75}
+                        />
+                        <span className="text-[12.5px] text-text-primary">
+                          {labels.deepenAiRunning.replace("{topic}", domainName)}
+                        </span>
+                      </div>
+                    ) : null}
+
+                    {deepenState?.status === "error" ? (
+                      <p className="mt-2 text-[12px] text-red-600">
+                        {labels.deepenAiFailed}
+                        {deepenState.message ? ` — ${deepenState.message}` : ""}
+                      </p>
+                    ) : null}
+
+                    {/* Deep-dive result: mastery / blind spots / path inside the
+                     * domain card, with the roundtable's grounding + sources. */}
+                    {deepenState?.status === "done" ? (
+                      <div className="mt-2.5 border-t border-border-subtle pt-2.5">
+                        <div className="text-[12px] font-medium text-text-secondary">
+                          {labels.deepenAiTitle}
+                        </div>
+                        {deepenState.result.grounded && deepenState.result.sources.length > 0 ? (
+                          <p className="mt-1 text-[11px] text-text-tertiary">
+                            {labels.groundedHint.replace(
+                              "{n}",
+                              String(deepenState.result.sources.length),
+                            )}
+                          </p>
+                        ) : null}
+                        {deepenState.result.analysis ? (
+                          <>
+                            <ExploreBulletSection
+                              title={labels.mastered}
+                              items={deepenState.result.analysis.mastered}
+                            />
+                            <ExploreBulletSection
+                              title={labels.blindSpots}
+                              items={deepenState.result.analysis.blindSpots}
+                            />
+                            <ExploreBulletSection
+                              title={labels.learningPath}
+                              items={deepenState.result.analysis.path}
+                            />
+                          </>
+                        ) : (
+                          <div className="mt-2 whitespace-pre-wrap text-[12px] leading-relaxed text-text-secondary">
+                            {deepenState.result.raw}
+                          </div>
+                        )}
+                        {deepenState.result.sources.length > 0 ? (
+                          <div className="mt-2">
+                            <ExploreSourceChips
+                              sources={deepenState.result.sources}
+                              onOpenConversation={onOpenConversation}
+                            />
+                          </div>
+                        ) : null}
+                        <p className="mt-2 text-[11px] text-text-tertiary">{labels.savedHint}</p>
+                      </div>
                     ) : null}
                   </div>
                 );

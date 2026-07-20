@@ -4,6 +4,7 @@ import DOMPurify from "dompurify";
 import {
   AlertTriangle,
   Check,
+  Compass,
   Flame,
   GraduationCap,
   HelpCircle,
@@ -23,6 +24,13 @@ import type {
 } from "../types";
 import { SendToMenu } from "./SendToMenu";
 import { buildRoundtableMarkdown } from "../lib/exploreMarkdown";
+import {
+  ExploreBulletSection,
+  ExploreEmptyState,
+  ExploreGateNote,
+  ExploreInfoBar,
+  ExploreSourceChips,
+} from "./ExploreBits";
 
 // AI 圆桌 (Roundtable): a self-contained Explore sub-mode. The user brings a
 // judgment-call question, picks 2-4 persona seats, and each seat speaks in
@@ -32,6 +40,11 @@ import { buildRoundtableMarkdown } from "../lib/exploreMarkdown";
 // owns orchestration + archiving into the Ask history; this component owns
 // only its own UI state. Without a configured LLM the panel explains what's
 // missing instead of offering a dead button.
+//
+// Borrowed from 学习 (Learn): the question box offers "从学习领域选题" chips
+// (the host passes the learning map's top domains), and each seat's finished
+// viewpoint carries a "继续深入" jump that seeds Ask with a follow-up on that
+// viewpoint — the same handoff the Learn domains use.
 
 interface RoundtablePanelProps {
   storage: StorageApi;
@@ -43,6 +56,10 @@ interface RoundtablePanelProps {
   lang?: "zh" | "en";
   /** Jump target for the recalled-source chips. */
   onOpenConversation?: (conversationId: number) => void;
+  /** 从学习领域选题: top learning domains offered as quick topic chips. */
+  topicSuggestions?: string[];
+  /** "继续深入": jump to Ask with a prefilled follow-up on a seat's viewpoint. */
+  onExploreTopic?: (question: string) => void;
 }
 
 type SelectablePersonaId = Exclude<RoundtablePersonaId, "moderator">;
@@ -67,6 +84,9 @@ const PERSONA_META: Record<SelectablePersonaId, { Icon: LucideIcon; color: strin
   domain_expert: { Icon: GraduationCap, color: "#7c3aed" },
   devils_advocate: { Icon: Flame, color: "#dc2626" },
 };
+
+/** Excerpt length of a seat's viewpoint folded into the "继续深入" Ask seed. */
+const DEEPEN_EXCERPT_MAX = 80;
 
 function renderMarkdown(text: string): { __html: string } {
   try {
@@ -97,6 +117,8 @@ export function RoundtablePanel({
   sendToLabels,
   lang = "zh",
   onOpenConversation,
+  topicSuggestions,
+  onExploreTopic,
 }: RoundtablePanelProps) {
   const [question, setQuestion] = useState("");
   const [selected, setSelected] = useState<SelectablePersonaId[]>([
@@ -188,13 +210,11 @@ export function RoundtablePanel({
         </h3>
         <p className="mt-1 text-[12px] text-text-tertiary">{labels.subtitle}</p>
 
+        {/* 这是什么: what the panel is and how a run works (same info bar as Learn). */}
+        <ExploreInfoBar Icon={Users} intro={labels.intro} />
+
         {/* LLM gate: explain instead of offering a dead button. */}
-        {llmConfigured === false ? (
-          <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-border-subtle bg-bg-surface-card px-3.5 py-3">
-            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" strokeWidth={1.75} />
-            <p className="text-[12px] leading-relaxed text-text-secondary">{labels.llmMissing}</p>
-          </div>
-        ) : null}
+        {llmConfigured === false ? <ExploreGateNote text={labels.llmMissing} /> : null}
 
         {/* Question */}
         <textarea
@@ -204,6 +224,27 @@ export function RoundtablePanel({
           rows={3}
           className="mt-4 w-full resize-y rounded-xl border border-border-subtle bg-bg-primary px-3 py-2 text-[13px] text-text-primary outline-none focus:border-accent-primary"
         />
+
+        {/* 从学习领域选题 (borrowed from Learn): one click seeds the question
+         * box with a localized topic template. */}
+        {topicSuggestions && topicSuggestions.length > 0 ? (
+          <div className="mt-2.5">
+            <div className="mb-1.5 text-[12px] text-text-secondary">{labels.topicsLabel}</div>
+            <div className="flex flex-wrap gap-1.5">
+              {topicSuggestions.map((topic) => (
+                <button
+                  key={topic}
+                  type="button"
+                  onClick={() => setQuestion(labels.topicPrompt.replace("{topic}", topic))}
+                  title={topic}
+                  className="max-w-[220px] truncate rounded-full border border-border-subtle px-2.5 py-1 text-[11.5px] text-text-secondary transition-colors hover:bg-bg-tertiary hover:text-accent-primary"
+                >
+                  {topic}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
 
         {/* Persona picker */}
         <div className="mt-3">
@@ -301,7 +342,7 @@ export function RoundtablePanel({
         ) : null}
 
         {!result && !running && !error ? (
-          <p className="mt-8 text-center text-[12px] text-text-tertiary">{labels.empty}</p>
+          <ExploreEmptyState Icon={Users} body={labels.empty} compact />
         ) : null}
 
         {result ? (
@@ -342,10 +383,34 @@ export function RoundtablePanel({
                     </span>
                   </div>
                   {turn.ok ? (
-                    <div
-                      className="prose-vesti text-[13px] leading-relaxed text-text-secondary"
-                      dangerouslySetInnerHTML={renderMarkdown(turn.content)}
-                    />
+                    <>
+                      <div
+                        className="prose-vesti text-[13px] leading-relaxed text-text-secondary"
+                        dangerouslySetInnerHTML={renderMarkdown(turn.content)}
+                      />
+                      {/* 继续深入 (borrowed from Learn): seed Ask with a
+                       * follow-up on this seat's viewpoint. */}
+                      {onExploreTopic ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onExploreTopic(
+                              labels.deepenPrompt
+                                .replace("{question}", result.question)
+                                .replace("{persona}", nameOf(turn.personaId))
+                                .replace(
+                                  "{excerpt}",
+                                  turn.content.replace(/\s+/g, " ").trim().slice(0, DEEPEN_EXCERPT_MAX),
+                                ),
+                            )
+                          }
+                          className="mt-2.5 inline-flex items-center gap-1.5 rounded-lg border border-border-subtle px-2.5 py-1 text-[11.5px] font-medium text-accent-primary transition-colors hover:bg-accent-primary-light"
+                        >
+                          <Compass className="h-3.5 w-3.5" strokeWidth={1.75} />
+                          {labels.deepen}
+                        </button>
+                      ) : null}
+                    </>
                   ) : (
                     <div className="text-[12px] text-red-600">
                       {labels.seatFailed}
@@ -362,8 +427,8 @@ export function RoundtablePanel({
                 <div className="mb-3 text-[13px] font-semibold text-text-primary">
                   {labels.synthesisTitle}
                 </div>
-                <SynthSection title={labels.consensus} items={result.synthesis.consensus} />
-                <SynthSection title={labels.disagreements} items={result.synthesis.disagreements} />
+                <ExploreBulletSection title={labels.consensus} items={result.synthesis.consensus} />
+                <ExploreBulletSection title={labels.disagreements} items={result.synthesis.disagreements} />
                 {result.synthesis.recommendation ? (
                   <div className="mt-3">
                     <div className="text-[12px] font-medium text-text-secondary">
@@ -374,7 +439,7 @@ export function RoundtablePanel({
                     </p>
                   </div>
                 ) : null}
-                <SynthSection title={labels.openQuestions} items={result.synthesis.openQuestions} />
+                <ExploreBulletSection title={labels.openQuestions} items={result.synthesis.openQuestions} />
               </div>
             ) : result.synthesisRaw ? (
               <div className="mt-5 whitespace-pre-wrap rounded-xl border border-border-subtle bg-bg-surface-card p-4 text-[13px] text-text-secondary">
@@ -384,18 +449,8 @@ export function RoundtablePanel({
 
             {/* Recalled sources */}
             {result.sources.length > 0 && onOpenConversation ? (
-              <div className="mt-4 flex flex-wrap gap-1.5">
-                {result.sources.map((source) => (
-                  <button
-                    key={source.id}
-                    type="button"
-                    onClick={() => onOpenConversation(source.id)}
-                    title={source.title}
-                    className="max-w-[220px] truncate rounded-full border border-border-subtle px-2.5 py-1 text-[11px] text-text-tertiary transition-colors hover:bg-bg-tertiary hover:text-accent-primary"
-                  >
-                    {source.title}
-                  </button>
-                ))}
+              <div className="mt-4">
+                <ExploreSourceChips sources={result.sources} onOpenConversation={onOpenConversation} />
               </div>
             ) : null}
 
@@ -404,23 +459,6 @@ export function RoundtablePanel({
           </div>
         ) : null}
       </div>
-    </div>
-  );
-}
-
-function SynthSection({ title, items }: { title: string; items: string[] }) {
-  if (!items || items.length === 0) return null;
-  return (
-    <div className="mt-3">
-      <div className="text-[12px] font-medium text-text-secondary">{title}</div>
-      <ul className="mt-1 flex flex-col gap-1">
-        {items.map((it, i) => (
-          <li key={i} className="flex items-start gap-2 text-[13px] leading-relaxed text-text-primary">
-            <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-accent-primary/60" />
-            <span>{it}</span>
-          </li>
-        ))}
-      </ul>
     </div>
   );
 }

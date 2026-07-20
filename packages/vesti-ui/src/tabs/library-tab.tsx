@@ -1625,17 +1625,24 @@ export function LibraryTab({
     return items;
   }, [tagCounts, customFolders]);
 
-  const baseConversations =
-    listFilter === "starred"
-      ? mainConversations.filter((conversation) => conversation.is_starred)
-      : listFilter === "recent"
-        ? recentConversations
-        : mainConversations;
-  const tagFilteredConversations = selectedTag
-    ? baseConversations.filter((conversation) =>
-        normalizeTags(conversation.tags).includes(selectedTag),
-      )
-    : baseConversations;
+  const baseConversations = useMemo(
+    () =>
+      listFilter === "starred"
+        ? mainConversations.filter((conversation) => conversation.is_starred)
+        : listFilter === "recent"
+          ? recentConversations
+          : mainConversations,
+    [listFilter, mainConversations, recentConversations],
+  );
+  const tagFilteredConversations = useMemo(
+    () =>
+      selectedTag
+        ? baseConversations.filter((conversation) =>
+            normalizeTags(conversation.tags).includes(selectedTag),
+          )
+        : baseConversations,
+    [selectedTag, baseConversations],
+  );
 
   // P2b: aggregated nav model + the extra filter dimension (source/project/
   // topic) applied on top of the existing filters. Memory v2: L0 cards are
@@ -1674,14 +1681,18 @@ export function LibraryTab({
         : null,
     [sourceTreeModel, sourceSelection, topics, labels],
   );
-  const filteredConversations = sourceSelection
-    ? filterConversationsBySelection(
-        tagFilteredConversations,
-        sourceSelection,
-        treeLookup,
-        topics,
-      )
-    : tagFilteredConversations;
+  const filteredConversations = useMemo(
+    () =>
+      sourceSelection
+        ? filterConversationsBySelection(
+            tagFilteredConversations,
+            sourceSelection,
+            treeLookup,
+            topics,
+          )
+        : tagFilteredConversations,
+    [sourceSelection, tagFilteredConversations, treeLookup, topics],
+  );
 
   // P2b: lightweight windowing for very large lists (fixed row pitch +
   // overscan, no dependency). Row pitch is measured from the rendered cards

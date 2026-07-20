@@ -13,17 +13,29 @@ import { TimeBar } from "./network/TimeBar";
 import { buildThinkingMap } from "./network/thinkingMap";
 import {
   GRAPH_HEIGHT,
+  buildNetworkGroups,
   buildTemporalNetworkDataset,
   dayToProgress,
   getConversationOriginAt,
   getVisibleConversationCount,
   progressToDay,
   type GraphEdge,
+  type GraphNode,
+  type NetworkGroupBy,
 } from "./network/temporal-graph-utils";
 
 type NetworkView = "conversations" | "thinking";
 
 const SUMMARY_FETCH_BATCH = 8;
+/** Bound summary loading in the thinking view: concepts come from digests
+ * first; summaries are only fetched for conversations without a digest, and
+ * even then only for the most recent ones. */
+const SUMMARY_FETCH_MAX = 400;
+/** Node/edge budgets for the temporal graph (see temporal-graph-utils). */
+const MAX_GRAPH_NODES = 260;
+const MAX_GRAPH_EDGES = 900;
+/** Cap the cluster drawer member list; the rest is summarized. */
+const CLUSTER_DRAWER_MEMBER_LIMIT = 60;
 
 interface NetworkTabProps {
   storage: StorageApi;
@@ -65,7 +77,7 @@ export function NetworkTab({
   labels: providedLabels,
 }: NetworkTabProps) {
   const labels = providedLabels ?? ({} as DashboardLabels["network"]);
-  const { conversations, topics } = useLibraryData();
+  const { conversations, topics, digestByConversationId } = useLibraryData();
   const [currentDay, setCurrentDay] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [scrubbing, setScrubbing] = useState(false);
@@ -83,6 +95,16 @@ export function NetworkTab({
   );
   const [summariesLoading, setSummariesLoading] = useState(false);
   const [selectedConceptId, setSelectedConceptId] = useState<string | null>(null);
+  const hasProjectData = useMemo(
+    () => [...digestByConversationId.values()].some((digest) => digest.projectKey),
+    [digestByConversationId]
+  );
+  const [groupBy, setGroupBy] = useState<NetworkGroupBy>("platform");
+  // Default to the project×time reading once project digests exist (L1 data);
+  // otherwise stay on the platform reading that works everywhere.
+  useEffect(() => {
+    if (hasProjectData) setGroupBy((current) => (current === "platform" ? "project" : current));
+  }, [hasProjectData]);
   const animationFrameRef = useRef<number | null>(null);
   const playbackOriginRef = useRef<number | null>(null);
   const playbackStartProgressRef = useRef(0);
@@ -92,15 +114,6 @@ export function NetworkTab({
   const previousIsActiveRef = useRef(isActive);
   const previousTotalDaysRef = useRef(0);
 
-  const dataset = useMemo(
-    () => buildTemporalNetworkDataset(conversations, edges),
-    [conversations, edges]
-  );
-  const baseDataset = useMemo(
-    () => buildTemporalNetworkDataset(conversations, []),
-    [conversations]
-  );
-  const totalDays = dataset.data.totalDays;
   const topicMap = useMemo(() => {
     const map = new Map<number, string>();
     const walk = (items: typeof topics) => {
@@ -121,7 +134,47 @@ export function NetworkTab({
     [conversations]
   );
 
-  // Load cached summaries (bounded concurrency) only while in thinking-map view.
+  // Semantic grouping (platform / topic / project) → node colors, legend
+  // swatches, cluster identity. Project grouping needs digest data (APP only).
+  const networkGroups = useMemo(
+    () =>
+      buildNetworkGroups(conversations, groupBy, {
+        topicNameById: topicMap,
+        digestById: digestByConversationId,
+        otherLabel: labels.groupOther ?? "Ungrouped",
+      }),
+    [conversations, groupBy, topicMap, digestByConversationId, labels.groupOther]
+  );
+  const groupColorByKey = useMemo(
+    () => new Map(networkGroups.groups.map((group) => [group.key, group.color])),
+    [networkGroups.groups]
+  );
+  const groupLabelByKey = useMemo(
+    () => new Map(networkGroups.groups.map((group) => [group.key, group.label])),
+    [networkGroups.groups]
+  );
+
+  const dataset = useMemo(
+    () =>
+      buildTemporalNetworkDataset(conversations, edges, {
+        groupKeyById: networkGroups.groupKeyById,
+        groupColorByKey,
+        maxNodes: MAX_GRAPH_NODES,
+        maxEdges: MAX_GRAPH_EDGES,
+      }),
+    [conversations, edges, networkGroups.groupKeyById, groupColorByKey]
+  );
+  // Unclustered dataset: full conversation id set (edge loading, visible
+  // count) stays truthful regardless of aggregation.
+  const baseDataset = useMemo(
+    () => buildTemporalNetworkDataset(conversations, [], { maxNodes: Infinity }),
+    [conversations]
+  );
+  const totalDays = dataset.data.totalDays;
+
+  // Load cached summaries (bounded concurrency) only while in thinking-map
+  // view — and only for conversations that have no L1 digest yet (digest
+  // key_topics are the primary concept source), most recent first, capped.
   useEffect(() => {
     if (networkView !== "thinking") return;
 
@@ -134,6 +187,16 @@ export function NetworkTab({
 
     const targetIds = conversations
       .filter((conversation) => !conversation.is_trash)
+      .filter((conversation) => {
+        const digest = digestByConversationId.get(conversation.id);
+        return !digest || digest.keyTopics.length === 0;
+      })
+      .sort(
+        (left, right) =>
+          getConversationOriginAt(right) - getConversationOriginAt(left) ||
+          right.id - left.id
+      )
+      .slice(0, SUMMARY_FETCH_MAX)
       .map((conversation) => conversation.id);
 
     if (targetIds.length === 0) {
@@ -172,11 +235,21 @@ export function NetworkTab({
     return () => {
       cancelled = true;
     };
-  }, [networkView, conversations, storage]);
+  }, [networkView, conversations, storage, digestByConversationId]);
 
+  const digestTopicsById = useMemo(() => {
+    const map = new Map<number, string[]>();
+    for (const [conversationId, digest] of digestByConversationId) {
+      if (digest.keyTopics.length > 0) map.set(conversationId, digest.keyTopics);
+    }
+    return map;
+  }, [digestByConversationId]);
   const thinkingMap = useMemo(
-    () => buildThinkingMap(conversations, summariesById, topicMap),
-    [conversations, summariesById, topicMap]
+    () =>
+      buildThinkingMap(conversations, summariesById, topicMap, {
+        digestTopicsById,
+      }),
+    [conversations, summariesById, topicMap, digestTopicsById]
   );
   const selectedConcept = useMemo(
     () =>
@@ -199,19 +272,35 @@ export function NetworkTab({
     [baseDataset.data.nodes]
   );
   const visibleCount = useMemo(
-    () => getVisibleConversationCount(dataset.data.nodes, currentDay),
-    [currentDay, dataset.data.nodes]
+    () => getVisibleConversationCount(baseDataset.data.nodes, currentDay),
+    [currentDay, baseDataset.data.nodes]
   );
   const selectedGraphNode = useMemo(
     () => dataset.data.nodes.find((node) => node.id === selectedNodeId) ?? null,
     [dataset.data.nodes, selectedNodeId]
   );
-  const selectedConversation = useMemo(
-    () => (selectedNodeId !== null ? conversationsById.get(selectedNodeId) ?? null : null),
-    [conversationsById, selectedNodeId]
-  );
+  const selectedConversation = useMemo(() => {
+    if (selectedNodeId === null || selectedGraphNode?.kind === "cluster") return null;
+    return conversationsById.get(selectedNodeId) ?? null;
+  }, [conversationsById, selectedNodeId, selectedGraphNode]);
+  // Cluster drawer data: member conversations of the selected cluster node,
+  // most recent first, capped for rendering.
+  const selectedClusterMembers = useMemo(() => {
+    if (!selectedGraphNode || selectedGraphNode.kind !== "cluster" || !selectedGraphNode.memberIds) {
+      return [];
+    }
+    return selectedGraphNode.memberIds
+      .map((id) => conversationsById.get(id))
+      .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
+      .sort(
+        (left, right) =>
+          getConversationOriginAt(right) - getConversationOriginAt(left) ||
+          right.id - left.id
+      )
+      .slice(0, CLUSTER_DRAWER_MEMBER_LIMIT);
+  }, [conversationsById, selectedGraphNode]);
   const connectedNodes = useMemo(() => {
-    if (selectedNodeId === null) return [];
+    if (selectedNodeId === null || selectedGraphNode?.kind !== "conversation") return [];
 
     return dataset.data.edges
       .filter((edge) => edge.source === selectedNodeId || edge.target === selectedNodeId)
@@ -237,10 +326,34 @@ export function NetworkTab({
         if (leftOriginAt !== rightOriginAt) return leftOriginAt - rightOriginAt;
         return left.id - right.id;
       });
-  }, [conversationsById, dataset.data.edges, dataset.data.nodes, selectedNodeId, topicMap]);
+  }, [conversationsById, dataset.data.edges, dataset.data.nodes, selectedGraphNode, selectedNodeId, topicMap]);
   const highlightedNodeIds = useMemo(
     () => connectedNodes.map((entry) => entry.id),
     [connectedNodes]
+  );
+
+  const handleGroupByChange = useCallback((next: NetworkGroupBy) => {
+    setGroupBy(next);
+    setSelectedNodeId(null);
+  }, []);
+
+  // Hover detail: digest one-liner for conversations (falls back to the
+  // capture snippet), group + date range for clusters.
+  const getNodeTooltip = useCallback(
+    (node: GraphNode): string | null => {
+      if (node.kind === "cluster") {
+        const groupLabel = groupLabelByKey.get(node.groupKey);
+        const range = `${formatStartedLabel(node.originAt)} – ${formatStartedLabel(
+          node.lastCapturedAt
+        )}`;
+        return [groupLabel, range].filter(Boolean).join(" · ");
+      }
+      const digest = digestByConversationId.get(node.id);
+      if (digest?.oneLiner) return digest.oneLiner;
+      const conversation = conversationsById.get(node.id);
+      return conversation?.snippet?.trim() || null;
+    },
+    [conversationsById, digestByConversationId, groupLabelByKey]
   );
 
   useEffect(() => {
@@ -337,8 +450,12 @@ export function NetworkTab({
     setEdgeStatus("loading");
     setEdgeError(null);
 
+    // Large libraries: a higher similarity threshold keeps the edge set (and
+    // the pair query) proportional to what the graph can actually show.
+    const threshold = conversationIds.length > 600 ? 0.5 : 0.4;
+
     storage
-      .getAllEdges({ threshold: 0.4, conversationIds })
+      .getAllEdges({ threshold, conversationIds })
       .then((result) => {
         if (cancelled) return;
         setEdges((result ?? []).map((edge) => ({ ...edge })));
@@ -571,6 +688,43 @@ export function NetworkTab({
     </div>
   );
 
+  // Node semantics switcher: what a node's color/group means (source platform,
+  // topic, or — when digest data exists — project). "会话" stays the node
+  // itself; clusters appear automatically beyond the node budget.
+  const groupByOptions: Array<[NetworkGroupBy, string]> = [
+    ["platform", labels.groupByPlatform ?? "Platform"],
+    ["topic", labels.groupByTopic ?? "Topic"],
+    ...(hasProjectData
+      ? [["project", labels.groupByProject ?? "Project"] as [NetworkGroupBy, string]]
+      : []),
+  ];
+  const groupByToggle = (
+    <div className="flex items-center gap-2">
+      <span className="text-[11px] font-sans text-text-tertiary">
+        {labels.groupByLabel ?? "Group by"}
+      </span>
+      <div className="inline-flex rounded-full border border-border-subtle bg-bg-primary p-0.5">
+        {groupByOptions.map(([value, label]) => {
+          const isActive = groupBy === value;
+          return (
+            <button
+              key={value}
+              type="button"
+              onClick={() => handleGroupByChange(value)}
+              className={`rounded-full px-2.5 py-1 text-[11px] font-sans transition-colors ${
+                isActive
+                  ? "bg-accent-primary text-text-inverse"
+                  : "text-text-secondary hover:text-text-primary"
+              }`}
+            >
+              {label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+
   if (networkView === "thinking") {
     return (
       <div className="h-full overflow-y-auto bg-bg-tertiary">
@@ -724,7 +878,10 @@ export function NetworkTab({
   return (
     <div className="h-full overflow-y-auto bg-bg-tertiary">
       <div className="flex min-h-full w-full flex-col justify-center gap-4 px-6 py-8 md:px-8">
-        {viewToggle}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          {viewToggle}
+          {groupByToggle}
+        </div>
         <div className="relative h-[420px] bg-bg-tertiary">
           {edgeStatus === "loading" && (
             <div className="pointer-events-none absolute left-0 top-0 z-10 rounded-full bg-bg-primary/85 px-2.5 py-1 text-[11px] font-sans text-text-tertiary backdrop-blur-sm">
@@ -742,6 +899,7 @@ export function NetworkTab({
             highlightedNodeIds={highlightedNodeIds}
             onNodeClick={handleNodeFocus}
             onBackgroundClick={handleCloseDrawer}
+            getNodeTooltip={getNodeTooltip}
           />
         </div>
 
@@ -780,8 +938,84 @@ export function NetworkTab({
 
         <div className="min-h-[16px] text-[11px] font-sans text-text-tertiary">{infoText}</div>
 
-        <GraphLegend edgeLabel={labels.edgeSemanticSimilarity} platforms={presentPlatforms} />
+        <GraphLegend
+          edgeLabel={labels.edgeSemanticSimilarity}
+          platforms={presentPlatforms}
+          groups={networkGroups.groups}
+        />
       </div>
+
+      {selectedGraphNode?.kind === "cluster" && (
+        <>
+          <div
+            className="fixed inset-0 z-40 bg-black/20"
+            onClick={handleCloseDrawer}
+          />
+          <div className="fixed bottom-0 right-0 top-0 z-50 w-[min(24rem,92vw)] overflow-y-auto bg-bg-primary shadow-2xl">
+            <div className="p-4">
+              <button
+                type="button"
+                onClick={handleCloseDrawer}
+                className="mb-4 flex items-center gap-2 text-sm font-sans text-text-secondary transition-colors hover:text-text-primary"
+              >
+                <X strokeWidth={1.5} className="h-4 w-4" />
+                <span>{labels.close ?? "Close"}</span>
+              </button>
+
+              <h2 className="mb-1 text-lg font-serif font-normal text-text-primary">
+                {groupLabelByKey.get(selectedGraphNode.groupKey) ?? selectedGraphNode.label}
+              </h2>
+              <p className="mb-4 text-[11px] font-sans text-text-tertiary">
+                {(labels.clusterConversationCount ?? "{count} conversations").replace(
+                  "{count}",
+                  String(selectedGraphNode.memberCount ?? 0)
+                )}
+                {" · "}
+                {formatStartedLabel(selectedGraphNode.originAt)} –{" "}
+                {formatStartedLabel(selectedGraphNode.lastCapturedAt)}
+              </p>
+
+              <div className="space-y-2">
+                {selectedClusterMembers.map((conversation) => {
+                  const digest = digestByConversationId.get(conversation.id);
+                  return (
+                    <button
+                      key={conversation.id}
+                      type="button"
+                      onClick={() => onSelectConversation?.(conversation.id)}
+                      className="flex w-full items-start justify-between gap-3 rounded-lg border border-border-subtle bg-bg-tertiary px-3 py-2 text-left transition-colors hover:bg-bg-secondary"
+                    >
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-sans text-text-primary">
+                          {conversation.title ||
+                            (labels.conversationN ?? "Conversation {id}").replace(
+                              "{id}",
+                              String(conversation.id)
+                            )}
+                        </div>
+                        <div className="mt-1 text-[11px] font-sans text-text-tertiary">
+                          {getPlatformLabel(conversation.platform)}
+                          {" · "}
+                          {formatStartedLabel(getConversationOriginAt(conversation))}
+                        </div>
+                        {digest?.oneLiner && (
+                          <div className="mt-1 line-clamp-2 text-[11px] font-sans text-text-secondary">
+                            {digest.oneLiner}
+                          </div>
+                        )}
+                      </div>
+                      <ArrowRight
+                        strokeWidth={1.5}
+                        className="h-4 w-4 shrink-0 text-text-tertiary"
+                      />
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
 
       {selectedGraphNode && selectedConversation && (
         <>
@@ -830,9 +1064,9 @@ export function NetworkTab({
                   <span>{connectedNodes.length} {labels.semanticLinks ?? "semantic links"}</span>
                 </div>
                 <p className="text-xs font-sans text-text-secondary">
-                  {selectedConversation.snippet?.trim()
-                    ? selectedConversation.snippet
-                    : labels.noPreviewSnippet ?? "No preview snippet available for this conversation yet."}
+                  {digestByConversationId.get(selectedConversation.id)?.oneLiner?.trim() ||
+                    selectedConversation.snippet?.trim() ||
+                    (labels.noPreviewSnippet ?? "No preview snippet available for this conversation yet.")}
                 </p>
               </div>
 

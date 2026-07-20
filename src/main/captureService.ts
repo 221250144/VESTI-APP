@@ -47,6 +47,11 @@ export class CaptureService {
   private syncing = false;
   private notify?: () => void;
   private syncCompleted?: () => void;
+  // Epoch bumped every time captured session data (or a digest) is stored;
+  // backs the conversation-tree cache so repeated getConversationTree calls
+  // don't rebuild the full tree when nothing changed.
+  private dataEpoch = 0;
+  private conversationTreeCache: { epoch: number; tree: ConversationTree } | null = null;
   private fileQueue = new Map<string, Promise<void>>();
   private basePath = '';
   private enabledPlatforms = new Set<CapturePlatform>(PRIMARY_PLATFORMS);

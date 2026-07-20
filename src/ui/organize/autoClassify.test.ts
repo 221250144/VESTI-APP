@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   buildCandidateLine,
+  buildClassifyRules,
   buildClassifyTranscript,
   createMemorySuggestionStore,
   formatTopicTree,
   mapClassifyAssignments,
   normalizePathSegment,
+  resolveClassifyLanguage,
   resolveTopicPath,
   selectClassifyCandidates,
   type ClassifyBrief,
@@ -146,6 +148,28 @@ describe("buildCandidateLine / buildClassifyTranscript", () => {
     const transcript = buildClassifyTranscript([base], [{ id: 1, name: "前端", parent_id: null }]);
     expect(transcript).toContain("现有主题树：\n#1 前端");
     expect(transcript).toContain("待分类会话：\n[1] 标题：调试登录流程");
+  });
+
+  it("defaults to Chinese naming rules with budget, merge and layering constraints", () => {
+    const transcript = buildClassifyTranscript([base], []);
+    expect(transcript).toContain("话题名一律使用简体中文");
+    expect(transcript).toContain("不超过 7 个");
+    expect(transcript).toContain("禁止新建同义分支");
+    expect(transcript).toContain("结构示范");
+    expect(transcript).toContain('["前端", "React"]');
+    expect(transcript).toContain("禁止直接用平台名");
+  });
+
+  it("switches the language directive and rules to English on demand", () => {
+    const transcript = buildClassifyTranscript([base], [], { language: "en" });
+    expect(transcript).toContain("must be written in English");
+    expect(transcript).toContain("at most 7 child topics");
+    expect(transcript).toContain("MUST be filed under the existing topic");
+    expect(transcript).toContain("Structure examples");
+    expect(transcript).toContain('["AI Engineering", "Prompting"]');
+    expect(transcript).not.toContain("话题名一律使用简体中文");
+    // Candidate lines and the tree keep their original labels.
+    expect(transcript).toContain("待分类会话：");
   });
 
   it("clips overlong fields", () => {

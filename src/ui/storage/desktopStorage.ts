@@ -115,6 +115,12 @@ import {
   ROUNDTABLE_MIN_SEATS,
 } from "../roundtable/roundtable";
 import {
+  aggregateLearnDeepen,
+  buildLearnDeepenRecordMarkdown,
+  buildLearnDeepenTranscript,
+  buildLearnRecallContext,
+} from "../learn/learnDeepen";
+import {
   parseConversationSummaryV2,
   renderSummaryPlainText,
 } from "../aiti/parseSummary";
@@ -639,7 +645,7 @@ async function gatherRelayFileAnchors(
   for (const [conversationId, cliId] of cliIdByConversationId) {
     conversationIdByCliId.set(cliId, conversationId);
   }
-  const tree = await loadConversationTree().catch(() => null);
+  const tree = await loadConversationTree({ force: true }).catch(() => null);
   if (tree) {
     const collectDescendantIds = (
       session: ConversationTreeSession,
@@ -861,7 +867,7 @@ async function generateExtractImpl(conversationIds: number[]): Promise<ExtractRe
 async function gatherScopeResolutionData(): Promise<ScopeResolutionData> {
   const [records, tree] = await Promise.all([
     db.conversations.toArray() as Promise<Array<ConversationRecord & LocalTerminalFields>>,
-    loadConversationTree().catch(() => null),
+    loadConversationTree({ force: true }).catch(() => null),
   ]);
   return {
     conversations: records
@@ -1487,6 +1493,91 @@ export const desktopStorage: StorageApi = {
     }
 
     return result;
+  },
+
+  // AI 深化 (Learn): one recall-grounded LLM pass over a learning domain
+  // (kind 'learn-deepen'), archived into explore_sessions like a roundtable
+  // run so it replays from the Ask history. The domain card owns the UI
+  // state; the uncategorized bucket never reaches here (the card hides the
+  // affordance — a "uncategorized" recall query would ground on nothing).
+  runLearnDeepen: async (domain, opts) => {
+    const lang = opts?.lang ?? "zh";
+    const api = vestiApi();
+    if (!api) {
+      throw new Error(
+        lang === "zh"
+          ? "桌面接口不可用，无法运行 AI 深化。"
+          : "Desktop API unavailable — cannot run the deep-dive.",
+      );
+    }
+    // LLM gate (same probe as the roundtable run): the card gates the button
+    // up front; this guard keeps direct callers honest too.
+    const settingsView = await api.getSettings().catch(() => null);
+    const llmConfigured = settingsView
+      ? settingsView.llm.mode === "demo_proxy" || settingsView.llm.apiKeyConfigured
+      : false;
+    if (!llmConfigured) {
+      throw new Error(
+        lang === "zh"
+          ? "尚未配置模型 —— 请先在「设置」中配置 LLM，AI 深化需要模型才能分析。"
+          : "No model configured — set up an LLM in Settings first; the deep-dive needs one to analyze.",
+      );
+    }
+
+    const startedAt = Date.now();
+
+    // Optional grounding: cross-session recall on the domain name, same
+    // context shape as the roundtable.
+    const hits = await api.recallSessions(domain.name, 5).catch(() => []);
+    const context = buildLearnRecallContext(hits);
+    const sources = hits.length > 0 ? await recallSources(hits) : [];
+
+    const agentResult = await api.runAgent({
+      kind: "learn-deepen",
+      sessionId: `learn-deepen:${startedAt}`,
+      question: domain.name,
+      transcriptOverride: buildLearnDeepenTranscript({ domain, context, lang }),
+      persist: false,
+    });
+
+    const deepen = aggregateLearnDeepen({
+      domain: domain.name,
+      lang,
+      grounded: hits.length > 0,
+      raw: agentResult.content.trim(),
+      sources,
+      durationMs: Date.now() - startedAt,
+    });
+
+    // Archive into explore_sessions (best-effort — storage failures must not
+    // sink a finished run).
+    try {
+      const titlePrefix = lang === "zh" ? "学习深化：" : "Learn deep-dive: ";
+      const sessionId = await createExploreSession(
+        `${titlePrefix}${domain.name.slice(0, 50)}` || "Learn deep-dive",
+      );
+      await addExploreMessage(sessionId, {
+        role: "user",
+        content:
+          lang === "zh"
+            ? `深入分析学习领域「${domain.name}」`
+            : `Deep-dive into the learning domain "${domain.name}"`,
+        timestamp: startedAt,
+      });
+      const markdown = buildLearnDeepenRecordMarkdown(deepen);
+      if (markdown) {
+        await addExploreMessage(sessionId, {
+          role: "assistant",
+          content: markdown,
+          sources,
+          timestamp: Date.now(),
+        });
+      }
+    } catch (error) {
+      console.warn("[LearnDeepen] failed to archive the session", error);
+    }
+
+    return deepen;
   },
 
   getSummary: async (conversationId) => {

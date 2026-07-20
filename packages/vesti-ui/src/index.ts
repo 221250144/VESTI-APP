@@ -45,6 +45,10 @@ export {
   computeSummaryCoverage,
 } from "./lib/summaryCoverage";
 export {
+  LEARN_TOPIC_SUGGESTION_MAX,
+  learnTopicSuggestions,
+} from "./lib/learnTopics";
+export {
   SUMMARY_BATCH_LIMIT,
   advanceSummaryBatch,
   createSummaryBatchProgress,
@@ -109,6 +113,9 @@ export type {
   LearnDomain,
   LearnGlossaryEntry,
   LearnOpenLoop,
+  LearnDeepenAnalysis,
+  LearnDeepenResult,
+  RelatedConversation,
   RoundtablePersonaId,
   RoundtablePersona,
   RoundtableSeatTurn,
