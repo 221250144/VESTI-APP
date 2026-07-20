@@ -551,7 +551,7 @@ export function PromptsTab({
           <button
             type="button"
             onClick={openNew}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-accent-primary px-3 py-1.5 text-[13px] font-medium text-white transition-opacity hover:opacity-90"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-accent-primary px-3 py-1.5 text-[13px] font-medium text-text-inverse transition-opacity hover:opacity-90"
           >
             <Plus strokeWidth={2} className="h-4 w-4" />
             {labels.newPrompt}
@@ -1046,7 +1046,7 @@ export function PromptsTab({
                 <button
                   type="button"
                   onClick={() => void handleSave()}
-                  className="rounded-lg bg-accent-primary px-4 py-1.5 text-[13px] font-medium text-white hover:opacity-90"
+                  className="rounded-lg bg-accent-primary px-4 py-1.5 text-[13px] font-medium text-text-inverse hover:opacity-90"
                 >
                   {labels.save}
                 </button>

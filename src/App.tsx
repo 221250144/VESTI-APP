@@ -9,6 +9,7 @@ import {
 import { I18nProvider, useI18n } from "./ui/i18n";
 import type { SupportedLocale } from "./ui/i18n/locales";
 import { Dock, type ShellPage } from "./ui/shell/Dock";
+import { HomeDashboard } from "./ui/shell/HomeDashboard";
 import { SettingsPage } from "./ui/shell/SettingsPage";
 import { TitleBar } from "./ui/shell/TitleBar";
 import { useUiTheme } from "./ui/shell/useUiTheme";
@@ -61,7 +62,7 @@ function LoadingState({ copy }: { copy: { title: string; hint: string } }) {
 function Shell() {
   const { t, locale } = useI18n();
   const { themeMode, toggleTheme } = useUiTheme();
-  const [page, setPage] = useState<ShellPage>("library");
+  const [page, setPage] = useState<ShellPage>("home");
   const [syncState, setSyncState] = useState<CaptureSyncState>(getCaptureSyncState());
   const [adoptedIds, setAdoptedIds] = useState<string[]>([]);
   const [aiti, setAiti] = useState<AitiProfile | undefined>(undefined);
@@ -154,10 +155,9 @@ function Shell() {
     return { daily, supermarket, adoptedIds };
   }, [lang, adoptedIds]);
 
-  const dashboardTab: DashboardTab = page === "settings" ? "library" : page;
+  const dashboardTab: DashboardTab = page === "settings" || page === "home" ? "library" : page;
   const showLoading =
     syncState.conversationCount === 0 && (syncState.syncing || syncState.lastSyncAt === null);
-
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-bg-app text-text-primary">
       <TitleBar />
@@ -171,6 +171,8 @@ function Shell() {
         <main className="h-full min-w-0 flex-1">
           {page === "settings" ? (
             <SettingsPage themeMode={themeMode} onToggleTheme={() => void toggleTheme()} />
+          ) : page === "home" ? (
+            <HomeDashboard onOpenLibrary={() => setPage("library")} />
           ) : showLoading ? (
             <LoadingState copy={LOADING_COPY[locale] ?? LOADING_COPY.en} />
           ) : (

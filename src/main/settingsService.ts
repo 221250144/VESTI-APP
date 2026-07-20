@@ -14,11 +14,15 @@ import type {
   NotionParentType,
   SettingsSaveResult,
 } from '../shared/contracts';
+import {
+  CURRENT_SETTINGS_VERSION,
+  normalizeEnabledPlatforms,
+  PRIMARY_CAPTURE_PLATFORMS,
+} from './settingsMigration';
 
 const DEMO_BASE_URL = 'https://vesti-gate.vercel.app/api';
 const CUSTOM_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 const DEMO_SERVICE_TOKEN = 'vesti-kcq-default-d850d4dcd610a0e2e919eb610f42066faff1e1c57c0c047c';
-const PRIMARY_PLATFORMS: CapturePlatform[] = ['codex', 'cursor', 'kimi-code', 'claude-code'];
 export const DEFAULT_EMBEDDING_MODEL = 'text-embedding-3-small';
 
 export interface StoredBridgeClient {
@@ -48,7 +52,7 @@ interface StoredBridgeSettings {
 }
 
 interface StoredSettings {
-  version: 2;
+  version: 3;
   dataDirectory: string;
   general: GeneralSettings;
   capture: CaptureSettings;
@@ -66,6 +70,7 @@ interface StoredSettings {
   upstream: {
     obsidianVaultPath: string;
     obsidianAutoExport: boolean;
+    obsidianAutoExportSince: number | null;
     notionParentId: string;
     notionParentType: NotionParentType;
     notionTitleProperty: string;
@@ -112,9 +117,13 @@ export class SettingsService {
   async initialize(): Promise<void> {
     try {
       const parsed = JSON.parse(await fs.readFile(this.filePath, 'utf8')) as unknown;
-      this.settings = parsed && typeof parsed === 'object'
-        ? this.merge(parsed as Partial<StoredSettings>)
+      const stored = parsed && typeof parsed === 'object'
+        ? parsed as Partial<StoredSettings>
+        : null;
+      this.settings = stored
+        ? this.merge(stored)
         : this.defaults();
+      if (!stored || stored.version !== CURRENT_SETTINGS_VERSION) await this.persist();
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
@@ -198,6 +207,7 @@ export class SettingsService {
       upstream: {
         obsidianVaultPath: this.settings.upstream.obsidianVaultPath,
         obsidianAutoExport: this.settings.upstream.obsidianAutoExport,
+        obsidianAutoExportSince: this.settings.upstream.obsidianAutoExportSince,
         notionParentId: this.settings.upstream.notionParentId,
         notionParentType: this.settings.upstream.notionParentType,
         notionTitleProperty: this.settings.upstream.notionTitleProperty,
@@ -289,14 +299,16 @@ export class SettingsService {
     }
 
     const enabledPlatforms = [...new Set(update.capture.enabledPlatforms)]
-      .filter((platform): platform is CapturePlatform => PRIMARY_PLATFORMS.includes(platform));
+      .filter((platform): platform is CapturePlatform => PRIMARY_CAPTURE_PLATFORMS.includes(platform));
     const proxyMode = ['system', 'direct', 'custom'].includes(update.network.proxyMode)
       ? update.network.proxyMode
       : 'system';
     const proxyUrl = proxyMode === 'custom'
       ? this.normalizeProxyUrl(update.network.proxyUrl)
       : update.network.proxyUrl.trim();
-    const outputLanguage = update.agent.outputLanguage === 'en-US' ? 'en-US' : 'zh-CN';
+    const outputLanguage = ['zh-CN', 'en-US', 'ja-JP', 'ko-KR'].includes(update.agent.outputLanguage)
+      ? update.agent.outputLanguage
+      : 'zh-CN';
 
     const obsidianVaultPath = update.upstream.obsidianVaultPath.trim();
     if (obsidianVaultPath && !path.isAbsolute(obsidianVaultPath)) {
@@ -314,7 +326,7 @@ export class SettingsService {
     const notionParentType: NotionParentType = update.upstream.notionParentType === 'database' ? 'database' : 'page';
 
     this.settings = {
-      version: 2,
+      version: CURRENT_SETTINGS_VERSION,
       dataDirectory,
       general: {
         launchAtLogin: Boolean(update.general.launchAtLogin),
@@ -345,6 +357,11 @@ export class SettingsService {
       upstream: {
         obsidianVaultPath: obsidianVaultPath ? path.resolve(obsidianVaultPath) : '',
         obsidianAutoExport: Boolean(update.upstream.obsidianAutoExport),
+        obsidianAutoExportSince: update.upstream.obsidianAutoExport
+          ? this.settings.upstream.obsidianAutoExport
+            ? this.settings.upstream.obsidianAutoExportSince ?? Date.now()
+            : Date.now()
+          : null,
         notionParentId: update.upstream.notionParentId.trim(),
         notionParentType,
         notionTitleProperty: notionParentType === 'database' ? update.upstream.notionTitleProperty.trim() : '',
@@ -361,7 +378,7 @@ export class SettingsService {
 
   private defaults(): StoredSettings {
     return {
-      version: 2,
+      version: CURRENT_SETTINGS_VERSION,
       dataDirectory: path.join(os.homedir(), '.vesti'),
       general: {
         launchAtLogin: false,
@@ -370,7 +387,7 @@ export class SettingsService {
       },
       capture: {
         watchOnStartup: true,
-        enabledPlatforms: [...PRIMARY_PLATFORMS],
+        enabledPlatforms: [...PRIMARY_CAPTURE_PLATFORMS],
       },
       network: {
         proxyMode: 'system',
@@ -392,6 +409,7 @@ export class SettingsService {
       upstream: {
         obsidianVaultPath: '',
         obsidianAutoExport: false,
+        obsidianAutoExportSince: null,
         notionParentId: '',
         notionParentType: 'page',
         notionTitleProperty: '',
@@ -412,9 +430,7 @@ export class SettingsService {
     const capture = parsed.capture ?? defaults.capture;
     const network = parsed.network ?? defaults.network;
     const agent = parsed.agent ?? defaults.agent;
-    const enabledPlatforms = Array.isArray(capture.enabledPlatforms)
-      ? [...new Set(capture.enabledPlatforms)].filter((platform): platform is CapturePlatform => PRIMARY_PLATFORMS.includes(platform))
-      : defaults.capture.enabledPlatforms;
+    const enabledPlatforms = normalizeEnabledPlatforms(capture.enabledPlatforms, parsed.version);
     let proxyMode = ['system', 'direct', 'custom'].includes(network.proxyMode)
       ? network.proxyMode
       : defaults.network.proxyMode;
@@ -428,7 +444,7 @@ export class SettingsService {
       }
     }
     return {
-      version: 2,
+      version: CURRENT_SETTINGS_VERSION,
       dataDirectory: typeof parsed.dataDirectory === 'string' && parsed.dataDirectory.trim()
         ? path.resolve(parsed.dataDirectory)
         : defaults.dataDirectory,
@@ -443,7 +459,9 @@ export class SettingsService {
       },
       network: { proxyMode, proxyUrl },
       agent: {
-        outputLanguage: agent.outputLanguage === 'en-US' ? 'en-US' : 'zh-CN',
+        outputLanguage: ['zh-CN', 'en-US', 'ja-JP', 'ko-KR'].includes(agent.outputLanguage)
+          ? agent.outputLanguage
+          : 'zh-CN',
         includeThinking: typeof agent.includeThinking === 'boolean' ? agent.includeThinking : defaults.agent.includeThinking,
         includeToolDetails: typeof agent.includeToolDetails === 'boolean' ? agent.includeToolDetails : defaults.agent.includeToolDetails,
         customInstructions: typeof agent.customInstructions === 'string' ? agent.customInstructions.trim().slice(0, 4_000) : '',
@@ -475,6 +493,11 @@ export class SettingsService {
       obsidianAutoExport: typeof upstream.obsidianAutoExport === 'boolean'
         ? upstream.obsidianAutoExport
         : defaults.obsidianAutoExport,
+      obsidianAutoExportSince: upstream.obsidianAutoExport === true
+        ? typeof upstream.obsidianAutoExportSince === 'number' && Number.isFinite(upstream.obsidianAutoExportSince)
+          ? upstream.obsidianAutoExportSince
+          : Date.now()
+        : null,
       notionParentId: typeof upstream.notionParentId === 'string'
         ? upstream.notionParentId.trim()
         : defaults.notionParentId,

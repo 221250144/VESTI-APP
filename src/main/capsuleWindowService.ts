@@ -193,6 +193,19 @@ export class CapsuleWindowService {
     this.window.showInactive();
   }
 
+  handleDragStart(screenX: number, screenY: number): void {
+    if (!this.window) return;
+    const bounds = this.window.getBounds();
+    this.dragOffset = {
+      x: clamp(screenX - bounds.x, 0, bounds.width),
+      y: clamp(screenY - bounds.y, 0, bounds.height),
+    };
+  }
+
+  handleDragCancel(): void {
+    this.dragOffset = null;
+  }
+
   handleDragMove(screenX: number, screenY: number): void {
     if (!this.window) return;
     if (!this.dragOffset) {

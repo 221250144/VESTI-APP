@@ -983,7 +983,7 @@ function buildEditorTheme(minHeight: number): Extension {
     ".cm-note-task-toggle[data-checked='true'] .cm-note-task-toggle-box": {
       borderColor: "hsl(var(--text-secondary))",
       backgroundColor: "hsl(var(--text-secondary))",
-      color: "white",
+      color: "hsl(var(--text-inverse))",
     },
     ".cm-note-task-toggle:hover": {
       color: "inherit",

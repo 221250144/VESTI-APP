@@ -2,6 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App';
 import { startExtensionImportHandler } from './ui/sync/extensionImport';
+import { AppErrorBoundary } from './ui/shell/AppErrorBoundary';
 import './ui/tokens.css';
 
 // Register the extension-bridge import listener before first paint so the
@@ -9,5 +10,9 @@ import './ui/tokens.css';
 startExtensionImportHandler();
 
 createRoot(document.getElementById('root')!).render(
-  <StrictMode><App /></StrictMode>,
+  <StrictMode>
+    <AppErrorBoundary>
+      <App />
+    </AppErrorBoundary>
+  </StrictMode>,
 );

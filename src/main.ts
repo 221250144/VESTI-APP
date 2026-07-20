@@ -245,7 +245,7 @@ function validSettingsUpdate(value: unknown): value is AppSettingsUpdate {
     && platforms.every(platform => PRIMARY_PLATFORMS.includes(platform))
     && ['system', 'direct', 'custom'].includes(update.network.proxyMode)
     && typeof update.network.proxyUrl === 'string'
-    && ['zh-CN', 'en-US'].includes(update.agent.outputLanguage)
+    && ['zh-CN', 'en-US', 'ja-JP', 'ko-KR'].includes(update.agent.outputLanguage)
     && typeof update.agent.includeThinking === 'boolean'
     && typeof update.agent.includeToolDetails === 'boolean'
     && typeof update.agent.customInstructions === 'string'
@@ -733,6 +733,10 @@ function registerIpc(): void {
   ipcMain.handle(IPC.capsuleHide, () => capsule.setEnabled(false));
   ipcMain.handle(IPC.capsuleSetExpanded, (_event, expanded: unknown) =>
     capsule.setExpanded(expanded === true));
+  ipcMain.on(IPC.capsuleDragStart, (_event, x: unknown, y: unknown) => {
+    if (typeof x === 'number' && typeof y === 'number') capsule.handleDragStart(x, y);
+  });
+  ipcMain.on(IPC.capsuleDragCancel, () => capsule.handleDragCancel());
   ipcMain.on(IPC.capsuleDragMove, (_event, x: unknown, y: unknown) => {
     if (typeof x === 'number' && typeof y === 'number') capsule.handleDragMove(x, y);
   });

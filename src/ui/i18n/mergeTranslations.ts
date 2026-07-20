@@ -39,6 +39,9 @@ function deepMerge(base: unknown, override: unknown): unknown {
  * English base. Missing keys fall back to English so the UI never crashes on an
  * incomplete locale.
  */
-export function withEnglishFallback(locale: unknown): Translations {
-  return deepMerge(enTranslations, locale) as Translations;
+export function withEnglishFallback(...localeOverrides: unknown[]): Translations {
+  return localeOverrides.reduce<unknown>(
+    (current, override) => deepMerge(current, override),
+    enTranslations,
+  ) as Translations;
 }

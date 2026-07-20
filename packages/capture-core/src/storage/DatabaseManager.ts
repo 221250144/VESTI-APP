@@ -504,19 +504,19 @@ export class DatabaseManager {
         summary = COALESCE(work_sessions.summary, excluded.summary),
         status = excluded.status,
         ended_at = excluded.ended_at,
-        last_activity_at = excluded.last_activity_at,
-        duration_ms = excluded.duration_ms,
-        message_count = excluded.message_count,
-        user_input_count = excluded.user_input_count,
-        assistant_message_count = excluded.assistant_message_count,
-        thinking_count = excluded.thinking_count,
-        tool_call_count = excluded.tool_call_count,
-        code_block_count = excluded.code_block_count,
-        turn_count = excluded.turn_count,
-        total_input_tokens = excluded.total_input_tokens,
-        total_output_tokens = excluded.total_output_tokens,
-        total_cache_creation_tokens = excluded.total_cache_creation_tokens,
-        total_cache_read_tokens = excluded.total_cache_read_tokens,
+        last_activity_at = MAX(work_sessions.last_activity_at, excluded.last_activity_at),
+        duration_ms = MAX(work_sessions.duration_ms, excluded.duration_ms),
+        message_count = MAX(work_sessions.message_count, excluded.message_count),
+        user_input_count = MAX(work_sessions.user_input_count, excluded.user_input_count),
+        assistant_message_count = MAX(work_sessions.assistant_message_count, excluded.assistant_message_count),
+        thinking_count = MAX(work_sessions.thinking_count, excluded.thinking_count),
+        tool_call_count = MAX(work_sessions.tool_call_count, excluded.tool_call_count),
+        code_block_count = MAX(work_sessions.code_block_count, excluded.code_block_count),
+        turn_count = MAX(work_sessions.turn_count, excluded.turn_count),
+        total_input_tokens = MAX(work_sessions.total_input_tokens, excluded.total_input_tokens),
+        total_output_tokens = MAX(work_sessions.total_output_tokens, excluded.total_output_tokens),
+        total_cache_creation_tokens = MAX(work_sessions.total_cache_creation_tokens, excluded.total_cache_creation_tokens),
+        total_cache_read_tokens = MAX(work_sessions.total_cache_read_tokens, excluded.total_cache_read_tokens),
         has_subagents = excluded.has_subagents,
         has_context_compaction = excluded.has_context_compaction,
         agent_meta = excluded.agent_meta,
@@ -1726,8 +1726,15 @@ export class DatabaseManager {
   getStats(): VestiStats {
     const db = this.getDb();
 
-    const convCount = (db.prepare('SELECT COUNT(*) as c FROM work_sessions').get() as any).c;
-    const msgCount = (db.prepare('SELECT COUNT(*) as c FROM messages').get() as any).c;
+    const convCount = (db.prepare(
+      "SELECT COUNT(*) as c FROM work_sessions WHERE session_type = 'conversation'"
+    ).get() as any).c;
+    const msgCount = (db.prepare(`
+      SELECT COUNT(*) as c
+      FROM messages m
+      INNER JOIN work_sessions ws ON ws.id = m.session_id
+      WHERE ws.session_type = 'conversation'
+    `).get() as any).c;
 
     const tokenRow = db.prepare(`
       SELECT
@@ -1735,25 +1742,55 @@ export class DatabaseManager {
         COALESCE(SUM(total_output_tokens), 0) as to2,
         COALESCE(SUM(total_cache_creation_tokens + total_cache_read_tokens), 0) as tc
       FROM work_sessions
+      WHERE session_type = 'conversation'
     `).get() as any;
 
-    const platformRows = db.prepare(
-      'SELECT platform, COUNT(*) as c FROM work_sessions GROUP BY platform'
-    ).all() as any[];
+    const platformRows = db.prepare(`
+      SELECT platform,
+             COUNT(*) as c,
+             COALESCE(SUM(total_input_tokens), 0) as ti,
+             COALESCE(SUM(total_output_tokens), 0) as ot
+      FROM work_sessions
+      WHERE session_type = 'conversation'
+      GROUP BY platform
+    `).all() as any[];
     const platformBreakdown: Record<string, number> = {};
-    for (const r of platformRows) platformBreakdown[r.platform] = r.c;
+    const platformTokenBreakdown: VestiStats['platformTokenBreakdown'] = {};
+    for (const r of platformRows) {
+      platformBreakdown[r.platform] = r.c;
+      platformTokenBreakdown[r.platform] = {
+        conversations: r.c,
+        inputTokens: r.ti || 0,
+        outputTokens: r.ot || 0,
+      };
+    }
 
-    const modelRows = db.prepare(
-      "SELECT model, COUNT(*) as c FROM work_sessions WHERE model IS NOT NULL AND model != '' GROUP BY model"
-    ).all() as any[];
+    const modelRows = db.prepare(`
+      SELECT model,
+             COUNT(*) as c,
+             COALESCE(SUM(total_input_tokens), 0) as ti,
+             COALESCE(SUM(total_output_tokens), 0) as ot
+      FROM work_sessions
+      WHERE session_type = 'conversation' AND model IS NOT NULL AND model != ''
+      GROUP BY model
+    `).all() as any[];
     const modelBreakdown: Record<string, number> = {};
-    for (const r of modelRows) modelBreakdown[r.model] = r.c;
+    const modelTokenBreakdown: VestiStats['modelTokenBreakdown'] = {};
+    for (const r of modelRows) {
+      modelBreakdown[r.model] = r.c;
+      modelTokenBreakdown[r.model] = {
+        conversations: r.c,
+        inputTokens: r.ti || 0,
+        outputTokens: r.ot || 0,
+      };
+    }
 
     const dailyRows = db.prepare(`
       SELECT date(started_at / 1000, 'unixepoch') as d,
              COUNT(*) as convs,
              SUM(message_count) as msgs
       FROM work_sessions
+      WHERE session_type = 'conversation'
       GROUP BY d ORDER BY d DESC LIMIT 30
     `).all() as any[];
     const dailyActivity = dailyRows.map(r => ({
@@ -1762,9 +1799,27 @@ export class DatabaseManager {
       messages: r.msgs || 0,
     }));
 
+    // Session totals are authoritative for all capture adapters. Attribute a
+    // session's complete usage to its last-active local day so the dashboard
+    // remains truthful even for formats that only expose cumulative usage.
+    const dailyTokenRows = db.prepare(`
+      SELECT date(last_activity_at / 1000, 'unixepoch', 'localtime') as d,
+             COALESCE(SUM(total_input_tokens), 0) as ti,
+             COALESCE(SUM(total_output_tokens), 0) as ot
+      FROM work_sessions
+      WHERE session_type = 'conversation'
+      GROUP BY d ORDER BY d DESC LIMIT 30
+    `).all() as any[];
+    const dailyTokenUsage = dailyTokenRows.map(r => ({
+      date: r.d,
+      inputTokens: r.ti || 0,
+      outputTokens: r.ot || 0,
+    }));
+
     const projectRows = db.prepare(`
       SELECT project_path, COUNT(*) as c FROM work_sessions
-      WHERE project_path != '' GROUP BY project_path ORDER BY c DESC LIMIT 10
+      WHERE session_type = 'conversation' AND project_path != ''
+      GROUP BY project_path ORDER BY c DESC LIMIT 10
     `).all() as any[];
     const topProjects = projectRows.map(r => ({ path: r.project_path, conversations: r.c }));
 
@@ -1782,8 +1837,11 @@ export class DatabaseManager {
       totalOutputTokens: tokenRow.to2,
       totalCacheTokens: tokenRow.tc,
       platformBreakdown,
+      platformTokenBreakdown,
       modelBreakdown,
+      modelTokenBreakdown,
       dailyActivity,
+      dailyTokenUsage,
       topProjects,
       toolCategoryBreakdown,
       storageSize: 0,

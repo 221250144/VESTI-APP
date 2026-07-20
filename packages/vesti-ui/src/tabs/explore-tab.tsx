@@ -904,7 +904,7 @@ export function ExploreTab({
             </button>
             <button
               onClick={(event) => handleDeleteSession(session.id, event)}
-              className="rounded p-1 text-text-tertiary hover:bg-bg-surface-card hover:text-[#B42318]"
+              className="rounded p-1 text-text-tertiary hover:bg-bg-surface-card hover:text-danger"
               title={labels.delete}
             >
               <Trash2 className="h-3.5 w-3.5" strokeWidth={1.5} />

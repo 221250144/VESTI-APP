@@ -177,14 +177,14 @@ App 只依赖 `@vesti/capture-core` 的包接口，不直接引用 CLI 命令。
 
 ## 常用命令
 
-| 命令 | 用途 |
-|---|---|
-| `pnpm start` | 启动开发环境 |
-| `pnpm core:build` | 单独构建采集核心 |
-| `pnpm typecheck` | 构建核心并检查 App 类型 |
-| `pnpm test` | 运行根 vitest 与各包测试 |
-| `pnpm package` | 生成未安装的 Electron 应用目录 |
-| `pnpm make` | 生成 Windows NSIS 安装包 |
+| 命令                | 用途                           |
+| ------------------- | ------------------------------ |
+| `pnpm start`      | 启动开发环境                   |
+| `pnpm core:build` | 单独构建采集核心               |
+| `pnpm typecheck`  | 构建核心并检查 App 类型        |
+| `pnpm test`       | 运行根 vitest 与各包测试       |
+| `pnpm package`    | 生成未安装的 Electron 应用目录 |
+| `pnpm make`       | 生成 Windows NSIS 安装包       |
 
 ## 常见问题
 

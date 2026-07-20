@@ -477,7 +477,7 @@ function SplitNoteEditorPanel({
                     onClick={() => void onDeleteCurrentNote()}
                     aria-label={labels.deleteNote ?? "Delete note"}
                     title={labels.deleteNote ?? "Delete note"}
-                    className="inline-flex h-8 w-8 items-center justify-center text-[#B42318] transition-colors hover:bg-[#FEF2F2]"
+                    className="inline-flex h-8 w-8 items-center justify-center text-danger transition-colors hover:bg-danger/10"
                   >
                     <Trash2 strokeWidth={1.6} className="h-4 w-4" />
                   </button>
@@ -2818,7 +2818,7 @@ export function LibraryTab({
                   />
                 ) : null}
                 {note.import_meta?.conflict ? (
-                  <span className="rounded-full bg-[#FEF3F2] px-2 py-0.5 text-[11px] font-sans text-[#B42318]">
+                  <span className="rounded-full bg-danger/10 px-2 py-0.5 text-[11px] font-sans text-danger">
                     {labels.conflict ?? "Conflict"}
                   </span>
                 ) : null}
@@ -2855,7 +2855,7 @@ export function LibraryTab({
             onClick={() => {
               void handleNoteDelete(note);
             }}
-            className="flex h-7 w-7 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-bg-surface-card hover:text-[#B42318]"
+            className="flex h-7 w-7 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-bg-surface-card hover:text-danger"
             aria-label={`Delete note ${note.title}`}
           >
             <Trash2 strokeWidth={1.5} className="h-4 w-4" />
@@ -3311,7 +3311,7 @@ export function LibraryTab({
 
         {annotationNotice?.tone === "error" && (
           <div className="border-b border-border-subtle px-4 py-3">
-            <div className="rounded-xl bg-[#FEF2F2] px-3 py-2 text-[12px] font-sans text-[#B42318]">
+            <div className="rounded-xl bg-danger/10 px-3 py-2 text-[12px] font-sans text-danger">
               {annotationNotice.message}
             </div>
           </div>
@@ -3351,13 +3351,13 @@ export function LibraryTab({
                   </p>
 
                   {annotationPendingDeleteId === annotation.id ? (
-                    <div className="mt-3 flex flex-wrap items-center gap-2 text-[12px] font-sans text-[#B42318]">
+                    <div className="mt-3 flex flex-wrap items-center gap-2 text-[12px] font-sans text-danger">
                       <span>Delete this comment?</span>
                       <button
                         type="button"
                         onClick={() => void handleDeleteAnnotation(annotation)}
                         disabled={Boolean(isDeleteBusy)}
-                        className="rounded-md px-2 py-1 font-medium text-[#922018] hover:bg-[#FEF2F2] disabled:opacity-50"
+                        className="rounded-md px-2 py-1 font-medium text-danger hover:bg-danger/10 disabled:opacity-50"
                       >
                         {isDeleteBusy ? (labels.deleting ?? "Deleting...") : (labels.delete ?? "Delete")}
                       </button>
@@ -3411,7 +3411,7 @@ export function LibraryTab({
                         onClick={() =>
                           setAnnotationPendingDeleteId(annotation.id)
                         }
-                        className="inline-flex items-center gap-1 text-[#B42318] hover:text-[#922018]"
+                        className="inline-flex items-center gap-1 text-danger hover:opacity-80"
                       >
                         <Trash2 strokeWidth={1.6} className="h-3.5 w-3.5" />
                         {labels.delete ?? "Delete"}
@@ -3765,7 +3765,7 @@ export function LibraryTab({
                                   void handleDeleteFolder(folder);
                                   setOpenFolderMenuName(null);
                                 }}
-                                className="w-full flex items-center gap-2 px-3 py-2 text-[13px] font-sans text-[#B42318] hover:bg-bg-surface-card transition-colors"
+                                className="w-full flex items-center gap-2 px-3 py-2 text-[13px] font-sans text-danger hover:bg-bg-surface-card transition-colors"
                               >
                                 <Trash2 strokeWidth={1.5} className="w-4 h-4" />
                                 <span>{labels.delete ?? "Delete"}</span>
@@ -4144,7 +4144,7 @@ export function LibraryTab({
                                   void handleConversationDelete(conv);
                                   setOpenConversationMenuId(null);
                                 }}
-                                className="w-full flex items-center gap-2 px-3 py-2 text-[13px] font-sans text-[#B42318] hover:bg-bg-surface-card transition-colors"
+                                className="w-full flex items-center gap-2 px-3 py-2 text-[13px] font-sans text-danger hover:bg-bg-surface-card transition-colors"
                               >
                                 <Trash2 strokeWidth={1.5} className="w-4 h-4" />
                                 <span>{labels.delete ?? "Delete"}</span>
@@ -5033,7 +5033,7 @@ export function LibraryTab({
                                 onClick={() =>
                                   setIsConversationExpanded((prev) => !prev)
                                 }
-                                className="inline-flex items-center rounded-full bg-bg-primary px-3.5 py-1.5 text-[12px] font-sans text-text-secondary transition-colors hover:bg-white hover:text-text-primary"
+                                className="inline-flex items-center rounded-full bg-bg-primary px-3.5 py-1.5 text-[12px] font-sans text-text-secondary transition-colors hover:bg-bg-surface-hover hover:text-text-primary"
                               >
                                 {labels.showOriginalMessages ?? "Show original messages"} ({messageCount})
                               </button>
@@ -5525,7 +5525,7 @@ export function LibraryTab({
                   </div>
 
                   {selectedNote.import_meta?.conflict ? (
-                    <div className="mb-5 rounded-xl border border-[#FECDCA] bg-[#FEF3F2] px-4 py-3 text-[13px] font-sans text-[#B42318]">
+                    <div className="mb-5 rounded-xl border border-danger/30 bg-danger/10 px-4 py-3 text-[13px] font-sans text-danger">
                       Source file changed after local edits. Re-import skipped to
                       avoid overwriting this note.
                     </div>
@@ -5699,7 +5699,7 @@ export function LibraryTab({
                           className={`text-[12px] font-sans transition-opacity duration-300 ${
                             obsidianNotice.tone === "success"
                               ? "text-text-secondary"
-                              : "text-[#B42318]"
+                              : "text-danger"
                           }`}
                         >
                           {obsidianNotice.message}

@@ -16,7 +16,7 @@ import { useI18n } from "../i18n";
 import type { SupportedLocale } from "../i18n/locales";
 import { DockTooltip } from "./DockTooltip";
 
-export type ShellPage = DashboardTab | "settings";
+export type ShellPage = "home" | DashboardTab | "settings";
 
 // Localized dock labels, kept next to the component (same pattern as the
 // capsule's embedded dictionaries) so the shared translation files stay
@@ -26,6 +26,7 @@ const DOCK_COPY: Record<
   Record<ShellPage | "backToLibrary" | "toggleTheme", string>
 > = {
   en: {
+    home: "Dashboard",
     library: "Library",
     explore: "Explore",
     network: "Knowledge Graph",
@@ -37,6 +38,7 @@ const DOCK_COPY: Record<
     toggleTheme: "Toggle theme",
   },
   zh: {
+    home: "数据概览",
     library: "会话库",
     explore: "探索",
     network: "知识图谱",
@@ -48,6 +50,7 @@ const DOCK_COPY: Record<
     toggleTheme: "切换主题",
   },
   ja: {
+    home: "ダッシュボード",
     library: "ライブラリ",
     explore: "探索",
     network: "ナレッジグラフ",
@@ -59,6 +62,7 @@ const DOCK_COPY: Record<
     toggleTheme: "テーマ切替",
   },
   ko: {
+    home: "대시보드",
     library: "라이브러리",
     explore: "탐색",
     network: "지식 그래프",
@@ -102,12 +106,17 @@ export function Dock({ currentPage, onNavigate, themeMode, onToggleTheme }: Dock
       className="flex w-[52px] shrink-0 flex-col items-center justify-between border-r border-border-subtle bg-bg-sidebar px-1 py-4"
     >
       <div className="flex flex-col items-center gap-2">
-        <DockTooltip label={copy.backToLibrary}>
+        <DockTooltip label={copy.home}>
           <button
             type="button"
-            aria-label={copy.backToLibrary}
-            onClick={() => onNavigate("library")}
-            className="mb-1 flex h-10 w-10 items-center justify-center rounded-lg border border-border-subtle bg-bg-primary/70 transition-colors [transition-duration:140ms] hover:bg-accent-primary-light focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus"
+            aria-label={copy.home}
+            aria-current={currentPage === "home" ? "page" : undefined}
+            onClick={() => onNavigate("home")}
+            className={`mb-1 flex h-10 w-10 items-center justify-center rounded-lg border transition-colors [transition-duration:140ms] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus ${
+              currentPage === "home"
+                ? "border-accent-primary/35 bg-accent-primary-light"
+                : "border-border-subtle bg-bg-primary/70 hover:bg-accent-primary-light"
+            }`}
           >
             <img src={LOGO_BASE64} alt="Vesti" width={20} height={20} />
           </button>

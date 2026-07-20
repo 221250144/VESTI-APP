@@ -184,8 +184,19 @@ export interface VestiStats {
   totalOutputTokens: number;
   totalCacheTokens: number;
   platformBreakdown: Record<string, number>;
+  platformTokenBreakdown: Record<string, {
+    conversations: number;
+    inputTokens: number;
+    outputTokens: number;
+  }>;
   modelBreakdown: Record<string, number>;
+  modelTokenBreakdown: Record<string, {
+    conversations: number;
+    inputTokens: number;
+    outputTokens: number;
+  }>;
   dailyActivity: Array<{ date: string; conversations: number; messages: number }>;
+  dailyTokenUsage: Array<{ date: string; inputTokens: number; outputTokens: number }>;
   topProjects: Array<{ path: string; conversations: number }>;
   toolCategoryBreakdown?: Record<string, number>;
   storageSize: number;

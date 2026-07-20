@@ -204,6 +204,17 @@ export class CaptureService {
         outputTokens: stats.totalOutputTokens,
         storageSize: stats.storageSize,
       },
+      analytics: {
+        cacheTokens: stats.totalCacheTokens,
+        platformBreakdown: stats.platformBreakdown,
+        platformTokenBreakdown: stats.platformTokenBreakdown,
+        modelBreakdown: stats.modelBreakdown,
+        modelTokenBreakdown: stats.modelTokenBreakdown,
+        dailyActivity: stats.dailyActivity,
+        dailyTokenUsage: stats.dailyTokenUsage,
+        topProjects: stats.topProjects,
+        toolCategoryBreakdown: stats.toolCategoryBreakdown ?? {},
+      },
       watching: this.watching,
       syncing: this.syncing,
     };
@@ -356,7 +367,15 @@ export class CaptureService {
       const results: SyncResult[] = [];
       for (const platform of PRIMARY_PLATFORMS) {
         const platformFiles = byPlatform.get(platform);
-        if (platformFiles?.length) results.push(await this.syncEngine.syncPlatform(platform, platformFiles));
+        if (!platformFiles?.length) continue;
+        const result = await this.syncEngine.syncPlatform(platform, platformFiles);
+        results.push(result);
+        // A full scan is intentionally sequential. Publish each completed
+        // platform instead of holding the first platform's fresh totals until
+        // every other source has finished. This matters most on startup: the
+        // active Codex session can contain most of the user's token history,
+        // while Cursor/Claude scans may continue for several more seconds.
+        if (result.sessionsProcessed > 0) this.notify?.();
       }
       const summary = this.summarize(results);
       if (summary.sessions > 0 || summary.messages > 0) this.syncCompleted?.();

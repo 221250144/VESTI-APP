@@ -21,6 +21,11 @@ export interface BatchExportResult {
   failed: BatchExportFailure[];
 }
 
+/** Let paint/input tasks run between large local exports. */
+function yieldToRenderer(): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, 0));
+}
+
 export async function runBatchExport(
   items: Array<{ id: number; title: string }>,
   exportOne: (item: { id: number; title: string }) => Promise<void>,
@@ -29,6 +34,7 @@ export async function runBatchExport(
   const failed: BatchExportFailure[] = [];
   let succeeded = 0;
   for (const [index, item] of items.entries()) {
+    if (index > 0) await yieldToRenderer();
     onProgress?.({
       done: index,
       total: items.length,

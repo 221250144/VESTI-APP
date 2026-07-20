@@ -13,7 +13,7 @@ import sakuraCollapsed from './assets/skins/sakura/collapsed.png';
  */
 export interface OwlSkin {
   id: string;
-  name: { zh: string; en: string };
+  name: Record<'zh' | 'en' | 'ja' | 'ko', string>;
   /** Artwork for the collapsed 48px ball state (transparent-background PNG). */
   collapsed: string;
 }
@@ -21,10 +21,10 @@ export interface OwlSkin {
 export const DEFAULT_SKIN_ID = 'classic';
 
 export const SKINS: OwlSkin[] = [
-  { id: 'classic', name: { zh: '经典', en: 'Classic' }, collapsed: classicCollapsed },
-  { id: 'midnight', name: { zh: '午夜星空', en: 'Midnight' }, collapsed: midnightCollapsed },
-  { id: 'pixel', name: { zh: '像素', en: 'Pixel' }, collapsed: pixelCollapsed },
-  { id: 'sakura', name: { zh: '樱花', en: 'Sakura' }, collapsed: sakuraCollapsed },
+  { id: 'classic', name: { zh: '经典', en: 'Classic', ja: 'クラシック', ko: '클래식' }, collapsed: classicCollapsed },
+  { id: 'midnight', name: { zh: '午夜星空', en: 'Midnight', ja: 'ミッドナイト', ko: '미드나이트' }, collapsed: midnightCollapsed },
+  { id: 'pixel', name: { zh: '像素', en: 'Pixel', ja: 'ピクセル', ko: '픽셀' }, collapsed: pixelCollapsed },
+  { id: 'sakura', name: { zh: '樱花', en: 'Sakura', ja: '桜', ko: '벚꽃' }, collapsed: sakuraCollapsed },
 ];
 
 export function resolveSkin(id: unknown): OwlSkin {
