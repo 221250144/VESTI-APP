@@ -505,6 +505,9 @@ export async function ensureTopicPath(
 }
 
 let running = false;
+/** Cooldown end timestamp after the circuit breaker aborts (auto-runs only). */
+let autoTriggerSuppressedUntil = 0;
+const AUTO_CLASSIFY_FAILURE_COOLDOWN_MS = 30 * 60 * 1000;
 
 /**
  * One auto-classify pass over every eligible conversation. Returns the run
@@ -522,6 +525,9 @@ export async function runAutoClassify(options?: {
   if (options?.trigger !== "manual") {
     const enabled = await readPref(PREF_KEYS.enabled, true);
     if (!enabled) return null;
+    // Circuit-breaker cooldown: after repeated batch failures (LLM down),
+    // skip auto-runs for a while instead of re-storming every data-updated.
+    if (Date.now() < autoTriggerSuppressedUntil) return null;
   }
   const settings = await api.getSettings().catch(() => null);
   if (!settings) return null;
@@ -581,6 +587,14 @@ export async function runAutoClassify(options?: {
     const queuedItems: ClassifySuggestion[] = [];
     const briefById = new Map(briefs.map((brief) => [brief.id, brief]));
 
+    // Circuit breaker: when the LLM is down (quota exhausted / offline), every
+    // batch fails fast and the loop would otherwise burn through all candidates
+    // on every data-updated tick — a failure storm that also spams the log.
+    // Abort the run after 3 consecutive failures and suppress auto-runs for a
+    // cooldown window (manual runs from settings still allowed).
+    let consecutiveFailures = 0;
+    let aborted = false;
+
     for (let start = 0; start < briefs.length; start += CLASSIFY_BATCH_SIZE) {
       const batch = briefs.slice(start, start + CLASSIFY_BATCH_SIZE);
       stats.batches += 1;
@@ -627,9 +641,23 @@ export async function runAutoClassify(options?: {
         // Bad model output or a failed batch: degrade by skipping the batch,
         // the conversations stay unclassified for the next run.
         stats.failedBatches += 1;
+        consecutiveFailures += 1;
         logger.error("db", "Auto-classify batch failed", error as Error);
+        if (consecutiveFailures >= 3) {
+          aborted = true;
+          autoTriggerSuppressedUntil = Date.now() + AUTO_CLASSIFY_FAILURE_COOLDOWN_MS;
+          logger.warn(
+            "db",
+            `Auto-classify aborted after ${consecutiveFailures} consecutive batch failures; auto-runs paused for 30 minutes (LLM unreachable?)`
+          );
+          break;
+        }
+        continue;
       }
+      consecutiveFailures = 0;
     }
+
+    if (aborted) setState({ lastRun: stats });
 
     if (queuedItems.length > 0) {
       await (options?.store ?? dexieSuggestionStore).add(queuedItems);
