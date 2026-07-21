@@ -109,7 +109,7 @@ describe('schema migrations', () => {
     await manager.close();
 
     const migrations = appliedMigrations(dbPath);
-    expect(migrations.map(m => m.version)).toEqual([1, 2, 3, 4, 5]);
+    expect(migrations.map(m => m.version)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(migrations[0].name).toBe('add_work_sessions_session_type');
     expect(migrations[1].name).toBe('add_work_sessions_host');
     expect(migrations[2].name).toBe('add_session_digests_and_project_registry');
@@ -197,7 +197,7 @@ describe('schema migrations', () => {
 
     expect(columnNames(dbPath, 'work_sessions')).toContain('session_type');
     expect(columnNames(dbPath, 'work_sessions')).toContain('host');
-    expect(appliedMigrations(dbPath).map(m => m.version)).toEqual([1, 2, 3, 4, 5]);
+    expect(appliedMigrations(dbPath).map(m => m.version)).toEqual([1, 2, 3, 4, 5, 6]);
     // Migration 3 creates the index tables on legacy databases too.
     expect(tableNames(dbPath)).toEqual(expect.arrayContaining(['session_digests', 'project_registry']));
     // Legacy rows get a project registry entry from the normal upsert path.
@@ -222,7 +222,7 @@ describe('schema migrations', () => {
     await second.initialize();
     await second.close();
 
-    expect(appliedMigrations(dbPath)).toHaveLength(5);
+    expect(appliedMigrations(dbPath)).toHaveLength(6);
   });
 });
 
@@ -569,5 +569,36 @@ describe('migration 5: fts5 trigram tokenizer', () => {
     } finally {
       db.close();
     }
+  });
+
+  // Migration 6: existing Cursor sessions must be scanned again after the
+  // parser starts reading model-reported token usage.
+  it('invalidates only the Cursor checkpoint when token capture is upgraded', async () => {
+    const dir = await makeTempDir('vesti-migrations-cursor-token-');
+    const dbPath = path.join(dir, 'vesti.db');
+
+    const first = new DatabaseManager(dbPath);
+    await first.initialize();
+    await first.close();
+
+    const seeded = new Database(dbPath);
+    seeded.prepare('DELETE FROM schema_migrations WHERE version = 6').run();
+    seeded.prepare(`
+      INSERT INTO sync_state (file_path, platform, last_position, last_modified)
+      VALUES (?, ?, ?, ?), (?, ?, ?, ?)
+    `).run(
+      'C:/Cursor/state.vscdb', 'cursor', 100, 200,
+      'C:/Codex/session.jsonl', 'codex', 300, 400,
+    );
+    seeded.close();
+
+    const upgraded = new DatabaseManager(dbPath);
+    await upgraded.initialize();
+    expect(upgraded.getSyncState('C:/Cursor/state.vscdb')).toBeNull();
+    expect(upgraded.getSyncState('C:/Codex/session.jsonl')).toMatchObject({
+      lastPosition: 300,
+      lastModified: 400,
+    });
+    await upgraded.close();
   });
 });

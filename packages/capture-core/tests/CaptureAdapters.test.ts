@@ -100,6 +100,7 @@ describe('capture adapters', () => {
         composerId,
         name: 'Cursor fixture',
         modelConfig: { modelName: 'cursor-test-model' },
+        tokenCount: 999_999,
         fullConversationHeadersOnly: [
           { bubbleId: 'user-1', type: 1, createdAt: 1_752_541_200_000 },
           { bubbleId: 'assistant-1', type: 2, createdAt: 1_752_541_201_000 },
@@ -112,7 +113,15 @@ describe('capture adapters', () => {
     );
     db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(
       `bubbleId:${composerId}:assistant-1`,
-      JSON.stringify({ bubbleId: 'assistant-1', type: 2, text: 'fixed', thinking: 'checking', createdAt: 1_752_541_201_000 }),
+      JSON.stringify({
+        bubbleId: 'assistant-1',
+        type: 2,
+        text: 'fixed',
+        thinking: 'checking',
+        createdAt: 1_752_541_201_000,
+        tokenCount: { inputTokens: 1_200, outputTokens: 80 },
+        tokenCountUpUntilHere: 999_999,
+      }),
     );
     db.close();
 
@@ -122,6 +131,56 @@ describe('capture adapters', () => {
     expect(sessions[0]).toMatchObject({ sessionId: composerId, platform: 'cursor', model: 'cursor-test-model', projectPath: 'C:/work/cursor-demo' });
     expect(sessions[0].messages.map(message => message.contentText)).toEqual(['fix the test', 'fixed']);
     expect(sessions[0].messages[1].contentThinking).toBe('checking');
+    expect(sessions[0].messages[1].usage).toMatchObject({
+      inputTokens: 1_200,
+      outputTokens: 80,
+      model: 'cursor-test-model',
+    });
+    expect(sessions[0].tokenUsage).toMatchObject({
+      totalInputTokens: 1_200,
+      totalOutputTokens: 80,
+    });
+  });
+
+  it('parses legacy Cursor inline conversations and their reported token usage', async () => {
+    const dir = await makeTempDir('vesti-cursor-legacy-');
+    const file = path.join(dir, 'state.vscdb');
+    const composerId = 'legacy-composer-11111111';
+    const db = new Database(file);
+    db.exec('CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB)');
+    db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(
+      `composerData:${composerId}`,
+      JSON.stringify({
+        composerId,
+        name: 'Legacy Cursor fixture',
+        createdAt: 1_752_541_200_000,
+        modelConfig: { modelName: 'cursor-legacy-model' },
+        tokenCount: 888_888,
+        conversation: [
+          { bubbleId: 'legacy-user', type: 1, text: 'legacy question', tokenCount: { inputTokens: 0, outputTokens: 0 } },
+          { bubbleId: 'legacy-assistant-1', type: 2, text: 'first answer', tokenCount: { inputTokens: 200, outputTokens: 30 } },
+          { bubbleId: 'legacy-assistant-2', type: 2, text: 'second answer', tokenCount: { inputTokens: 350, outputTokens: 45 } },
+        ],
+      }),
+    );
+    db.close();
+
+    const sessions = await new CursorParser().parseDatabase(file);
+
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].messages.map(message => message.contentText)).toEqual([
+      'legacy question',
+      'first answer',
+      'second answer',
+    ]);
+    expect(sessions[0].tokenUsage).toMatchObject({
+      totalInputTokens: 550,
+      totalOutputTokens: 75,
+    });
+    expect(MessageConverter.convertV2(sessions[0]).session).toMatchObject({
+      totalInputTokens: 550,
+      totalOutputTokens: 75,
+    });
   });
 
   it('keeps legacy-envelope Kimi Code user, assistant and tool-result chains', async () => {

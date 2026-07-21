@@ -253,4 +253,15 @@ export const MIGRATIONS: Migration[] = [
       rebuildFtsWithTrigram(db);
     },
   },
+  {
+    version: 6,
+    name: 'rescan_cursor_reported_token_usage',
+    up(db) {
+      // Cursor usage was previously hard-coded to zero and the legacy inline
+      // conversation layout was skipped. Invalidate only Cursor's source
+      // checkpoint once so existing installations are backfilled immediately
+      // even when state.vscdb itself has not changed since the app upgrade.
+      db.prepare("DELETE FROM sync_state WHERE platform = 'cursor'").run();
+    },
+  },
 ];

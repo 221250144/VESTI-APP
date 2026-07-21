@@ -99,6 +99,57 @@ function extractModel(data: JsonObject, bubbles: JsonObject[]): string | undefin
   return undefined;
 }
 
+function tokenNumber(...values: unknown[]): number {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return Math.max(0, Math.round(value));
+    }
+  }
+  return 0;
+}
+
+function extractBubbleUsage(
+  bubble: JsonObject,
+  fallbackModel?: string,
+): ParsedMessage['usage'] | undefined {
+  const tokenCount = record(bubble.tokenCount);
+  if (Object.keys(tokenCount).length === 0) return undefined;
+
+  const inputTokens = tokenNumber(
+    tokenCount.inputTokens,
+    tokenCount.input_tokens,
+    tokenCount.promptTokens,
+  );
+  const outputTokens = tokenNumber(
+    tokenCount.outputTokens,
+    tokenCount.output_tokens,
+    tokenCount.completionTokens,
+  );
+  const cacheCreationTokens = tokenNumber(
+    tokenCount.cacheCreationTokens,
+    tokenCount.cache_creation_input_tokens,
+  );
+  const cacheReadTokens = tokenNumber(
+    tokenCount.cacheReadTokens,
+    tokenCount.cachedInputTokens,
+    tokenCount.cached_input_tokens,
+  );
+  if (inputTokens + outputTokens + cacheCreationTokens + cacheReadTokens === 0) {
+    return undefined;
+  }
+
+  const bubbleModel = record(bubble.modelInfo).modelName;
+  return {
+    inputTokens,
+    outputTokens,
+    cacheCreationTokens,
+    cacheReadTokens,
+    model: typeof bubbleModel === 'string' && bubbleModel
+      ? bubbleModel
+      : fallbackModel || 'cursor-unknown',
+  };
+}
+
 export class CursorParser {
   private async open(filePath: string): Promise<SqliteDatabase> {
     const BetterSqlite3 = (await import('better-sqlite3')).default;
@@ -203,9 +254,28 @@ export class CursorParser {
       }
     }
 
+    // Cursor's older Composer layout stores the complete bubble list inline
+    // as `conversation[]`. Newer databases keep only headers here and place
+    // each bubble in cursorDiskKV. Support both without combining them, which
+    // would double-count messages and reported usage during migrations.
+    if (bubbleEntries.length === 0 && Array.isArray(data.conversation)) {
+      for (const value of data.conversation) {
+        const bubble = record(value);
+        if (Object.keys(bubble).length) bubbleEntries.push({ bubble, header: bubble });
+      }
+    }
+
     const messages: ParsedMessage[] = [];
     const toolExecutions: ToolExecution[] = [];
     const bubbles = bubbleEntries.map(entry => entry.bubble);
+    const model = extractModel(data, bubbles);
+    const tokenUsage: SessionTokenUsage = {
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCacheCreationTokens: 0,
+      totalCacheReadTokens: 0,
+      models: new Set(model ? [model] : []),
+    };
     let firstPrompt = '';
     let sequence = 0;
 
@@ -219,6 +289,14 @@ export class CursorParser {
       const text = typeof bubble.text === 'string' ? bubble.text.trim() : '';
       const thinking = extractThinking(bubble).trim();
       const tool = record(bubble.toolFormerData);
+      const usage = extractBubbleUsage(bubble, model);
+      if (usage) {
+        tokenUsage.totalInputTokens += usage.inputTokens;
+        tokenUsage.totalOutputTokens += usage.outputTokens;
+        tokenUsage.totalCacheCreationTokens += usage.cacheCreationTokens;
+        tokenUsage.totalCacheReadTokens += usage.cacheReadTokens;
+        tokenUsage.models.add(usage.model);
+      }
 
       if (role === 'user') {
         if (text) {
@@ -250,6 +328,7 @@ export class CursorParser {
           contentText: text || undefined,
           contentThinking: thinking || undefined,
           toolCalls: [{ id: callId, name, input }],
+          usage,
           isToolResult: false,
           depth: 0,
         });
@@ -292,6 +371,7 @@ export class CursorParser {
           timestamp: ts,
           contentText: text || undefined,
           contentThinking: thinking || undefined,
+          usage,
           isToolResult: false,
           depth: 0,
         });
@@ -303,14 +383,6 @@ export class CursorParser {
     const timestamps = messages.map(message => message.timestamp).filter(value => value > 0);
     const startTime = timestamps.length ? Math.min(...timestamps) : fallbackStart;
     const endTime = timestamps.length ? Math.max(...timestamps) : toTimestamp(data.lastUpdatedAt ?? header.lastUpdatedAt, startTime);
-    const model = extractModel(data, bubbles);
-    const tokenUsage: SessionTokenUsage = {
-      totalInputTokens: 0,
-      totalOutputTokens: 0,
-      totalCacheCreationTokens: 0,
-      totalCacheReadTokens: 0,
-      models: new Set(model ? [model] : []),
-    };
     const title = typeof data.name === 'string' && data.name.trim()
       ? data.name.trim()
       : typeof header.name === 'string' ? header.name.trim() : '';
