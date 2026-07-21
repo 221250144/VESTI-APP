@@ -464,7 +464,7 @@ describe('migration 5: fts5 trigram tokenizer', () => {
     expect(ftsTableSql(dbPath, 'messages_fts').toLowerCase()).toContain('trigram');
     expect(ftsTableSql(dbPath, 'sessions_fts').toLowerCase()).toContain('trigram');
     const migrations = appliedMigrations(dbPath);
-    expect(migrations.map(m => m.version)).toEqual([1, 2, 3, 4, 5]);
+    expect(migrations.map(m => m.version)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(migrations[4].name).toBe('fts5_trigram_tokenizer');
     // Applied (not skipped) → no note.
     expect(migrationNote(dbPath, 5)).toBeNull();
@@ -494,7 +494,7 @@ describe('migration 5: fts5 trigram tokenizer', () => {
     // Rebuilt with trigram; schema_migrations records v5 without a skip note.
     expect(ftsTableSql(dbPath, 'messages_fts').toLowerCase()).toContain('trigram');
     expect(ftsTableSql(dbPath, 'sessions_fts').toLowerCase()).toContain('trigram');
-    expect(appliedMigrations(dbPath).map(m => m.version)).toEqual([1, 2, 3, 4, 5]);
+    expect(appliedMigrations(dbPath).map(m => m.version)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(migrationNote(dbPath, 5)).toBeNull();
 
     // Backfill完整性: every content row re-indexed (rebuild, not incremental).
