@@ -109,3 +109,76 @@ describe('DatabaseManager work-session token totals', () => {
     await manager.close();
   });
 });
+
+describe('DatabaseManager subagent folding (A1)', () => {
+  async function seedParentAndChild(manager: DatabaseManager): Promise<void> {
+    manager.upsertWorkSession(session({
+      id: 'codex:parent',
+      sessionId: 'parent',
+      title: 'Parent session',
+      totalInputTokens: 100,
+      totalOutputTokens: 10,
+      totalCacheReadTokens: 0,
+    }));
+    manager.upsertWorkSession(session({
+      id: 'codex:child',
+      sessionId: 'child',
+      title: 'Review the renderer',
+      messageCount: 7,
+      totalInputTokens: 50,
+      totalOutputTokens: 5,
+      totalCacheReadTokens: 0,
+    }));
+    manager.insertSubagentLink({
+      id: 'link-1',
+      parentSessionId: 'codex:parent',
+      childSessionId: 'codex:child',
+      agentId: 'child',
+      agentRole: 'bugbot',
+      slug: null as unknown as string,
+      filePath: 'C:/x/child.jsonl',
+      messageCount: 7,
+      spawnedAt: 1_500,
+    });
+  }
+
+  it('counts only main sessions as conversations but keeps full token sums', async () => {
+    const manager = await createManager();
+    await seedParentAndChild(manager);
+
+    const stats = manager.getStats();
+    expect(stats.totalConversations).toBe(1);
+    expect(stats.totalInputTokens).toBe(150);
+    expect(stats.totalOutputTokens).toBe(15);
+    expect(stats.platformBreakdown.codex).toBe(1);
+    expect(stats.platformTokenBreakdown.codex).toMatchObject({
+      conversations: 1,
+      inputTokens: 150,
+      outputTokens: 15,
+    });
+
+    await manager.close();
+  });
+
+  it('exposes child ids, lineage and briefs for downstream folding', async () => {
+    const manager = await createManager();
+    await seedParentAndChild(manager);
+
+    expect([...manager.getSubagentChildIds()]).toEqual(['codex:child']);
+    expect(manager.getSubagentLineageByChild().get('codex:child')).toEqual({
+      parentSessionId: 'codex:parent',
+      agentRole: 'bugbot',
+    });
+    expect(manager.getSubagentBriefs('codex:parent')).toEqual([
+      {
+        childSessionId: 'codex:child',
+        agentRole: 'bugbot',
+        title: 'Review the renderer',
+        messageCount: 7,
+        oneLiner: null,
+      },
+    ]);
+
+    await manager.close();
+  });
+});

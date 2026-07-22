@@ -47,6 +47,14 @@ describe("selectClassifyCandidates", () => {
     ];
     expect(selectClassifyCandidates(records).map((record) => record.id)).toEqual([6]);
   });
+
+  it("skips folded subagent runs (A1) — they classify with their parent", () => {
+    const records = [
+      candidate({ id: 1, topic_id: null, _subagent_of: "cursor:parent" }),
+      candidate({ id: 2, topic_id: null }),
+    ];
+    expect(selectClassifyCandidates(records).map((record) => record.id)).toEqual([2]);
+  });
 });
 
 describe("resolveTopicPath", () => {

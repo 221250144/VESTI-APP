@@ -29,6 +29,12 @@ export interface ConversationTreeSession {
    */
   role: 'main' | 'subagent';
   parentSessionId?: string;
+  /**
+   * Display label for subagent children: the platform's agent type/slug
+   * (Cursor subagentTypeName, Claude agent slug, kimi swarm item) when the
+   * link recorded one.
+   */
+  subagentRole?: string;
   orphan?: boolean;
   /** Direct subagent children count. */
   childCount: number;
@@ -124,12 +130,15 @@ export function buildConversationTree(db: Database): ConversationTree {
   // child session id → parent session id (first link wins; duplicates are
   // not expected but must not double-mount a child).
   const parentByChild = new Map<string, string>();
+  const roleByChild = new Map<string, string>();
   for (const row of db.prepare(`
-    SELECT parent_session_id, child_session_id FROM subagent_links
+    SELECT parent_session_id, child_session_id, agent_role, slug FROM subagent_links
     WHERE child_session_id IS NOT NULL
-  `).all() as Array<{ parent_session_id: string; child_session_id: string }>) {
+  `).all() as Array<{ parent_session_id: string; child_session_id: string; agent_role: string | null; slug: string | null }>) {
     if (!parentByChild.has(row.child_session_id)) {
       parentByChild.set(row.child_session_id, row.parent_session_id);
+      const role = row.agent_role ?? row.slug;
+      if (role) roleByChild.set(row.child_session_id, role);
     }
   }
 
@@ -174,6 +183,9 @@ export function buildConversationTree(db: Database): ConversationTree {
         decisions: parseJsonArray(row.decisions),
         role: parentSessionId ? 'subagent' : 'main',
         ...(parentSessionId ? { parentSessionId } : {}),
+        ...(parentSessionId && roleByChild.has(row.id)
+          ? { subagentRole: roleByChild.get(row.id) }
+          : {}),
         childCount: 0,
         descendantMessageCount: 0,
         ...(row.forked_from ? { forkedFrom: row.forked_from } : {}),

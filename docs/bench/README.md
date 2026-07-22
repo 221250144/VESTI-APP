@@ -9,6 +9,7 @@
 | `scripts/bench/corpus.mjs` | 合成会话语料生成器：按 capture-core schema 建 SQLite 库，埋针（K 根事实针 + 知识更新对 + 拒答诱饵），输出 ground truth JSON |
 | `scripts/bench/bench-a.mjs` | Bench A 召回准确率：对合成库跑 `recallSessions`（FTS5+RRF），自动判分，输出 JSON+Markdown |
 | `scripts/bench/bench-c.mjs` | Bench C digest 保真度：对真实库只读快照做关键事实清单核对（程序判分，无 LLM） |
+| `scripts/bench/bench-t.mjs` | Bench T 追踪树完整性：真实库快照上审计 subagent_links 解析率/树挂载率/泄漏数，再跑真实同步+解析路径出 after 指标 |
 | `scripts/bench/common.mjs` | 公共工具（路径、随机种子、报告写出） |
 | `scripts/bench/debug-scores.mjs` | 诊断：打印时序对/未中针的 top-K 分数、置信与账龄分布（排名调参用） |
 | `scripts/bench/tool-names.mjs` | 一次性：真实库工具名分布（校准文件写工具集） |
@@ -18,6 +19,7 @@
 | `docs/bench/baseline-2026-07-19.md` | 首份基线报告（人读） |
 | `docs/bench/after-trigram-2026-07-19.md` | trigram 迁移 + 时序衰减 + confidence 修复与 bench A 复跑对比报告（人读） |
 | `docs/bench/after-digest-2026-07-19.md` | digest 短板修复与 bench C 复跑报告（人读） |
+| `docs/bench/after-tree-2026-07-21.md` | 追踪树完整性修复（子代理归属三根因 + digest 误锁）与 bench T 报告（人读） |
 
 ## 如何复跑
 
@@ -36,6 +38,11 @@ $E scripts/bench/bench-a.mjs
 
 # 3) Bench C（首次自动从 ~/.vesti/db/vesti.db 做 backup 快照；之后复用）
 $E scripts/bench/bench-c.mjs
+
+# 4) Bench T（独立快照 vesti-tree-snapshot.db；默认 current→sync+resolve→after 两阶段）
+$E scripts/bench/bench-t.mjs
+$E scripts/bench/bench-t.mjs --skip-sync                     # 只审计现状
+$E scripts/bench/bench-t.mjs --full-resync --tag full-resync # 先清 sync_state 模拟全量重放收敛态
 ```
 
 PowerShell 等价写法：`$env:ELECTRON_RUN_AS_NODE=1; node_modules/electron/dist/electron.exe scripts/bench/corpus.mjs`。
@@ -86,4 +93,5 @@ my_type: {
 - **多键双命中率**：一条查询提到两根针，两个针会话都进 top5 才算。
 - **时序 top1 准确率**：更新对查询的 top1 是否为「新值」会话；`staleTop1Rate` 是 top1 为旧值会话的比例。
 - **拒答**：`abstainRate` = 返回 0 条的比例；`misleadingTop1Rate` = top1 snippet 含被查属性词（会把诱饵当答案呈上）的比例；`confidentHitRate` = top1 分数达到正常命中分数线（单针 top1 分数的 P10）的比例。
+- **Bench T**：`links resolved` = `subagent_links.child_session_id` 非空数/总数（未解析按转录文件在盘/丢失细分）；`convention subagents` = 按平台惯例（claude `subagents/agent-*`、kimi `--agent-*`、cursor `is_subagent` meta）识别的子代理会话数；`mounted` = `buildConversationTree` 实际挂为 children 的数量；`leaked as main` = 惯例子代理却出现在顶层 main 列表的数量（用户症状的直接度量）；`mount rate` = mounted / convention。
 - **Bench C 覆盖率**：程序从消息原文抽取的事实（决策句/文件路径/数值）在 digest 五字段（one_liner/key_topics/key_files/decisions/open_questions）拼接文本中出现的比例。「窗口内」指该事实所在消息会进入 digest 输入。bench-c 同时按两代口径计算：v1（基线复刻：最近 ≤60 条、尾部 6000 字符预算、不含 thinking）与 v2（现网新组装：预算 12000、最近 ≤500 条安全阀、首条用户消息小节、文件写回补 10 条、>10k 消息头尾截断 4000、普通消息整吞；按 kept-range 判定事实是否熬过截断）。退化行同时按「四字段全空」与精确规则（叠加 one_liner 复述首条用户消息）计数。

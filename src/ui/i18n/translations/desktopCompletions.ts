@@ -75,7 +75,7 @@ export const jaDesktopCompletion = {
     },
     aiti: {
       axisSignalFaint: "弱いシグナル", imageryFaint: "輪郭はまだ淡く、一部の軸はシグナルを集めている途中です。軽い参考として読んでください。",
-      personaNoteLabel: "最近の注記", evidenceBecause: "あなたらしさが表れている理由…", evidenceConversation: "会話 #{id}", exportCard: "イメージカードを出力",
+      personaNoteLabel: "心の欄外注", evidenceBecause: "あなたらしさが表れている理由…", evidenceConversation: "会話 #{id}", exportCard: "イメージカードを出力",
       mindMapTitle: "思考マップ", repoQrCaption: "オープンソース — スキャンしてリポジトリへ", coverageSummary: "{y} 件中 {x} 件を要約済み（構造化 {z} 件）", coverageNeedMore: "イメージには構造化要約が 5 件必要です。あと {n} 件です。", coverageEmpty: "会話がまだありません。先に AI セッションを同期すると要約を生成できます。", generateSummaries: "要約を生成", generatingSummaries: "生成中 {done}/{total}…", cancelGeneration: "停止", summariesResult: "完了：{done} 件生成、{failed} 件失敗。", llmMissing: "モデルが未設定です。先に設定で LLM を構成してから要約を生成してください。", allSummarized: "すべての会話に構造化要約があります。",
     },
     explore: {
@@ -162,7 +162,7 @@ export const koDesktopCompletion = {
     },
     aiti: {
       axisSignalFaint: "희미한 신호", imageryFaint: "윤곽이 아직 희미합니다. 일부 축은 신호를 모으는 중이므로 가볍게 참고하세요.",
-      personaNoteLabel: "최근 각주", evidenceBecause: "이 모습이 당신다운 이유…", evidenceConversation: "대화 #{id}", exportCard: "이미지 카드 내보내기",
+      personaNoteLabel: "마음의 각주", evidenceBecause: "이 모습이 당신다운 이유…", evidenceConversation: "대화 #{id}", exportCard: "이미지 카드 내보내기",
       mindMapTitle: "사고 지도", repoQrCaption: "오픈 소스 — 스캔하여 저장소로 이동", coverageSummary: "대화 {y}개 중 {x}개 요약됨(구조화 {z}개)", coverageNeedMore: "이미지를 만들려면 구조화된 요약이 5개 필요합니다. {n}개 남았습니다.", coverageEmpty: "아직 대화가 없습니다. 먼저 AI 세션을 동기화하면 요약을 생성할 수 있습니다.", generateSummaries: "요약 생성", generatingSummaries: "생성 중 {done}/{total}…", cancelGeneration: "중지", summariesResult: "완료: {done}개 생성, {failed}개 실패.", llmMissing: "모델이 구성되지 않았습니다. 먼저 설정에서 LLM을 구성한 뒤 요약을 생성하세요.", allSummarized: "모든 대화에 구조화된 요약이 있습니다.",
     },
     explore: {

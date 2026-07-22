@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { openVestiDb, VestiDbNotFoundError, type VestiDatabase } from '../src/db.js';
 import { vestiGetTurns, vestiSearch, vestiTimeline } from '../src/tools.js';
-import { createFixtureDb, SESSION_A, SESSION_B, type Fixture } from './helpers/fixture.js';
+import { createFixtureDb, SESSION_A, SESSION_B, SESSION_SUB, type Fixture } from './helpers/fixture.js';
 
 let fixture: Fixture;
 let db: VestiDatabase;
@@ -84,6 +84,19 @@ describe('vesti_timeline', () => {
   it('accepts the platform session_id as an alias', () => {
     const result = vestiTimeline(db, { session_id: 'platform-b-1' });
     expect(result.session.session_id).toBe(SESSION_B);
+  });
+
+  it('lists subagent lines with role and one-liner for drill-down', () => {
+    const result = vestiTimeline(db, { session_id: SESSION_A });
+    expect(result.subagents).toEqual([{
+      session_id: SESSION_SUB,
+      role: 'generalPurpose',
+      title: 'Collect trigram tokenizer prior art',
+      message_count: 2,
+      one_liner: 'Surveyed trigram tokenizer prior art for the FTS rebuild',
+    }]);
+    // Sessions without subagents omit the field entirely.
+    expect(vestiTimeline(db, { session_id: SESSION_B }).subagents).toBeUndefined();
   });
 
   it('throws for an unknown session', () => {

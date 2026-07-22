@@ -19,7 +19,7 @@
 | 平台 | 会话发现 | 解析 | WSL | vault 备份 |
 |---|---|---|---|---|
 | Codex | `~/.codex/sessions/**` 与 `~/.codex/archived_sessions/**` 的 `*.jsonl` | JSONL（response_item / event_msg / turn_context / compacted，兼容旧 Exec/Patch 事件） | ✅ | ✅ |
-| Cursor | `%APPDATA%/Cursor/User/globalStorage/state.vscdb`，否则 `workspaceStorage/*/state.vscdb`（macOS/Linux 有对应路径） | 只读 SQLite：`composerHeaders` → `composerData` → `bubbleId`，单库多会话批量解析 | ❌ | ❌（`shouldBackupSource=false`，不复制整个 Cursor 库） |
+| Cursor | `%APPDATA%/Cursor/User/globalStorage/state.vscdb`（否则 `workspaceStorage/*/state.vscdb`）**加** `~/.cursor/projects/*/agent-transcripts/*/*.jsonl`（Cursor 2.x agent 会话不再写 vscdb） | 只读 SQLite：`composerHeaders` → `composerData` → `bubbleId`；JSONL 转录 + `subagents/` 目录谱系 + chats 侧 meta 补全；同一会话两库并存时 vscdb 优先。`parserVersion=2` | ❌ | ❌（`shouldBackupSource=false`，不复制整个 Cursor 库） |
 | Kimi Code | `~/.kimi-code/sessions/<workDirKey>/<sessionId>/agents/<agentId>/wire.jsonl`（含 `agents/main` 主线与子代理线；兼容旧名 `~/.kimi`，优先 `$KIMI_CODE_HOME`） | wire protocol 1.4 扁平事件（context.append_message / append_loop_event / usage.record 等），兼容旧 envelope 协议（TurnBegin / ToolCall…） | ✅ | ✅ |
 | Claude Code | `~/.claude/projects/**/*.jsonl`（含 `**/subagents/**`，子代理作为独立会话入库后由 `resolveSubagentLinks` 回链） | JSONL；另读 `~/.claude/usage-data/session-meta/<id>.json` 补元数据 | ✅ | ✅ |
 | aider | 单文件 `~/.aider.chat.history.md` | Markdown：`# aider chat started at` 切会话，`#### USER/ASSISTANT` 切消息 | ✅ | ✅ |
@@ -40,8 +40,8 @@ SQLite（better-sqlite3，WAL + 外键）。核心表：
 | `turns` | 会话内轮次：用户输入 + AI 应答 + 轮级 token/耗时 |
 | `messages` | 消息级全量：role、文本/思考/工具名/工具输入输出、`cwd`、五类 token、`parent_id`/`depth`/`is_sidechain`（子代理链）、时间戳。外键 CASCADE |
 | `tool_executions` | 工具调用对（use + result）：工具名、分类、outcome、输入/输出摘要、exit_code、耗时 |
-| `subagent_links` / `context_compactions` / `system_events` | 子代理父子链、上下文压缩事件、系统事件；同步末尾会用 `sync_state.conversation_id` 反查补全子代理链 |
-| `sync_state` | 增量游标：`file_path` 主键，`last_position`（文件大小）、`last_modified`（mtime）、所属 session/conversation |
+| `subagent_links` / `context_compactions` / `system_events` | 子代理父子链（含 `agent_role` 角色标签）、上下文压缩事件、系统事件；child 侧解析见下节「子代理链接解析」 |
+| `sync_state` | 增量游标：`file_path` 主键，`last_position`（文件大小）、`last_modified`（mtime）、所属 session/conversation、`parser_version`（v7：写入时的适配器解析器版本） |
 | `session_digests` | 每会话 digest：`one_liner`、`key_topics`、`key_files`、`decisions`、`open_questions`、`embedding`（BLOB）、`embedding_status`、`digest_version`、`message_count` |
 | `project_registry` | 项目注册表：`project_key` 主键、`kind`、`label`、`path_or_domain`、`first_seen`/`last_seen` |
 
@@ -51,9 +51,25 @@ SQLite（better-sqlite3，WAL + 外键）。核心表：
 
 ## 增量同步与 vault
 
-**增量判定是文件级 skip，不是字节级续解析**：`SyncEngine.syncFile` 比对 `sync_state`，`lastPosition === 文件大小 && lastModified >= mtimeMs` 则整文件跳过；否则全量重解析 + 幂等 upsert。解析器升级或 bug 修复后清 `sync_state` 即可强制全量重放。（claude-code parser 留有字节偏移增量接口 `parseIncremental`，当前无调用方。）
+**增量判定是文件级 skip，不是字节级续解析**：`SyncEngine.syncFile` 比对 `sync_state`，`lastPosition === 文件大小 && lastModified >= mtimeMs && parser_version 不低于适配器当前版本` 则整文件跳过；否则全量重解析 + 幂等 upsert。解析器升级只需 bump 适配器的 `parserVersion`（如 Cursor v2：子代理谱系 + 用量估算），旧文件自动重放一次——2026-07-22 的教训：没有版本项时，「文件没变就跳过」把升级前的解析结果永久冻结（Cursor 全局库 13 个子代理修完 parser 仍不建链）。（claude-code parser 留有字节偏移增量接口 `parseIncremental`，当前无调用方。）
 
 **vault**：`<数据目录>/vault/<platform>/raw/[wsl-<distro>/]<sessionId>.jsonl.gz`，gzip level 9 流式复制；目标 mtime 不旧于源则跳过；备份失败只记日志，不阻断入库。`sync_state` 存 SQLite 而不是 vault 目录。
+
+## 子代理链接解析（resolveSubagentLinks）
+
+链接行在**父会话**同步时写入（child 侧为 NULL），child 只有在子代理转录自身进了 `sync_state` 之后才能反查补全。因此 `SyncEngine.resolveSubagentLinks()` 是公开方法，**每条同步路径末尾都必须调用**（全量扫描、文件监听、WSL 轮询——App 侧统一经 `captureService.resolveSubagentLinksSafe()`，失败不阻断同步）。两遍解析：
+
+1. 用 `sync_state.conversation_id` 反查未解析链接（file_path 容忍正反斜杠差异）；
+2. 仍未解析且文件在盘上的（典型：监听排除了 `**/subagents/**`，子代理转录从未被同步过），**按需 syncFile 补同步**后重试一遍。
+
+Cursor 是例外：父子 composer 同库同批解析，`attachLineage` 在解析期就写好 `childSessionId`（`cursor:<childComposerId>`），不经过文件路径反查；headless 子代理（empty-window 无工作区）继承父 `projectPath`，角色（`subagentTypeName`）落 `agent_role`。
+
+无 LLM、纯确定性；空闲时代价是一条 SELECT。审计与修复前后对比见 Bench T（`docs/bench/out/bench-t-*.md`）：修复前真实库 125/125 条链接未解析、全部子代理泄漏为顶层对话；修复后 138/138 解析、挂载率 100%。
+
+**下游折叠合约（2026-07-21）**：解析出的链接经三个面向下游生效——
+1. `exportConversations` 给子代理会话盖 `_subagent_of` / `_agent_role` 印章（一次 `getSubagentLineageByChild()` 查询），渲染端 Dexie 镜像随行携带，`listConversations` 默认排除（library 以 `includeSubagents: true` 拿全量自行折叠）；
+2. `getStats` / `getSessions`：对话计数只数 main（`id NOT IN (subagent children)` 或条件聚合），消息/token 总量保留全部；
+3. 复用面：`agentService.buildTranscript` 尾部追加 `[子代理工作摘要]` 块，`relayContext` 会话头带有界子代理 rollup，`vesti_timeline` 返回 `subagents` 列表——折叠不等于丢失，委派工作以 digest 简报形态保持可见。详见 `docs/memory-system/design.md`「下游消费与复用」。
 
 ## WSL 多 root 抽象
 
@@ -80,6 +96,7 @@ SQLite（better-sqlite3，WAL + 外键）。核心表：
   1. 无 API key / LLM 失败 / 输出非法（重试 2 次）→ 兜底行：首条用户消息前 100 字符作 `one_liner`，`embedding_status='skipped'`，不再尝试 embedding；
   2. embedding 单独失败 → `embedding_status='skipped'`，LLM 字段正常落库；
   3. 存储类意外异常 → 重试 2 次后写 `embedding_status='failed'` 行，仅当会话再增长才重试。
+- 退化语义（v6 修订）：`'degraded'` **只**表示「LLM 解析成功但内容仍是用户 prompt 的复读」（`isDegradedDigest` 判定），是内容级终态；LLM 不可达/输出不可解析一律留 `'skipped'`（可恢复态），LLM 恢复健康后下一轮扫描自动重生成。防风暴：每会话每次 App 运行只做一次退化重试（`degradedAttempted` 集合）。迁移 v6 把旧语义下误锁为 `'degraded'` 的存量行（实测 160/161）批量改回 `'skipped'`。
 - 结论：digest 任一环节失败都不阻塞采集与会话浏览。
 
 ## 检索：FTS5 + RRF 向量融合
@@ -107,12 +124,12 @@ RRF 融合后再做两项后处理（bench 依据见 `docs/bench/after-trigram-2
 
 ## 迁移机制
 
-见 [architecture.md](architecture.md)「数据库迁移机制」。约定摘要：`MIGRATIONS` 只增不改、`up` 幂等、`schema_migrations` 表记录、迁移与记录同事务；迁移可返回 note 字符串存入 `schema_migrations.note`（如探测失败跳过时记录原因）。当前 v1–v5（`session_type`、`host`、`session_digests` + `project_registry`、fork lineage + 分层项目记忆、FTS5 trigram 重建）。
+见 [architecture.md](architecture.md)「数据库迁移机制」。约定摘要：`MIGRATIONS` 只增不改、`up` 幂等、`schema_migrations` 表记录、迁移与记录同事务；迁移可返回 note 字符串存入 `schema_migrations.note`（如探测失败跳过时记录原因）。当前 v1–v7（`session_type`、`host`、`session_digests` + `project_registry`、fork lineage + 分层项目记忆、FTS5 trigram 重建、degraded digest 重分类为 skipped、`sync_state.parser_version`）。
 
 ## 对外召回：vesti-mcp（MCP server）
 
 `packages/vesti-mcp` 把本库的召回能力包装成 stdio MCP server，供 kimi-code / Claude Code / codex 等 agent 注册后自助检索历史会话。要点：
 
 - 只读打开 `~/.vesti/db/vesti.db`（`VESTI_DB_PATH` 可覆盖）；不依赖 capture-core 与 better-sqlite3，改用 Node 内置 `node:sqlite`，规避桌面端 Electron ABI 原生模块的耦合。
-- 三个工具对应三层渐进披露：`vesti_search`（会话级索引条目，复刻 `SessionRecall` 的 FTS5 + RRF 纯 FTS 路径——无 embedding 服务，向量信号自然缺席）→ `vesti_timeline`（turn 大纲）→ `vesti_get_turns`（按 `max_chars` 截断的完整内容）。
+- 三个工具对应三层渐进披露：`vesti_search`（会话级索引条目，复刻 `SessionRecall` 的 FTS5 + RRF 纯 FTS 路径——无 embedding 服务，向量信号自然缺席）→ `vesti_timeline`（turn 大纲；会话有子代理时附 `subagents` 列表——子会话 id、角色、one_liner，可用子会话 id 再调 timeline 下钻）→ `vesti_get_turns`（按 `max_chars` 截断的完整内容）。
 - 注册方式与给 agent 的引导文本见 [packages/vesti-mcp/README.md](../packages/vesti-mcp/README.md)。

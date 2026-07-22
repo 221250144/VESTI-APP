@@ -396,6 +396,9 @@ export type ConversationFilters = {
   platform?: Platform;
   search?: string;
   dateRange?: { start: number; end: number };
+  /** A1: folded subagent runs are excluded by default; the library opts in
+   * (it folds them under the parent card itself). */
+  includeSubagents?: boolean;
 };
 
 export interface ExploreSession {
@@ -1050,6 +1053,8 @@ export interface ConversationTreeSession {
   decisions: string[];
   // A1 subagent folding (optional: absent on renderer-built browser nodes)
   role?: "main" | "subagent";
+  /** Display role of the subagent (Cursor subagentTypeName / Claude slug). */
+  subagentRole?: string;
   parentSessionId?: string;
   orphan?: boolean;
   childCount?: number;

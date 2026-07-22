@@ -1574,7 +1574,7 @@ export const zhTranslations = {
       axisAffectRightStrength: "你对所探索的事有着强烈的情感投入。",
       axisSignalFaint: "信号尚浅",
       imageryFaint: "意象轮廓尚浅 —— 部分轴的信号还在积累，判读请姑且一看。",
-      personaNoteLabel: "近期注脚",
+      personaNoteLabel: "心迹眉批",
       mindMapTitle: "思维图",
       repoQrCaption: "开源项目 · 扫码访问仓库",
       evidenceBecause: "这很像你，因为……",

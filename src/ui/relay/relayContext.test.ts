@@ -129,6 +129,45 @@ describe("buildRelayTranscript", () => {
     expect(RELAY_CONTEXT_BUDGET_CHARS).toBeLessThanOrEqual(30_000);
   });
 
+  it("rolls up subagent briefs under the head, bounded", () => {
+    const transcript = buildRelayTranscript([
+      conversation({
+        digest: { oneLiner: "主任务" },
+        subagents: [
+          { role: "bugbot", title: "审查渲染层", oneLiner: "发现 2 个空指针问题" },
+          { role: null, title: "并行探索缓存方案", oneLiner: null },
+          { role: "tester", title: "跑回归", oneLiner: "全部通过" },
+          { role: "d", title: "四", oneLiner: null },
+          { role: "e", title: "五（超出上限，应折叠计数）", oneLiner: null },
+        ],
+      }),
+    ]);
+    expect(transcript).toContain("子代理（5）：");
+    expect(transcript).toContain("[bugbot] 审查渲染层 — 发现 2 个空指针问题");
+    expect(transcript).toContain("并行探索缓存方案");
+    expect(transcript).toContain("…另有 1 个子代理运行");
+    expect(transcript).not.toContain("五（超出上限");
+  });
+
+  it("subagent rollup also rides the summary/snippet fallbacks", () => {
+    const transcript = buildRelayTranscript([
+      conversation({
+        summary: "总结文本",
+        subagents: [{ role: "bugbot", title: "审查", oneLiner: "无阻塞问题" }],
+      }),
+    ]);
+    expect(transcript).toContain("摘要：总结文本");
+    expect(transcript).toContain("[bugbot] 审查 — 无阻塞问题");
+  });
+
+  it("omits the subagent block when the list is empty or content-free", () => {
+    const transcript = buildRelayTranscript([
+      conversation({ digest: { oneLiner: "x" }, subagents: [] }),
+      conversation({ digest: { oneLiner: "y" } }),
+    ]);
+    expect(transcript).not.toContain("子代理（");
+  });
+
   it("renders the git line when the capture carries git fields", () => {
     const transcript = buildRelayTranscript([
       conversation({

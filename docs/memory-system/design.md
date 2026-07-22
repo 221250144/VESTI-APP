@@ -1,6 +1,6 @@
 # 分级说明系统设计（L0–L3）
 
-更新时间：2026-07-19
+更新时间：2026-07-21（子代理归属修复 + timeline 子代理线 + degraded 语义修订）
 
 适用范围：记忆系统 v2 的分层设计与取舍说明，实现位于 `packages/capture-core/src/{state,search,tree,storage}/`、`src/main/{digestService,projectMemoryService}.ts` 与 `packages/vesti-mcp`。本文写「是什么/为什么」，字段级细节以代码为准；评测依据见 [bench.md](bench.md)。
 
@@ -76,12 +76,14 @@ MCP 四工具映射（`packages/vesti-mcp`，stdio server，`node:sqlite` 只读
 |---|---|---|---|
 | `vesti_project_brief(project)` | L0 + L2 | 一卡 + 一文 | 项目状态卡与维护版简报；项目名模糊匹配（精确 key > 精确 label > 子串） |
 | `vesti_search(query, topK=8)` | L1 检索（snippet 来自 L3） | ~100 tokens/条 | 会话索引条目（标题/平台/项目/时间/one_liner/key_topics/snippet/分数），命中即 bump `access_count` |
-| `vesti_timeline(session_id, around_turn?)` | L3 定位 | ~30 tokens/turn | turn 大纲：序号、时间、一句话用户意图、工具数、token |
+| `vesti_timeline(session_id, around_turn?)` | L3 定位 | ~30 tokens/turn | turn 大纲：序号、时间、一句话用户意图、工具数、token；会话有子代理时附 `subagents` 列表（子会话 id / 角色 / one_liner），子会话 id 可再调 timeline 下钻——树状渐进披露的 MCP 面 |
 | `vesti_get_turns(session_id, turn_ids\|range, max_chars=8000)` | L3 原文 | `max_chars` 封顶 | 所选 turn 的完整消息与工具摘要，超预算截断并标 `truncated` |
 
 约定（README 中给 agent 的引导文本同样写明）：先 search 再 timeline 最后 get_turns，不允许不经定位直接取原文。
 
 ## 去重与谱系
+
+**子代理归属（A1）的解析链**（2026-07-21 修复）：链接行在父会话同步时写入，child 侧靠 `SyncEngine.resolveSubagentLinks()` 补全——该方法此前只在 `syncAll` 内部调用而 App 从不走 `syncAll`，导致真实库 125/125 条链接全部未解析、所有子代理泄漏为顶层对话（Bench T current 行）。修复后它是公开方法，挂在 App 全部三条同步路径（全量/监听/WSL 轮询）末尾，且对「盘上存在但从未同步」的子代理转录按需补同步；Cursor 父子同库同批解析，`childSessionId` 解析期直接写入，另带 `agent_role` 角色标签（树节点显示 `subagentRole`）。修复后挂载率 100%（138/138），见 [../bench/out/bench-t-2026-07-21-full-resync.md](../bench/out/bench-t-2026-07-21-full-resync.md)。
 
 两条谱系来源（`tree/forks.ts`）：
 
@@ -96,6 +98,22 @@ MCP 四工具映射（`packages/vesti-mcp`，stdio server，`node:sqlite` 只读
 2. **召回去重**：FTS 命中按去重键过滤，同一条消息的 fork 副本只保留排名最早的一份，不重复加会话、不覆盖 snippet。
 3. **召回归属**（A1）：命中子代理会话时分数与 snippet 折叠进父会话条目（`hitSource='subagent'`），父会话不在库中才单列子代理。
 
+## 下游消费与复用（A1 折叠合约，2026-07-21）
+
+折叠只在树里做是不够的：仪表盘统计、Dexie 镜像列表、学习/AITI、自动分类、每日纪要等下游都各自读会话，子代理会泄漏为「未分类的顶层对话」。为此确立一条**折叠合约**，让所有下游用同一信号，而不是各自遍历树：
+
+- **导出印章**：`exportConversations` 用一次 `subagent_links` 查询给每条导出会话盖 `_subagent_of`（父 work-session id）与 `_agent_role`。渲染端 Dexie 镜像随行携带；`captureSync` 指纹混入该字段，保证「链接晚于转录解析」时印章也能传播。
+- **计数 vs 总量**：`getStats` 中对话**计数**（总数/平台/模型/每日/项目 Top）只数 main 会话；消息与 token **总量**保留全部（子代理的消耗真实发生）。`getSessions`（最近对话）过滤子代理。
+- **渲染端默认排除**：`listConversations` 默认过滤 `_subagent_of`（学习模块、explore 起始牌、范围选择、周报、每日纪要、摘要覆盖率、自动分类候选全部随之收敛）；只有 library 以 `includeSubagents: true` 拿全量——它自己渲染折叠条并需要能打开子会话。`isSubagentConversation` 双信号：印章优先，树 lookup 兜底（覆盖印章出现前同步的旧记录）。
+
+**复用面（渐进披露的下游延伸）**：折叠之后，被委派的工作不能从复用面上消失——
+
+- **agent 转录**（`agentService.buildTranscript`）：单会话转录尾部追加 `[子代理工作摘要]` 块（角色/标题/消息数/digest 一句话，上限 12 行，绝不内联子转录），explore 问答与摘要生成因此能引用委派工作。
+- **交接包/沉淀**（`relayContext.buildConversationHead`）：会话头新增有界子代理 rollup（4 行 + 折叠计数），数据来自树缓存中的子节点（标题 + one_liner），文件锚点继续经树折叠归属到父会话。
+- **MCP**：`vesti_timeline` 的 `subagents` 列表（见上表）是同一披露层的 agent 面。
+
+这与 OTel GenAI 的 span 树读法一致：父 span 汇总视图默认折叠子 span，但任何消费端都能沿 `parent_span_id`（此处 `_subagent_of` / `subagent_links`）按需下钻。
+
 ## 中文检索
 
 **问题**（bench 基线短板 1，已实测）：FTS5 默认 unicode61 把整段 CJK 连写视作一个 token，查询与原文只要写法不逐字一致就**零召回**——连写针 Recall 33.3% vs 分写针 100%，而真实库 81/106 是中文为主的会话。
@@ -108,7 +126,7 @@ bench C 在真实库快照上测得（详见 [bench.md](bench.md)）：
 
 - **数值保真**：数值类事实 digest 覆盖率仅 6.4%（决策句 31.1%、文件 26.7%），digest 当时只能回答主题级问题。已落地：digest prompt 增加数值保真硬规则（版本号/配置值/端口/日期/数量/金额原样保留，含反例），`digest_version` 升至 2 使存量自然重生成；窗口分析同时证明数值短板的瓶颈在 prompt 压缩而非窗口可见性（80% 数值事实本就在窗口内）。
 - **窗口适配**：digest 输入原只看最近 ≤60 条、尾部 6000 字符，48% 事实落在窗口外；单条超大消息（实测最大 59246 字符）可吃光整个预算。已落地：`digestTranscript.ts` 自适应窗口（首条用户消息 400 字符 + 新者优先填充 + 阀外最近 10 条文件写操作回补 + >10k 超大消息头尾截断，预算 12000），真实快照静态重算事实可见性 51.8%→57.1%（最差广度 44 消息会话 1→39 条）。
-- **退化检测**：7/106 digest 四字段全空（LLM 失败回退，one_liner 是首条用户消息截断），另有 2 条滞后于会话增长。已落地：`isDegradedDigest` 运行时判定（四字段全空 + one_liner 截断原文前缀/bigram Dice>0.8），LLM 已配置时重试一次、仍退化写 `embedding_status='degraded'` 不再自动重试，`getDigestStats()` 透出统计。
+- **退化检测**：7/106 digest 四字段全空（LLM 失败回退，one_liner 是首条用户消息截断），另有 2 条滞后于会话增长。已落地：`isDegradedDigest` 运行时判定（四字段全空 + one_liner 截断原文前缀/bigram Dice>0.8），LLM 已配置时重试一次。**语义修订（迁移 v6，2026-07-21）**：初版把「重试的 LLM 调用因任何原因失败」都写 `'degraded'`，而退化重扫只看 `'skipped'`——LLM 不可达期间跑一轮就把行永久锁死（真实库 160/161 被误锁）。现语义：`'degraded'` 仅指「LLM 解析成功但内容仍是 prompt 复读」（内容级终态）；传输/解析失败留 `'skipped'`（可恢复），配合每会话每次运行一次的重试上限防风暴；迁移 v6 把存量误锁行批量改回 `'skipped'`。
 
 ## 可降级原则
 

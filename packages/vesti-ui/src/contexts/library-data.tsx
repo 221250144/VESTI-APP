@@ -90,7 +90,9 @@ export function LibraryDataProvider({
       const [topicData, conversationData, digestData, treeData, projectStates] =
         await Promise.all([
           storage.getTopics(),
-          storage.getConversations(),
+          // includeSubagents: the library folds child runs under the parent
+          // card itself (subagent strip) and needs their records to open them.
+          storage.getConversations({ includeSubagents: true }),
           storage.getConversationDigests?.() ?? Promise.resolve([]),
           storage.getConversationTree?.() ?? Promise.resolve(null),
           storage.getProjectStates?.() ?? Promise.resolve([]),

@@ -174,8 +174,24 @@ export class CaptureService {
       }
     }
     if (changed) {
+      await this.resolveSubagentLinksSafe();
       this.syncCompleted?.();
       this.notify?.();
+    }
+  }
+
+  /**
+   * Subagent link resolution (A1): link rows are written when the parent
+   * session syncs, but child ids only resolve against sync_state — so every
+   * sync path (full scan, file watch, WSL poll) must run this or subagents
+   * degrade to standalone conversations in the tree. Cheap when there is
+   * nothing to do (single SELECT over unresolved links).
+   */
+  private async resolveSubagentLinksSafe(): Promise<number> {
+    try {
+      return await this.syncEngine.resolveSubagentLinks();
+    } catch {
+      return 0; // resolution must never break a sync path
     }
   }
 
@@ -221,7 +237,24 @@ export class CaptureService {
   }
 
   getSessions(limit = 200): SessionSummary[] {
-    return this.db.listWorkSessions({ sessionType: 'conversation', limit }) as SessionSummary[];
+    // A1: folded subagent runs never surface as standalone "recent
+    // conversations" — they live under their parent in the tree view.
+    const subagentIds = this.db.getSubagentChildIds();
+    return (this.db.listWorkSessions({ sessionType: 'conversation', limit: limit + subagentIds.size }) as SessionSummary[])
+      .filter(session => !subagentIds.has(session.id))
+      .slice(0, limit);
+  }
+
+  /** A1 progressive disclosure: compact briefs of a session's subagent runs
+   * (role, title, one-liner) for downstream context assembly. */
+  getSubagentBriefs(sessionId: string): Array<{
+    childSessionId: string;
+    agentRole: string | null;
+    title: string;
+    messageCount: number;
+    oneLiner: string | null;
+  }> {
+    return this.db.getSubagentBriefs(sessionId);
   }
 
   getSession(id: string): SessionDetail | null {
@@ -240,10 +273,19 @@ export class CaptureService {
    */
   exportConversations(): ConversationExportBundle[] {
     const sessions = this.db.listWorkSessions({ sessionType: 'conversation', limit: 10000 });
+    // A1: stamp subagent lineage on the export so renderer-side consumers
+    // (library list, learn/explore modules, classification, coverage) can
+    // fold child runs under their parent without loading the tree.
+    const lineage = this.db.getSubagentLineageByChild();
     return sessions.map(session => {
       const messages = this.db.getSessionMessages(session.id);
       const firstUserMessage = messages.find(message => message.source === 'user_input');
       const conversation = workSessionToVestiConversation(session, firstUserMessage?.contentText?.slice(0, 200));
+      const link = lineage.get(session.id);
+      if (link) {
+        conversation._subagent_of = link.parentSessionId;
+        if (link.agentRole) conversation._agent_role = link.agentRole;
+      }
       return {
         conversation,
         messages: sessionMessagesToVestiMessages(messages, conversation.id),
@@ -377,6 +419,8 @@ export class CaptureService {
         // while Cursor/Claude scans may continue for several more seconds.
         if (result.sessionsProcessed > 0) this.notify?.();
       }
+      const linksResolved = await this.resolveSubagentLinksSafe();
+      if (linksResolved > 0) this.notify?.();
       const summary = this.summarize(results);
       if (summary.sessions > 0 || summary.messages > 0) this.syncCompleted?.();
       return summary;
@@ -404,7 +448,10 @@ export class CaptureService {
         .catch(() => undefined)
         .then(async () => {
           const stored = await this.syncEngine.syncFile(platform, filePath);
-          if (stored) this.syncCompleted?.();
+          if (stored) {
+            await this.resolveSubagentLinksSafe();
+            this.syncCompleted?.();
+          }
           this.notify?.();
         })
         .finally(() => {

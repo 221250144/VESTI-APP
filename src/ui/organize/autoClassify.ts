@@ -53,13 +53,16 @@ export interface ClassifyCandidateRecord {
   is_trash?: boolean;
   auto_classified?: number;
   classify_suggestion?: ClassifySuggestionPayload | null;
+  /** A1: set on folded subagent runs; they classify with their parent. */
+  _subagent_of?: string;
 }
 
 /**
  * Conversations eligible for auto-classification: not archived/trashed and
  * either unclassified or previously auto-classified (re-run). Manual
  * assignments and conversations already holding a pending suggestion are
- * never touched.
+ * never touched. A1: folded subagent runs are skipped — they belong to
+ * their parent conversation's topic, not the tree.
  */
 export function selectClassifyCandidates<T extends ClassifyCandidateRecord>(
   records: T[]
@@ -69,6 +72,7 @@ export function selectClassifyCandidates<T extends ClassifyCandidateRecord>(
       typeof record.id === "number" &&
       !record.is_archived &&
       !record.is_trash &&
+      !record._subagent_of &&
       !record.classify_suggestion &&
       (record.topic_id == null || record.auto_classified === 1)
   );

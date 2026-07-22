@@ -364,6 +364,15 @@ describe("A1 subagent lookup helpers", () => {
     expect(isSubagentConversation(conversation(103), SUB_LOOKUP)).toBe(false);
   });
 
+  it("isSubagentConversation trusts the _subagent_of export stamp without a tree hit", () => {
+    const stamped = conversation(104, {
+      _source: "local_terminal",
+      _cli_id: "cursor:child-not-in-tree",
+      _subagent_of: "cursor:parent",
+    });
+    expect(isSubagentConversation(stamped, SUB_LOOKUP)).toBe(true);
+  });
+
   it("collectSubagentTopics dedupes and caps the merged topics", () => {
     const children = SUB_LOOKUP.subagentsByParentId.get("claude-code:main");
     expect(collectSubagentTopics(children, 5)).toEqual(["检索", "归属"]);

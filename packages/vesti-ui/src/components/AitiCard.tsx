@@ -390,11 +390,11 @@ export function AitiCard({
                   src={emblemUrl}
                   alt=""
                   onError={() => setEmblemBroken(true)}
-                  className="h-20 w-20 shrink-0 rounded-2xl border border-border-subtle object-cover"
+                  className="h-20 w-20 shrink-0 rounded-2xl object-cover"
                 />
               ) : (
                 <div
-                  className="flex h-20 w-20 shrink-0 items-center justify-center rounded-full border border-border-subtle bg-accent-primary-light"
+                  className="flex h-20 w-20 shrink-0 items-center justify-center rounded-full bg-accent-primary-light"
                   aria-hidden="true"
                 >
                   <span className="font-vesti-serif text-[28px] leading-none text-accent-primary">

@@ -109,7 +109,7 @@ describe('schema migrations', () => {
     await manager.close();
 
     const migrations = appliedMigrations(dbPath);
-    expect(migrations.map(m => m.version)).toEqual([1, 2, 3, 4, 5]);
+    expect(migrations.map(m => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     expect(migrations[0].name).toBe('add_work_sessions_session_type');
     expect(migrations[1].name).toBe('add_work_sessions_host');
     expect(migrations[2].name).toBe('add_session_digests_and_project_registry');
@@ -197,7 +197,7 @@ describe('schema migrations', () => {
 
     expect(columnNames(dbPath, 'work_sessions')).toContain('session_type');
     expect(columnNames(dbPath, 'work_sessions')).toContain('host');
-    expect(appliedMigrations(dbPath).map(m => m.version)).toEqual([1, 2, 3, 4, 5]);
+    expect(appliedMigrations(dbPath).map(m => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     // Migration 3 creates the index tables on legacy databases too.
     expect(tableNames(dbPath)).toEqual(expect.arrayContaining(['session_digests', 'project_registry']));
     // Legacy rows get a project registry entry from the normal upsert path.
@@ -222,7 +222,71 @@ describe('schema migrations', () => {
     await second.initialize();
     await second.close();
 
-    expect(appliedMigrations(dbPath)).toHaveLength(5);
+    expect(appliedMigrations(dbPath)).toHaveLength(7);
+  });
+
+  it('migration 6 reclassifies degraded digest rows as skipped', async () => {
+    const dir = await makeTempDir('vesti-migrations-v6-');
+    const dbPath = path.join(dir, 'vesti.db');
+
+    // Build a full schema, then simulate the pre-v6 state: rows locked out
+    // as 'degraded' by LLM transport failures.
+    const setup = new DatabaseManager(dbPath);
+    await setup.initialize();
+    await setup.close();
+    const seed = new Database(dbPath);
+    seed.exec("DELETE FROM schema_migrations WHERE version = 6");
+    seed.prepare(`
+      INSERT INTO session_digests (session_id, embedding_status, digest_version) VALUES
+        ('s-degraded', 'degraded', 2), ('s-ok', 'ok', 2), ('s-skipped', 'skipped', 2)
+    `).run();
+    seed.close();
+
+    const manager = new DatabaseManager(dbPath);
+    await manager.initialize();
+    await manager.close();
+
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      const statuses = db.prepare(
+        'SELECT session_id, embedding_status FROM session_digests ORDER BY session_id',
+      ).all() as Array<{ session_id: string; embedding_status: string }>;
+      expect(statuses).toEqual([
+        { session_id: 's-degraded', embedding_status: 'skipped' },
+        { session_id: 's-ok', embedding_status: 'ok' },
+        { session_id: 's-skipped', embedding_status: 'skipped' },
+      ]);
+      const note = db.prepare('SELECT note FROM schema_migrations WHERE version = 6').get() as { note: string | null };
+      expect(note.note).toContain('reclassified 1');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('migration 7 adds sync_state.parser_version to legacy databases', async () => {
+    const dir = await makeTempDir('vesti-migrations-v7-');
+    const dbPath = path.join(dir, 'vesti.db');
+
+    // Full schema, then simulate the pre-v7 state: no parser_version column.
+    const setup = new DatabaseManager(dbPath);
+    await setup.initialize();
+    await setup.close();
+    const seed = new Database(dbPath);
+    seed.exec('DELETE FROM schema_migrations WHERE version = 7');
+    seed.exec('ALTER TABLE sync_state DROP COLUMN parser_version');
+    seed.prepare(
+      'INSERT INTO sync_state (file_path, platform, last_position, last_modified) VALUES (?, ?, ?, ?)'
+    ).run('C:/x/state.vscdb', 'cursor', 100, 1_000);
+    seed.close();
+
+    const manager = new DatabaseManager(dbPath);
+    await manager.initialize();
+    // Existing rows read back as version 0, so any adapter with a declared
+    // parserVersion re-parses them on the next sync.
+    expect(manager.getSyncState('C:/x/state.vscdb')?.parserVersion).toBe(0);
+    manager.setSyncState('C:/x/state.vscdb', 'cursor', 100, 1_000, undefined, undefined, 2);
+    expect(manager.getSyncState('C:/x/state.vscdb')?.parserVersion).toBe(2);
+    await manager.close();
   });
 });
 
@@ -464,7 +528,7 @@ describe('migration 5: fts5 trigram tokenizer', () => {
     expect(ftsTableSql(dbPath, 'messages_fts').toLowerCase()).toContain('trigram');
     expect(ftsTableSql(dbPath, 'sessions_fts').toLowerCase()).toContain('trigram');
     const migrations = appliedMigrations(dbPath);
-    expect(migrations.map(m => m.version)).toEqual([1, 2, 3, 4, 5]);
+    expect(migrations.map(m => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     expect(migrations[4].name).toBe('fts5_trigram_tokenizer');
     // Applied (not skipped) → no note.
     expect(migrationNote(dbPath, 5)).toBeNull();
@@ -494,7 +558,7 @@ describe('migration 5: fts5 trigram tokenizer', () => {
     // Rebuilt with trigram; schema_migrations records v5 without a skip note.
     expect(ftsTableSql(dbPath, 'messages_fts').toLowerCase()).toContain('trigram');
     expect(ftsTableSql(dbPath, 'sessions_fts').toLowerCase()).toContain('trigram');
-    expect(appliedMigrations(dbPath).map(m => m.version)).toEqual([1, 2, 3, 4, 5]);
+    expect(appliedMigrations(dbPath).map(m => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     expect(migrationNote(dbPath, 5)).toBeNull();
 
     // Backfill完整性: every content row re-indexed (rebuild, not incremental).

@@ -91,6 +91,8 @@ async function gatherDailyInputs(): Promise<DailyInputs> {
   const conversations: DailyConversationInput[] = [];
   for (const record of records) {
     if (typeof record.id !== "number" || record.is_trash) continue;
+    // A1: folded subagent runs roll up into their parent conversation's day.
+    if ((record as { _subagent_of?: unknown })._subagent_of) continue;
     const isBrowser = record._source === "browser_extension";
     conversations.push({
       id: record.id,

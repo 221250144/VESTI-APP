@@ -586,6 +586,36 @@ async function gatherRelayContexts(
     sessionContexts.map((context) => [context.sessionId, context])
   );
 
+  // A1: subagent briefs per selected session, from the (cached) tree — the
+  // children carry title + digest one-liner, exactly the rollup the pure
+  // head assembler needs. Missing tree ⇒ no rollup, never an error.
+  const subagentsByCliId = new Map<
+    string,
+    Array<{ role?: string | null; title: string; oneLiner?: string | null }>
+  >();
+  if (cliIdByConversationId.size > 0) {
+    const tree = await loadConversationTree().catch(() => null);
+    const wanted = new Set(cliIdByConversationId.values());
+    const visit = (session: ConversationTreeSession): void => {
+      if (wanted.has(session.id) && (session.children?.length ?? 0) > 0) {
+        subagentsByCliId.set(
+          session.id,
+          (session.children ?? []).map((child) => ({
+            role: child.subagentRole ?? null,
+            title: child.title,
+            oneLiner: child.oneLiner,
+          }))
+        );
+      }
+      for (const child of session.children ?? []) visit(child);
+    };
+    for (const source of tree?.sources ?? []) {
+      for (const project of source.projects) {
+        for (const session of project.sessions) visit(session);
+      }
+    }
+  }
+
   const contexts: RelayContextConversation[] = [];
   for (const record of ordered) {
     const id = record.id as number;
@@ -623,6 +653,9 @@ async function gatherRelayContexts(
       messages: messages
         .slice(-RELAY_MESSAGE_FETCH_LIMIT)
         .map((message) => ({ role: message.role, content: message.content_text })),
+      ...(cliId && subagentsByCliId.has(cliId)
+        ? { subagents: subagentsByCliId.get(cliId) }
+        : {}),
     });
   }
   return contexts;
@@ -1597,13 +1630,18 @@ export const desktopStorage: StorageApi = {
       getAllSummaries(),
     ]);
     return computeSummaryCoverage(
-      (records as Array<ConversationRecord & LocalTerminalFields>).map((record) => ({
-        id: record.id,
-        is_archived: record.is_archived,
-        is_trash: record.is_trash,
-        updatedAt: record.updated_at,
-        cliId: typeof record._cli_id === "string" ? record._cli_id : null,
-      })),
+      (records as Array<ConversationRecord & LocalTerminalFields>)
+        // A1: folded subagent runs are not standalone summary targets — they
+        // would inflate the coverage denominator with rows the batch queue
+        // never surfaces.
+        .filter((record) => !(record as { _subagent_of?: unknown })._subagent_of)
+        .map((record) => ({
+          id: record.id,
+          is_archived: record.is_archived,
+          is_trash: record.is_trash,
+          updatedAt: record.updated_at,
+          cliId: typeof record._cli_id === "string" ? record._cli_id : null,
+        })),
       summaries
     );
   },

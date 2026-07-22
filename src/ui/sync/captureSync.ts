@@ -103,6 +103,13 @@ export function computeBundleFingerprint(
   for (let index = 0; index < title.length; index += 1) {
     mix(title.charCodeAt(index));
   }
+  // A1: subagent lineage can resolve after the transcript itself last moved
+  // (link resolution is a separate pass); mix it in so the stamp still
+  // propagates to the mirror even when nothing else changed.
+  const lineage = conversation._subagent_of ?? "";
+  for (let index = 0; index < lineage.length; index += 1) {
+    mix(lineage.charCodeAt(index));
+  }
   for (const message of messages) {
     mix(message.id);
     mix(message.created_at);

@@ -138,6 +138,11 @@ export class DigestService {
   private queued = new Set<string>();
   private retryCounts = new Map<string, number>();
   private degradedRetries = new Set<string>();
+  /** Sessions that already got their one degraded-retry this app run. A
+   * failing LLM now leaves rows 'skipped' (recoverable) instead of
+   * 'degraded' (terminal), so without this cap every post-sync scan would
+   * re-fire the same failing calls — one attempt per session per run. */
+  private degradedAttempted = new Set<string>();
   private degradedRetryCount = 0;
   private degradedGaveUpCount = 0;
   private pumpPromise: Promise<void> | null = null;
@@ -196,9 +201,11 @@ export class DigestService {
     if (!this.isLlmReady()) return;
     for (const digest of this.store.listDegradedDigestCandidates()) {
       if (this.queued.has(digest.sessionId)) continue;
+      if (this.degradedAttempted.has(digest.sessionId)) continue;
       const detail = this.store.getSession(digest.sessionId);
       if (!detail || detail.messages.length === 0) continue;
       if (!isDegradedDigest(digest, firstUserText(detail.messages))) continue;
+      this.degradedAttempted.add(digest.sessionId);
       this.degradedRetries.add(digest.sessionId);
       this.degradedRetryCount += 1;
       this.enqueue(digest.sessionId);
@@ -284,13 +291,16 @@ export class DigestService {
 
     const base = this.baseDigest(detail);
     if (!payload) {
-      // Degraded row: structural fallback, no embedding attempted.
+      // LLM unreachable or unparseable output: structural fallback, no
+      // embedding. Always 'skipped' — a transport failure says nothing
+      // about the session, so the row stays recoverable once the LLM is
+      // healthy again (the per-run attempted set stops same-run storms).
+      // 'degraded' is reserved for the parsed-but-still-echo verdict below.
       this.store.upsertSessionDigest({
         ...base,
         oneLiner: this.fallbackOneLiner(detail.messages),
-        embeddingStatus: isDegradedRetry ? 'degraded' : 'skipped',
+        embeddingStatus: 'skipped',
       });
-      if (isDegradedRetry) this.degradedGaveUpCount += 1;
       return;
     }
 

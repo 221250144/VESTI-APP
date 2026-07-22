@@ -12,6 +12,14 @@ export interface AgentAdapter {
   readonly platform: AgentPlatform;
   readonly name: string;
 
+  /**
+   * Bump when the parser learns to extract materially new data from old
+   * files (lineage, usage, …). SyncEngine re-parses files whose stored
+   * sync_state.parser_version is lower — size/mtime alone would skip them
+   * forever, freezing already-synced files on the old parse.
+   */
+  readonly parserVersion?: number;
+
   /** Check if this agent is installed on the system */
   detect(): Promise<AgentDetectResult>;
 
@@ -60,6 +68,13 @@ export interface ParsedSession {
   messages: ParsedMessage[];
   toolExecutions: ToolExecution[];
   subagents: SubagentRef[];
+  /**
+   * Child-side lineage: set when only the child knows its parent (e.g.
+   * Cursor 2.x background agents own a top-level transcript, with lineage
+   * solely in their chat meta). Converts to the same subagent_links row a
+   * parent-side SubagentRef would produce.
+   */
+  subagentOf?: { parentSessionId: string; agentRole?: string; toolCallId?: string };
   tokenUsage: SessionTokenUsage;
 
   startTime: number;
@@ -139,6 +154,15 @@ export interface SubagentRef {
   agentId: string;
   slug?: string;
   filePath: string;
+  /**
+   * Fully-qualified child WorkSession.id when the parser already knows it
+   * (e.g. Cursor: parent and child composers live in the same database, so
+   * subagentInfo.parentComposerId links them at parse time). When set, the
+   * link needs no sync_state file-path resolution.
+   */
+  childSessionId?: string;
+  /** Display role, e.g. Cursor subagentTypeName ("generalPurpose"). */
+  agentRole?: string;
 }
 
 // ==================== Token Aggregation ====================

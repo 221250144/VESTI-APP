@@ -75,6 +75,17 @@ CREATE TABLE tool_executions (
   is_error INTEGER DEFAULT 0,
   timestamp INTEGER NOT NULL
 );
+CREATE TABLE subagent_links (
+  id TEXT PRIMARY KEY,
+  parent_session_id TEXT NOT NULL,
+  child_session_id TEXT,
+  agent_id TEXT,
+  agent_role TEXT,
+  slug TEXT,
+  file_path TEXT,
+  message_count INTEGER DEFAULT 0,
+  spawned_at INTEGER
+);
 CREATE TABLE session_digests (
   session_id TEXT PRIMARY KEY,
   host TEXT,
@@ -106,6 +117,8 @@ END;
 
 export const SESSION_A = 'ws-aaa-001';
 export const SESSION_B = 'ws-bbb-002';
+/** Subagent child of SESSION_A (linked via subagent_links). */
+export const SESSION_SUB = 'ws-sub-003';
 
 export function createFixtureDb(): Fixture {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vesti-mcp-test-'));
@@ -213,6 +226,27 @@ export function createFixtureDb(): Fixture {
     new Date(now + 3_600_000).toISOString(),
   );
   // SESSION_B intentionally has no digest row: search must still work.
+
+  // Subagent line of SESSION_A: its own session row plus the resolved link.
+  insertSession.run(
+    SESSION_SUB, 'agent-sub-1', 'claude-code', 'C:/work/vesti',
+    'Collect trigram tokenizer prior art', null,
+    now + 300_000, now + 900_000, now + 900_000, 2, 1, now + 300_000, now + 300_000,
+  );
+  insertDigest.run(
+    SESSION_SUB, 'claude-code',
+    'Surveyed trigram tokenizer prior art for the FTS rebuild',
+    JSON.stringify(['fts5', 'trigram']),
+    JSON.stringify([]),
+    new Date(now + 900_000).toISOString(),
+  );
+  db.prepare(
+    `INSERT INTO subagent_links (id, parent_session_id, child_session_id, agent_id, agent_role, slug, file_path, message_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    `${SESSION_A}:sub-1`, SESSION_A, SESSION_SUB, 'sub-1', 'generalPurpose', 'explorer',
+    'C:/fixtures/agent-sub-1.jsonl', 2,
+  );
 
   db.close();
   return {

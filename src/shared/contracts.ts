@@ -310,6 +310,8 @@ export interface ConversationTreeSession {
   decisions: string[];
   // A1 subagent folding (optional: absent on renderer-built browser nodes)
   role?: "main" | "subagent";
+  /** Display role of the subagent (Cursor subagentTypeName / Claude slug). */
+  subagentRole?: string;
   parentSessionId?: string;
   orphan?: boolean;
   childCount?: number;
@@ -659,6 +661,10 @@ export interface VestiConversationRecord {
   _project_path?: string;
   _model?: string;
   _tool_call_count?: number;
+  /** A1: parent work-session id when this session is a folded subagent run. */
+  _subagent_of?: string;
+  /** A1: subagent role/type (e.g. "bugbot", "Task"), when known. */
+  _agent_role?: string;
 }
 
 export interface VestiMessageRecord {

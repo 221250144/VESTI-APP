@@ -12,6 +12,9 @@ export interface ConversationFilters {
   platform?: Platform;
   search?: string;
   dateRange?: DateRange;
+  /** A1: folded subagent runs are excluded by default; the library opts in
+   * (it folds them under the parent card itself). */
+  includeSubagents?: boolean;
 }
 
 export interface ConversationUpdateChanges {

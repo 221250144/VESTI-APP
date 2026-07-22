@@ -1575,7 +1575,7 @@ export const enTranslations = {
       axisAffectRightStrength: "You bring strong emotional engagement to what you explore.",
       axisSignalFaint: "Faint signal",
       imageryFaint: "The outline is still faint — some axes are gathering signal; read it lightly.",
-      personaNoteLabel: "Recent footnote",
+      personaNoteLabel: "Marginalia",
       mindMapTitle: "Thinking map",
       repoQrCaption: "Open source — scan for the repo",
       evidenceBecause: "This is so you, because…",

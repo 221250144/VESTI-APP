@@ -60,7 +60,7 @@ export class SyncEngine {
     }
 
     // Resolve subagent links after all sessions are synced
-    this.resolveSubagentLinks();
+    await this.resolveSubagentLinks();
     // Fork lineage (memory v2): codex rollouts copy the parent's history into
     // the child, so forks are detected post-sync by message-id overlap.
     try {
@@ -105,20 +105,24 @@ export class SyncEngine {
    */
   async syncFile(platform: AgentPlatform, filePath: string): Promise<SyncFileResult | null> {
     const syncState = this.db.getSyncState(filePath);
+    const parserVersion = this.adapters.getAdapter(platform)?.parserVersion ?? 0;
 
-    // Check if file has changed
+    // Skip only when the file is unchanged AND it was last parsed by a
+    // parser at least as capable as the current one — an adapter upgrade
+    // (new lineage/usage extraction) must re-parse old files.
     const { size, mtimeMs } = await fs.stat(filePath);
     if (
       syncState &&
       syncState.lastPosition === size &&
-      syncState.lastModified >= mtimeMs
+      syncState.lastModified >= mtimeMs &&
+      syncState.parserVersion >= parserVersion
     ) {
       return null; // No new data
     }
 
     const sessions = await this.adapters.parseSessions(platform, filePath);
     if (sessions.length === 0) {
-      this.db.setSyncState(filePath, platform, size, mtimeMs);
+      this.db.setSyncState(filePath, platform, size, mtimeMs, undefined, undefined, parserVersion);
       return null;
     }
 
@@ -201,6 +205,7 @@ export class SyncEngine {
       mtimeMs,
       onlySession?.sessionId,
       onlySession ? `${platform}:${onlySession.sessionId}` : undefined,
+      parserVersion,
     );
 
     return totals.sessions > 0 ? totals : null;
@@ -211,22 +216,54 @@ export class SyncEngine {
    * Link file paths come from parsers (path.join style) while sync_state keys
    * come from enumeration (glob forward-slash style on Windows), so the
    * lookup tries the raw path plus both separator variants.
+   *
+   * Public because every sync path must run it: link rows are written when
+   * the *parent* session syncs, but the child side only resolves once the
+   * subagent transcript itself is in sync_state. A transcript that exists on
+   * disk but was never synced (e.g. the file watcher excludes subagent dirs)
+   * is synced on demand here, so subagents mount into the tree without
+   * waiting for the next full scan. Returns the number of links resolved.
    */
-  private resolveSubagentLinks(): void {
-    const unresolved = this.db.getUnresolvedSubagentLinks();
-    for (const link of unresolved) {
-      const candidates = [
-        link.filePath,
-        link.filePath.replace(/\\/g, '/'),
-        link.filePath.replace(/\//g, path.sep),
-      ];
-      for (const candidate of candidates) {
-        const syncState = this.db.getSyncState(candidate);
-        if (syncState?.conversationId) {
-          this.db.updateSubagentLinkChild(link.id, syncState.conversationId);
-          break;
-        }
+  async resolveSubagentLinks(): Promise<number> {
+    let resolved = 0;
+    // Pass 1: resolve from sync_state; collect links whose transcript was
+    // never synced. Pass 2: sync those files, then resolve again.
+    for (let pass = 0; pass < 2; pass += 1) {
+      const unresolved = this.db.getUnresolvedSubagentLinks();
+      if (unresolved.length === 0) break;
+      const missing: Array<typeof unresolved[number]> = [];
+      for (const link of unresolved) {
+        if (this.tryResolveLink(link)) resolved += 1;
+        else missing.push(link);
+      }
+      if (pass === 1 || missing.length === 0) break;
+      let syncedAny = false;
+      for (const link of missing) {
+        const platform = link.parentSessionId.split(':')[0] as AgentPlatform;
+        try {
+          if (!link.filePath || !(await fs.pathExists(link.filePath))) continue;
+          const stored = await this.syncFile(platform, link.filePath);
+          syncedAny = syncedAny || stored !== null;
+        } catch { /* a broken transcript must not block the others */ }
+      }
+      if (!syncedAny) break;
+    }
+    return resolved;
+  }
+
+  private tryResolveLink(link: { id: string; filePath: string }): boolean {
+    const candidates = [
+      link.filePath,
+      link.filePath.replace(/\\/g, '/'),
+      link.filePath.replace(/\//g, path.sep),
+    ];
+    for (const candidate of candidates) {
+      const syncState = this.db.getSyncState(candidate);
+      if (syncState?.conversationId) {
+        this.db.updateSubagentLinkChild(link.id, syncState.conversationId);
+        return true;
       }
     }
+    return false;
   }
 }

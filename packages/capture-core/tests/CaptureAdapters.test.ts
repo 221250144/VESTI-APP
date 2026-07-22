@@ -112,7 +112,14 @@ describe('capture adapters', () => {
     );
     db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)').run(
       `bubbleId:${composerId}:assistant-1`,
-      JSON.stringify({ bubbleId: 'assistant-1', type: 2, text: 'fixed', thinking: 'checking', createdAt: 1_752_541_201_000 }),
+      JSON.stringify({
+        bubbleId: 'assistant-1',
+        type: 2,
+        text: 'fixed',
+        thinking: 'checking',
+        createdAt: 1_752_541_201_000,
+        tokenCount: { inputTokens: 1200, outputTokens: 340 },
+      }),
     );
     db.close();
 
@@ -122,6 +129,217 @@ describe('capture adapters', () => {
     expect(sessions[0]).toMatchObject({ sessionId: composerId, platform: 'cursor', model: 'cursor-test-model', projectPath: 'C:/work/cursor-demo' });
     expect(sessions[0].messages.map(message => message.contentText)).toEqual(['fix the test', 'fixed']);
     expect(sessions[0].messages[1].contentThinking).toBe('checking');
+    // bubble.tokenCount rolls up into the session totals and the message usage.
+    expect(sessions[0].tokenUsage.totalInputTokens).toBe(1200);
+    expect(sessions[0].tokenUsage.totalOutputTokens).toBe(340);
+    expect(sessions[0].messages[1].usage).toMatchObject({ inputTokens: 1200, outputTokens: 340 });
+  });
+
+  it('links Cursor subagent composers to their parent and inherits the project path', async () => {
+    const dir = await makeTempDir('vesti-cursor-sub-');
+    const file = path.join(dir, 'state.vscdb');
+    const parentId = 'parent-composer-1111';
+    const childId = 'child-composer-2222';
+    const orphanChildId = 'child-composer-3333';
+    const db = new Database(file);
+    db.exec(`
+      CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value BLOB);
+      CREATE TABLE composerHeaders (
+        composerId TEXT PRIMARY KEY,
+        createdAt INTEGER,
+        lastUpdatedAt INTEGER,
+        isArchived INTEGER,
+        isSubagent INTEGER,
+        value TEXT
+      );
+    `);
+    const insertHeader = db.prepare('INSERT INTO composerHeaders VALUES (?, ?, ?, ?, ?, ?)');
+    insertHeader.run(parentId, 1000, 4000, 0, 0, JSON.stringify({
+      composerId: parentId,
+      workspaceIdentifier: { fsPath: 'C:/work/parent-project' },
+    }));
+    insertHeader.run(childId, 2000, 3000, 0, 1, JSON.stringify({
+      composerId: childId,
+      // headless subagents run in an empty window — no workspace path
+      workspaceIdentifier: { id: 'empty-window' },
+      subagentInfo: {
+        subagentType: 3,
+        subagentTypeName: 'generalPurpose',
+        parentComposerId: parentId,
+        toolCallId: 'toolu_test_1',
+      },
+    }));
+    // Subagent pointing at a parent that is not in the database: no link.
+    insertHeader.run(orphanChildId, 2000, 3000, 0, 1, JSON.stringify({
+      composerId: orphanChildId,
+      subagentInfo: { parentComposerId: 'missing-parent' },
+    }));
+
+    const insertKv = db.prepare('INSERT INTO cursorDiskKV VALUES (?, ?)');
+    const composerData = (id: string, extra: Record<string, unknown> = {}) => JSON.stringify({
+      composerId: id,
+      fullConversationHeadersOnly: [
+        { bubbleId: 'u1', type: 1, createdAt: 2000 },
+        { bubbleId: 'a1', type: 2, createdAt: 2001 },
+      ],
+      ...extra,
+    });
+    insertKv.run(`composerData:${parentId}`, composerData(parentId, { subagentComposerIds: [childId] }));
+    insertKv.run(`composerData:${childId}`, composerData(childId));
+    insertKv.run(`composerData:${orphanChildId}`, composerData(orphanChildId));
+    for (const id of [parentId, childId, orphanChildId]) {
+      insertKv.run(`bubbleId:${id}:u1`, JSON.stringify({ bubbleId: 'u1', type: 1, text: `ask ${id}`, createdAt: 2000 }));
+      insertKv.run(`bubbleId:${id}:a1`, JSON.stringify({ bubbleId: 'a1', type: 2, text: `answer ${id}`, createdAt: 2001 }));
+    }
+    db.close();
+
+    const sessions = await new CursorParser().parseDatabase(file);
+    const parent = sessions.find(session => session.sessionId === parentId)!;
+    const child = sessions.find(session => session.sessionId === childId)!;
+    const orphan = sessions.find(session => session.sessionId === orphanChildId)!;
+
+    // Parent carries the ref with the child work-session id known at parse time.
+    expect(parent.subagents).toEqual([{
+      agentId: childId,
+      slug: 'generalPurpose',
+      agentRole: 'generalPurpose',
+      filePath: file,
+      childSessionId: `cursor:${childId}`,
+    }]);
+    // Headless child inherits the parent's project so the tree mounts it.
+    expect(child.projectPath).toBe('C:/work/parent-project');
+    expect(child.meta).toMatchObject({
+      is_subagent: true,
+      parent_composer_id: parentId,
+      subagent_type: 'generalPurpose',
+      spawned_by_tool_call: 'toolu_test_1',
+    });
+    // Orphan child: no link emitted, no inheritance.
+    expect(orphan.projectPath).toBe('');
+    expect(orphan.meta?.parent_composer_id).toBeUndefined();
+
+    // Converter turns the ref into a resolved subagent link directly.
+    const converted = MessageConverter.convertV2(parent);
+    expect(converted.subagentLinks).toEqual([expect.objectContaining({
+      parentSessionId: `cursor:${parentId}`,
+      childSessionId: `cursor:${childId}`,
+      agentId: childId,
+      agentRole: 'generalPurpose',
+    })]);
+    expect(converted.session.hasSubagents).toBe(true);
+  });
+
+  it('parses Cursor 2.x agent-transcripts with subagent lineage, chat meta and estimated usage', async () => {
+    const home = await makeTempDir('vesti-cursor-tr-');
+    const agentId = '11111111-aaaa-bbbb-cccc-000000000001';
+    const childId = '22222222-aaaa-bbbb-cccc-000000000002';
+
+    // ~/.cursor/projects/<slug>/agent-transcripts/<agentId>/...
+    const agentDir = path.join(home, 'projects', 'c-Users-me', 'agent-transcripts', agentId);
+    await fs.ensureDir(path.join(agentDir, 'subagents'));
+    const mainFile = path.join(agentDir, `${agentId}.jsonl`);
+    await fs.writeFile(mainFile, [
+      JSON.stringify({ role: 'user', message: { content: [{ type: 'text', text: '<timestamp>Tuesday, Jul 21, 2026, 3:19 AM (UTC-7)</timestamp>\n<user_query>\n请优化捕获引擎\n</user_query>' }] } }),
+      JSON.stringify({ role: 'assistant', message: { content: [{ type: 'text', text: '开始分析' }, { type: 'tool_use', id: 'toolu_tr_1', name: 'Task', input: { prompt: 'review' } }] } }),
+      JSON.stringify({ type: 'turn_ended', status: 'success' }),
+    ].join('\n'));
+    await fs.writeFile(path.join(agentDir, 'subagents', `${childId}.jsonl`), [
+      JSON.stringify({ role: 'user', message: { content: [{ type: 'text', text: 'review the renderer' }] } }),
+      JSON.stringify({ role: 'assistant', message: { content: [{ type: 'text', text: 'no blocking issues' }] } }),
+    ].join('\n'));
+
+    // ~/.cursor/chats/<ws-hash>/<agentId>/meta.json + store.db meta
+    const chatDir = path.join(home, 'chats', 'ws-hash', agentId);
+    await fs.ensureDir(chatDir);
+    await fs.writeJson(path.join(chatDir, 'meta.json'), {
+      schemaVersion: 1, title: 'Capture Engine Work', cwd: 'C:\\work\\demo',
+      createdAtMs: 1_752_000_000_000, updatedAtMs: 1_752_100_000_000, hasConversation: true,
+    });
+    const childChatDir = path.join(home, 'chats', 'ws-hash', childId);
+    await fs.ensureDir(childChatDir);
+    const childStore = new Database(path.join(childChatDir, 'store.db'));
+    childStore.exec('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)');
+    childStore.prepare('INSERT INTO meta VALUES (?, ?)').run('0', Buffer.from(JSON.stringify({
+      agentId: childId, lastUsedModel: 'claude-test',
+      subagentInfo: { parentAgentId: agentId, typeName: 'bugbot', toolCallId: 'toolu_tr_1' },
+    }), 'utf8').toString('hex'));
+    childStore.close();
+
+    const { CursorTranscriptParser } = await import('../src/adapters/cursor/transcript.js');
+    const sessions = await new CursorTranscriptParser(home).parseFile(mainFile);
+
+    expect(sessions.map(session => session.sessionId).sort()).toEqual([agentId, childId].sort());
+    const main = sessions.find(session => session.sessionId === agentId)!;
+    const child = sessions.find(session => session.sessionId === childId)!;
+
+    // Chat meta joins in: title, cwd, session bounds.
+    expect(main.projectPath).toBe('C:\\work\\demo');
+    expect(main.meta).toMatchObject({ composer_name: 'Capture Engine Work', token_estimated: true, transcript_format: 'agent-transcripts' });
+    // Inline <timestamp> anchors the user message (2026-07-21 10:19 UTC).
+    expect(main.messages[0].timestamp).toBe(Date.UTC(2026, 6, 21, 10, 19));
+    // Chat title wins as the display prompt (same rule as the vscdb parser);
+    // the extracted <user_query> is the fallback when no title exists.
+    expect(main.meta?.first_prompt).toBe('Capture Engine Work');
+    expect(main.messages[1].toolCalls).toEqual([{ id: 'toolu_tr_1', name: 'Task', input: { prompt: 'review' } }]);
+    // Estimated usage is non-zero and flagged, never a silent hard 0.
+    expect(main.tokenUsage.totalInputTokens).toBeGreaterThan(0);
+    expect(main.tokenUsage.totalOutputTokens).toBeGreaterThan(0);
+
+    // Lineage from the directory layout + child store meta.
+    expect(main.subagents).toEqual([{
+      agentId: childId,
+      slug: 'bugbot',
+      agentRole: 'bugbot',
+      filePath: path.join(agentDir, 'subagents', `${childId}.jsonl`),
+      childSessionId: `cursor:${childId}`,
+    }]);
+    expect(child.projectPath).toBe('C:\\work\\demo');
+    expect(child.model).toBe('claude-test');
+    expect(child.meta).toMatchObject({ is_subagent: true, parent_composer_id: agentId, subagent_type: 'bugbot' });
+  });
+
+  it('links Cursor background agents (top-level transcript, child-side lineage) to their parent', async () => {
+    const home = await makeTempDir('vesti-cursor-bg-');
+    const parentId = '33333333-aaaa-bbbb-cccc-000000000003';
+    const bgId = '44444444-aaaa-bbbb-cccc-000000000004';
+
+    // Background agents own a TOP-LEVEL transcript dir — not subagents/.
+    const bgDir = path.join(home, 'projects', 'c-Users-me', 'agent-transcripts', bgId);
+    await fs.ensureDir(bgDir);
+    const bgFile = path.join(bgDir, `${bgId}.jsonl`);
+    await fs.writeFile(bgFile, [
+      JSON.stringify({ role: 'user', message: { content: [{ type: 'text', text: 'rewrite the prompt plaza' }] } }),
+      JSON.stringify({ role: 'assistant', message: { content: [{ type: 'text', text: 'done, 12/12 tests pass' }] } }),
+    ].join('\n'));
+
+    // Lineage lives only in the child's chat-store meta.
+    const chatDir = path.join(home, 'chats', 'ws-hash', bgId);
+    await fs.ensureDir(chatDir);
+    const store = new Database(path.join(chatDir, 'store.db'));
+    store.exec('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)');
+    store.prepare('INSERT INTO meta VALUES (?, ?)').run('0', Buffer.from(JSON.stringify({
+      agentId: bgId, subagentInfo: { parentAgentId: parentId, typeName: 'generalPurpose', toolCallId: 'toolu_bg_1' },
+    }), 'utf8').toString('hex'));
+    store.close();
+
+    const { CursorTranscriptParser } = await import('../src/adapters/cursor/transcript.js');
+    const [session] = await new CursorTranscriptParser(home).parseFile(bgFile);
+
+    expect(session.subagentOf).toEqual({
+      parentSessionId: `cursor:${parentId}`,
+      agentRole: 'generalPurpose',
+      toolCallId: 'toolu_bg_1',
+    });
+    expect(session.meta).toMatchObject({ is_subagent: true, parent_composer_id: parentId });
+
+    // Converter emits the same resolved link a parent-side ref would.
+    const converted = MessageConverter.convertV2(session);
+    expect(converted.subagentLinks).toEqual([expect.objectContaining({
+      id: `cursor:${parentId}:${bgId}`,
+      parentSessionId: `cursor:${parentId}`,
+      childSessionId: `cursor:${bgId}`,
+      agentRole: 'generalPurpose',
+    })]);
   });
 
   it('keeps legacy-envelope Kimi Code user, assistant and tool-result chains', async () => {

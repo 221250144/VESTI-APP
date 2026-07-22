@@ -21,6 +21,7 @@ const SEARCH_DESCRIPTION = [
 const TIMELINE_DESCRIPTION = [
   'Layer 2 of 3 — turn-level outline of one session found via vesti_search.',
   'Returns each turn’s sequence number, timestamp, a one-line user-intent summary, tool-call count and token usage, so you can locate the exact passage worth reading.',
+  'When the session spawned subagents, a subagents list (child session_id, role, one-liner) is included — drill into a child line by calling vesti_timeline with its session_id.',
   'Pass around_turn to center a ±window view on a specific turn instead of the whole session.',
   'Then call vesti_get_turns with the turn seq numbers you selected.',
 ].join(' ');

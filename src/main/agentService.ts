@@ -87,9 +87,28 @@ export class AgentService {
     const parts = detail.messages
       .map((message, index) => this.formatMessage(message, index + 1, preferences))
       .filter(Boolean);
-    const transcript = parts.join('\n\n');
-    if (transcript.length <= MAX_TRANSCRIPT_CHARACTERS) return transcript;
-    return `${transcript.slice(0, 30_000)}\n\n[中间内容因长度限制已省略]\n\n${transcript.slice(-50_000)}`;
+    let transcript = parts.join('\n\n');
+    if (transcript.length > MAX_TRANSCRIPT_CHARACTERS) {
+      transcript = `${transcript.slice(0, 30_000)}\n\n[中间内容因长度限制已省略]\n\n${transcript.slice(-50_000)}`;
+    }
+    // A1 progressive disclosure: the parent transcript alone loses whatever
+    // was delegated to subagents. Append their digest briefs (never the raw
+    // child transcripts — a bounded compact layer) so explore/summary agents
+    // can see and reference delegated work.
+    const subagentBlock = this.buildSubagentBlock(detail.session.id);
+    return subagentBlock ? `${transcript}\n\n${subagentBlock}` : transcript;
+  }
+
+  private buildSubagentBlock(sessionId: string): string {
+    const briefs = this.capture.getSubagentBriefs(sessionId).slice(0, 12);
+    if (briefs.length === 0) return '';
+    const lines = briefs.map(brief => {
+      const role = brief.agentRole ? `[${brief.agentRole}] ` : '';
+      const title = (brief.title || '(未命名子任务)').slice(0, 120);
+      const oneLiner = brief.oneLiner ? `：${brief.oneLiner.slice(0, 200)}` : '';
+      return `- ${role}${title}（${brief.messageCount} 条消息）${oneLiner}`;
+    });
+    return `[子代理工作摘要]\n本会话曾派生 ${briefs.length} 个子代理执行子任务：\n${lines.join('\n')}`;
   }
 
   private formatMessage(message: SessionMessage, turn: number, preferences: RuntimeAgentSettings): string {

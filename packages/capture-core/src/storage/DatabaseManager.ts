@@ -245,7 +245,8 @@ export class DatabaseManager {
         last_position INTEGER DEFAULT 0,
         last_modified INTEGER DEFAULT 0,
         session_id TEXT,
-        conversation_id TEXT
+        conversation_id TEXT,
+        parser_version INTEGER DEFAULT 0
       )
     `);
 
@@ -1158,6 +1159,68 @@ export class DatabaseManager {
     }));
   }
 
+  /**
+   * Work-session ids that are linked as subagent children (A1). Downstream
+   * surfaces (stats, recent lists, exports) treat these as folded into their
+   * parent conversation rather than standalone entries.
+   */
+  getSubagentChildIds(): Set<string> {
+    const rows = this.getDb().prepare(
+      'SELECT DISTINCT child_session_id AS id FROM subagent_links WHERE child_session_id IS NOT NULL'
+    ).all() as Array<{ id: string }>;
+    return new Set(rows.map(r => r.id));
+  }
+
+  /**
+   * child work-session id → { parentSessionId, agentRole } for every resolved
+   * link. Single query; used to stamp lineage on conversation exports.
+   */
+  getSubagentLineageByChild(): Map<string, { parentSessionId: string; agentRole: string | null }> {
+    const rows = this.getDb().prepare(
+      'SELECT child_session_id AS child, parent_session_id AS parent, agent_role AS role FROM subagent_links WHERE child_session_id IS NOT NULL'
+    ).all() as Array<{ child: string; parent: string; role: string | null }>;
+    const map = new Map<string, { parentSessionId: string; agentRole: string | null }>();
+    for (const row of rows) {
+      if (!map.has(row.child)) map.set(row.child, { parentSessionId: row.parent, agentRole: row.role });
+    }
+    return map;
+  }
+
+  /**
+   * Compact per-child brief for one parent session: role, title, size and
+   * the child's digest one-liner when the digest pipeline has produced one.
+   * Feeds progressive disclosure downstream (agent transcripts, relay packs)
+   * so folded subagent work stays visible without loading child transcripts.
+   */
+  getSubagentBriefs(parentSessionId: string): Array<{
+    childSessionId: string;
+    agentRole: string | null;
+    title: string;
+    messageCount: number;
+    oneLiner: string | null;
+  }> {
+    try {
+      const rows = this.getDb().prepare(`
+        SELECT sl.child_session_id AS child, COALESCE(sl.agent_role, sl.slug) AS role,
+               ws.title AS title, ws.message_count AS mc, sd.one_liner AS ol
+        FROM subagent_links sl
+        JOIN work_sessions ws ON ws.id = sl.child_session_id
+        LEFT JOIN session_digests sd ON sd.session_id = sl.child_session_id
+        WHERE sl.parent_session_id = ? AND sl.child_session_id IS NOT NULL
+        ORDER BY ws.started_at
+      `).all(parentSessionId) as Array<{ child: string; role: string | null; title: string; mc: number | null; ol: string | null }>;
+      return rows.map(r => ({
+        childSessionId: r.child,
+        agentRole: r.role,
+        title: r.title,
+        messageCount: r.mc ?? 0,
+        oneLiner: r.ol,
+      }));
+    } catch {
+      return []; // pre-A1 schema — degrade silently
+    }
+  }
+
   getUnresolvedSubagentLinks(): Array<SubagentLink & { id: string }> {
     return (this.getDb().prepare(
       'SELECT * FROM subagent_links WHERE child_session_id IS NULL'
@@ -1285,21 +1348,22 @@ export class DatabaseManager {
 
   // ==================== Sync State ====================
 
-  getSyncState(filePath: string): { lastPosition: number; lastModified: number; conversationId?: string } | null {
+  getSyncState(filePath: string): { lastPosition: number; lastModified: number; conversationId?: string; parserVersion: number } | null {
     const row = this.getDb().prepare('SELECT * FROM sync_state WHERE file_path = ?').get(filePath) as any;
     if (!row) return null;
-    return { lastPosition: row.last_position, lastModified: row.last_modified, conversationId: row.conversation_id };
+    return { lastPosition: row.last_position, lastModified: row.last_modified, conversationId: row.conversation_id, parserVersion: row.parser_version ?? 0 };
   }
 
-  setSyncState(filePath: string, platform: string, position: number, modified: number, sessionId?: string, conversationId?: string): void {
+  setSyncState(filePath: string, platform: string, position: number, modified: number, sessionId?: string, conversationId?: string, parserVersion = 0): void {
     this.getDb().prepare(`
-      INSERT INTO sync_state (file_path, platform, last_position, last_modified, session_id, conversation_id)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO sync_state (file_path, platform, last_position, last_modified, session_id, conversation_id, parser_version)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(file_path) DO UPDATE SET
         last_position = excluded.last_position,
         last_modified = excluded.last_modified,
-        conversation_id = COALESCE(excluded.conversation_id, conversation_id)
-    `).run(filePath, platform, position, modified, sessionId ?? null, conversationId ?? null);
+        conversation_id = COALESCE(excluded.conversation_id, conversation_id),
+        parser_version = excluded.parser_version
+    `).run(filePath, platform, position, modified, sessionId ?? null, conversationId ?? null, parserVersion);
   }
 
   // ==================== Search (FTS5) ====================
@@ -1726,8 +1790,14 @@ export class DatabaseManager {
   getStats(): VestiStats {
     const db = this.getDb();
 
+    // A1: sessions linked as subagent children fold into their parent —
+    // conversation COUNTS exclude them (they are not standalone dialogues),
+    // while message/token SUMS keep them (the work really happened).
+    const SUB_CHILDREN =
+      '(SELECT DISTINCT child_session_id FROM subagent_links WHERE child_session_id IS NOT NULL)';
+
     const convCount = (db.prepare(
-      "SELECT COUNT(*) as c FROM work_sessions WHERE session_type = 'conversation'"
+      `SELECT COUNT(*) as c FROM work_sessions WHERE session_type = 'conversation' AND id NOT IN ${SUB_CHILDREN}`
     ).get() as any).c;
     const msgCount = (db.prepare(`
       SELECT COUNT(*) as c
@@ -1747,7 +1817,7 @@ export class DatabaseManager {
 
     const platformRows = db.prepare(`
       SELECT platform,
-             COUNT(*) as c,
+             SUM(CASE WHEN id NOT IN ${SUB_CHILDREN} THEN 1 ELSE 0 END) as c,
              COALESCE(SUM(total_input_tokens), 0) as ti,
              COALESCE(SUM(total_output_tokens), 0) as ot
       FROM work_sessions
@@ -1767,7 +1837,7 @@ export class DatabaseManager {
 
     const modelRows = db.prepare(`
       SELECT model,
-             COUNT(*) as c,
+             SUM(CASE WHEN id NOT IN ${SUB_CHILDREN} THEN 1 ELSE 0 END) as c,
              COALESCE(SUM(total_input_tokens), 0) as ti,
              COALESCE(SUM(total_output_tokens), 0) as ot
       FROM work_sessions
@@ -1787,7 +1857,7 @@ export class DatabaseManager {
 
     const dailyRows = db.prepare(`
       SELECT date(started_at / 1000, 'unixepoch') as d,
-             COUNT(*) as convs,
+             SUM(CASE WHEN id NOT IN ${SUB_CHILDREN} THEN 1 ELSE 0 END) as convs,
              SUM(message_count) as msgs
       FROM work_sessions
       WHERE session_type = 'conversation'
@@ -1819,6 +1889,7 @@ export class DatabaseManager {
     const projectRows = db.prepare(`
       SELECT project_path, COUNT(*) as c FROM work_sessions
       WHERE session_type = 'conversation' AND project_path != ''
+        AND id NOT IN ${SUB_CHILDREN}
       GROUP BY project_path ORDER BY c DESC LIMIT 10
     `).all() as any[];
     const topProjects = projectRows.map(r => ({ path: r.project_path, conversations: r.c }));

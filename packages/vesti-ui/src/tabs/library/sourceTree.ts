@@ -21,6 +21,10 @@ export type DesktopSourceFields = {
   _source?: string;
   _cli_id?: string;
   _project_path?: string;
+  /** A1: parent work-session id stamped on folded subagent runs. */
+  _subagent_of?: string;
+  /** A1: subagent role/type, when the capture recorded one. */
+  _agent_role?: string;
 };
 
 export type SourceRef = {
@@ -152,11 +156,17 @@ export function buildConversationTreeLookup(
 }
 
 /** A1: true when the conversation is a captured subagent session (folded
- * under its parent in the tree, the counts and the default library list). */
+ * under its parent in the tree, the counts and the default library list).
+ * Two signals: the `_subagent_of` stamp the desktop export writes on the
+ * record itself, and the tree lookup (covers records synced before the
+ * stamp existed). */
 export function isSubagentConversation<T extends object>(
-  conversation: T & { _cli_id?: unknown },
+  conversation: T & { _cli_id?: unknown; _subagent_of?: unknown },
   lookup: ConversationTreeLookup,
 ): boolean {
+  if (typeof conversation._subagent_of === "string" && conversation._subagent_of) {
+    return true;
+  }
   return (
     typeof conversation._cli_id === "string" &&
     lookup.subagentParentByChildId.has(conversation._cli_id)

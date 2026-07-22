@@ -1,6 +1,6 @@
 # 各大 Agent 存储规范建模
 
-更新时间：2026-07-19
+更新时间：2026-07-21（补 Cursor subagentInfo 谱系实地建模）
 
 调研归档：对六款主流 AI 编程 agent 的本地会话存储格式做横向建模。凡 VESTI 已采集的平台（Claude Code / Kimi Code / Codex / Cursor / aider），条目与 `packages/capture-core/src/adapters/` 的解析器实现核对一致；Gemini CLI 未采集，条目来自公开文档口径，仅作参照。
 
@@ -98,9 +98,29 @@ AGENTS.md 项目级指令（可嵌套覆盖），全局配置 `~/.codex/config.t
 
 不是文件协议而是 KV 存储：`cursorDiskKV` 表 key 分层——`composerData:<composerId>`（会话体）→ `bubbleId:<composerId>:<bubbleId>`（消息气泡）；会话头在 `composerHeaders` 表（或旧版 `ItemTable` 的 `composer.composerHeaders`），含 `createdAt`/`lastUpdatedAt`/`isArchived`/`isSubagent`。bubble 内含 thinking、modelInfo 等。
 
-**子代理组织与关联键**
+**双存储时代（实地核实，2026-07-22）**
 
-子代理会话同为 composer，以 `composerHeaders.isSubagent` 标记；层级靠 composerId / bubbleId 复合 key 维持。
+Cursor 2.x 的 agent 会话**不再写入 state.vscdb**（实测全局库 2026-07 中旬后冻结），改为两套并行的新存储：
+
+- `~/.cursor/chats/<workspace-md5>/<agentId>/`：`store.db`（内容寻址 blob 图，`blobs` 表 + `meta` 表；`meta.'0'` 是 hex 编码 JSON，含 `lastUsedModel`、子代理侧的 `subagentInfo{parentAgentId, rootParentAgentId, toolCallId, typeName}`）+ `meta.json`（title/cwd/createdAtMs/updatedAtMs）。blob 图的二进制内部节点无公开格式，不宜作为解析源。
+- `~/.cursor/projects/<project-slug>/agent-transcripts/<agentId>/`：`<agentId>.jsonl` 主转录（`{"role":"user"|"assistant","message":{content:[...]}}` + `{"type":"turn_ended"}` 事件），**子代理即目录布局**——`subagents/<childId>.jsonl` 一个文件一个子代理。行内无时间戳（用户文本内嵌 `<timestamp>` 标签可作锚点）、无 token 用量、无工具结果（仅 tool_use 调用）。
+
+VESTI 采集以 agent-transcripts JSONL 为主转录源（有序、稳定、谱系显式），用 chats 侧 `meta.json` + `store.db meta` 补 title/cwd/model/角色；state.vscdb 仍覆盖旧 composer 会话，两库同一会话时 vscdb 优先（有真实逐气泡时间戳与 thinking）。
+
+**子代理组织与关联键（state.vscdb 旧存储）**
+
+子代理会话同为 composer，以 `composerHeaders.isSubagent` 标记（**注意：header 表里是 SQLite 整数 0/1，JSON 体里是布尔——两种取值都会出现**）。谱系字段（实地核实，2026-07-21）：
+
+- 子侧 `subagentInfo`：`parentComposerId`（父 composerId，唯一必需键）、`subagentTypeName`（角色，如 `generalPurpose`）、`subagentType`（数值枚举）、`toolCallId`（父会话中触发本子代理的 Task 工具调用 id）、`rootParentConversationId`（多级嵌套时的根）。该对象在 `composerData:<id>` 与 `composerHeaders.value` 两处都可能出现。
+- 父侧 `composerData.subagentComposerIds`：子 composerId 数组，与子侧 `parentComposerId` 互为镜像，任一侧缺失时可用另一侧补链。
+- 无头子代理（headless）在空窗口运行：`workspaceIdentifier.id === 'empty-window'`，**自身无项目路径**，项目归属只能从父 composer 继承。
+
+**Token 用量**（实地核实，2026-07-21）
+
+- bubble 级 `tokenCount = { inputTokens, outputTokens }`：历史版本会写真实值，**2026 年的新库实测全为 0**（用量统计移到了服务端）；解析器照常累加——零值累加零，不会造假。
+- composer 级 `contextTokensUsed` / `contextUsagePercent` / `promptTokenBreakdown`：这是**上下文窗口占用**（system prompt / tools / rules 分类估算），不是消费量，不能当 token 用量入库。
+- `usageData` 字段在新库中为空对象；`ItemTable` 的 `aiCodeTracking.dailyStats` 是代码行统计，与 token 无关。
+- 结论：Cursor 的 token 消耗在本地库**只有 bubble.tokenCount 一个真信号**，且新版本可能缺失（agent-transcripts 里也没有）。VESTI 的处理（2026-07-22）：真值存在则用真值；全零时退化为**字符估算**（ASCII/4 + CJK×0.7），并给会话盖 `meta.token_estimated` 印章——仪表盘显示活动量而非误导性的硬 0，且估算与真值可区分。
 
 **文件级信息**
 
@@ -158,7 +178,7 @@ Markdown 而非 JSONL：`# aider chat started at <时间>` 切分会话，`#### 
 | Claude Code | 单会话单 JSONL + `subagents/` | `agentId`（文件名 + 消息字段） | cwd/gitBranch 行内字段；编辑=工具行 | CLAUDE.md 分层 + imports | auto-compact 事件；resume/rewind |
 | Kimi Code | 会话目录多线（`agents/<id>/wire.jsonl`） | 目录归属 + `agents` 表 | state.json workDir；tool.call 事件 | AGENTS.md | 协议内压缩事件；`forkedFrom` 显式谱系 |
 | Codex CLI | 单会话单 rollout JSONL | 无文件层 | session_meta git；patch 事件 | AGENTS.md + config.toml | `compacted` 行；fork 复制父历史（无谱系字段） |
-| Cursor | 单库多会话（SQLite KV） | composerId/bubbleId 复合 key；`isSubagent` 头 | KV 内 checkpoint | `.cursor/rules/` + Memories | checkpoint 回滚 |
+| Cursor | 单库多会话（SQLite KV） | `subagentInfo.parentComposerId` ↔ `subagentComposerIds` 双向键；`isSubagent` 头 | KV 内 checkpoint | `.cursor/rules/` + Memories | checkpoint 回滚 |
 | Gemini CLI | 单会话单 JSON | 无约定 | checkpoint 文件快照 | GEMINI.md 分层 | checkpoint 恢复对话+文件 |
 | Aider | 全局单 Markdown | 无 | git commit 即真相 | CONVENTIONS.md 约定文件 | /clear、自动摘要；git 恢复 |
 
@@ -169,6 +189,7 @@ Markdown 而非 JSONL：`# aider chat started at <时间>` 切分会话，`#### 
 1. **kimi 目录归属**：`<workDirKey>/<sessionId>/agents/<agentId>/` 的目录结构天然给出「项目 → 会话 → 子代理」三级，子代理线解析为独立会话后经 `subagent_links` 挂回主线；`state.json.forkedFrom` 直接映射为 `work_sessions.forked_from`（显式谱系，免检测）。
 2. **claude agentId 链接**：以 `agentId` 为键建 `subagent_links`（file_path 记录子代理转录文件），同步末尾 `resolveSubagentLinks` 用 `sync_state.conversation_id` 反查补全 `child_session_id`；入库后树索引与召回统一做 A1 归属折叠。
 3. **codex fork 检测**：接受「文件层无谱系」的现实，fork/resume 复制父历史这一行为本身成为检测信号——`refreshForkLineage` 按消息 id 重叠（≥5 条共享且占子会话 ≥50%）事后补边；消息去重键剥离 codex 的按会话命名空间前缀，使 fork 副本共享同一键。
-4. **cursor bubble 层级**：`composerHeaders → composerData:<id> → bubbleId:<composerId>:<bubbleId>` 三级 key 映射为 会话 → 消息；`isSubagent` 头字段映射为子代理标记。整个 Cursor 解析按「非稳定 API」对待：只读打开、不复制库、逐版本回归。
+4. **cursor bubble 层级与谱系**：`composerHeaders → composerData:<id> → bubbleId:<composerId>:<bubbleId>` 三级 key 映射为 会话 → 消息。谱系在解析期直接建链（`attachLineage` 二遍扫描）：子侧 `subagentInfo.parentComposerId` 与父侧 `subagentComposerIds` 双向汇总，父子同库同批解析，`childSessionId` 解析期即知——是五个平台中唯一**不需要** `sync_state` 文件路径回查的链接来源；`subagentTypeName` 落为 `agent_role`（树节点角色标签），headless 子代理继承父 `projectPath`（否则挂不进项目）。`isSubagent`/`isArchived` 同时接受整数与布尔。整个 Cursor 解析按「非稳定 API」对待：只读打开、不复制库、逐版本回归。
+5. **cursor agent-transcripts（2.x 新格式）**：`~/.cursor/projects/*/agent-transcripts/<agentId>/` 下 JSONL 主转录 + `subagents/` 子目录即谱系；chats 侧 `meta.json`/`store.db meta` 补 title/cwd/model/`typeName`。同一会话在 vscdb 与 transcripts 都存在时 vscdb 优先（真时间戳/thinking），跳过 transcript 副本避免双写。行内无用量→字符估算 + `token_estimated` 印章。适配器 `parserVersion=2` 配合 `sync_state.parser_version`（migration v7）：解析器升级后强制重解析 size/mtime 未变的旧文件——否则「文件没变就跳过」会把升级前的解析结果永久冻结。
 
 不采集的部分：各家 rules/CLAUDE.md/AGENTS.md 记忆文件（属于项目仓库而非会话归档）、Cursor 内部 checkpoint、加密 reasoning——前者交给 git，中者无公开格式，后者本不可读。

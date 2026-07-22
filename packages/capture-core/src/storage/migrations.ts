@@ -253,4 +253,38 @@ export const MIGRATIONS: Migration[] = [
       rebuildFtsWithTrigram(db);
     },
   },
+  {
+    version: 6,
+    name: 'reclassify_degraded_digests_as_skipped',
+    up(db) {
+      // Digest semantics fix: 'degraded' used to be written whenever the
+      // degraded-retry LLM call failed for ANY reason — including the LLM
+      // being unreachable — which permanently locked those rows out of
+      // recovery (the retry scan only looks at 'skipped'). Under the new
+      // semantics 'degraded' means "the LLM parsed fine but still produced
+      // an echo of the user prompt"; transport/parse failures stay
+      // 'skipped' (recoverable). Reclassify shipped rows so a healthy LLM
+      // can regenerate them.
+      const changed = db
+        .prepare("UPDATE session_digests SET embedding_status = 'skipped' WHERE embedding_status = 'degraded'")
+        .run().changes;
+      return changed > 0 ? `reclassified ${changed} degraded digest rows as skipped` : undefined;
+    },
+  },
+  {
+    version: 7,
+    name: 'sync_state_parser_version',
+    up(db) {
+      // Adapter parser upgrades (e.g. Cursor subagent lineage) must be able
+      // to re-parse already-synced files; the size/mtime short-circuit alone
+      // would skip them forever. Default 0 marks every existing row as
+      // parsed by a pre-versioning parser, so any adapter that declares a
+      // parserVersion > 0 re-parses on the next sync.
+      const columns = db.prepare("PRAGMA table_info(sync_state)").all() as Array<{ name: string }>;
+      if (!columns.some(column => column.name === 'parser_version')) {
+        db.exec('ALTER TABLE sync_state ADD COLUMN parser_version INTEGER DEFAULT 0');
+        return 'added sync_state.parser_version';
+      }
+    },
+  },
 ];

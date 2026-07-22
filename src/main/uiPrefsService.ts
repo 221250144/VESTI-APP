@@ -11,6 +11,7 @@ export class UiPrefsService {
   private filePath = '';
   private prefs = new Map<string, unknown>();
   private notify?: (key: string, value: unknown) => void;
+  private flushChain: Promise<void> = Promise.resolve();
 
   async initialize(directory: string, notify: (key: string, value: unknown) => void): Promise<void> {
     this.filePath = path.join(directory, 'ui-prefs.json');
@@ -53,7 +54,18 @@ export class UiPrefsService {
     }
   }
 
-  private async flush(): Promise<void> {
+  /** Writes are serialized on a chain: concurrent set() calls (renderer
+   * startup fires several) share one .tmp path, and parallel write+rename
+   * pairs race — the loser's rename hits ENOENT on the already-moved tmp. */
+  private flush(): Promise<void> {
+    const next = this.flushChain
+      .catch(() => { /* previous failure already surfaced to its caller */ })
+      .then(() => this.writeSnapshot());
+    this.flushChain = next;
+    return next;
+  }
+
+  private async writeSnapshot(): Promise<void> {
     const payload = JSON.stringify(Object.fromEntries(this.prefs), null, 2);
     const tempPath = `${this.filePath}.tmp`;
     await fs.promises.writeFile(tempPath, payload, 'utf8');

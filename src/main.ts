@@ -908,7 +908,13 @@ async function createWindow(): Promise<void> {
     if (url.startsWith('https://')) void shell.openExternal(url);
     return { action: 'deny' };
   });
-  mainWindow.webContents.on('will-navigate', event => event.preventDefault());
+  // Block navigation away from the app, but allow same-URL reloads: the Vite
+  // dev client calls location.reload() after dependency re-optimization, and
+  // that reload fires will-navigate — blocking it strands the window on a
+  // page whose module requests were invalidated (blank window, no errors).
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (url !== mainWindow?.webContents.getURL()) event.preventDefault();
+  });
   if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
     await mainWindow.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
   } else {

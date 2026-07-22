@@ -29,6 +29,14 @@ export interface RelayContextMessage {
   content: string;
 }
 
+/** A1: compact one-line brief of a subagent run folded under the selected
+ * conversation — delegated work must survive into handoff packs. */
+export interface RelayContextSubagent {
+  role?: string | null;
+  title: string;
+  oneLiner?: string | null;
+}
+
 export interface RelayContextConversation {
   id: number;
   title: string;
@@ -43,6 +51,8 @@ export interface RelayContextConversation {
   snippet?: string | null;
   /** Chronological messages; only the most recent ones are excerpted. */
   messages: RelayContextMessage[];
+  /** A1: briefs of subagent runs spawned by this conversation (optional). */
+  subagents?: RelayContextSubagent[];
 }
 
 function collapseWhitespace(value: string): string {
@@ -96,17 +106,42 @@ function buildConversationHead(
     if (decisions) lines.push(`关键决策：${decisions}`);
     const openQuestions = joinList(digest.openQuestions, 6);
     if (openQuestions) lines.push(`未决问题：${openQuestions}`);
+    appendSubagentLines(lines, conversation.subagents);
     return lines.join("\n");
   }
   if (conversation.summary?.trim()) {
     lines.push(`摘要：${truncateText(conversation.summary, SUMMARY_FALLBACK_MAX_CHARS)}`);
+    appendSubagentLines(lines, conversation.subagents);
     return lines.join("\n");
   }
   const snippet = conversation.snippet?.trim()
     ? ` — ${truncateText(conversation.snippet, SNIPPET_FALLBACK_MAX_CHARS)}`
     : "";
   lines.push(`摘要：${truncateText(conversation.title || "未命名会话", 80)}${snippet}`);
+  appendSubagentLines(lines, conversation.subagents);
   return lines.join("\n");
+}
+
+/** A1: bounded subagent rollup under the conversation head — delegated work
+ * (review runs, parallel explorations) stays visible in every reuse surface
+ * that consumes this head, without ever inlining child transcripts. */
+const SUBAGENT_LINE_LIMIT = 4;
+function appendSubagentLines(
+  lines: string[],
+  subagents: RelayContextSubagent[] | undefined
+): void {
+  const usable = (subagents ?? []).filter((entry) => entry.title || entry.oneLiner);
+  if (usable.length === 0) return;
+  lines.push(`子代理（${usable.length}）：`);
+  for (const entry of usable.slice(0, SUBAGENT_LINE_LIMIT)) {
+    const role = entry.role ? `[${collapseWhitespace(entry.role)}] ` : "";
+    const title = truncateText(entry.title || "未命名子任务", 60);
+    const oneLiner = entry.oneLiner ? ` — ${truncateText(entry.oneLiner, 120)}` : "";
+    lines.push(`  - ${role}${title}${oneLiner}`);
+  }
+  if (usable.length > SUBAGENT_LINE_LIMIT) {
+    lines.push(`  - …另有 ${usable.length - SUBAGENT_LINE_LIMIT} 个子代理运行`);
+  }
 }
 
 /**

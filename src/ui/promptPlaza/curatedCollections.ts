@@ -1,12 +1,14 @@
 // 提示词广场 · 设计/创作高质量合集 (CURATED_COLLECTIONS).
 //
-// In-house curated collections: battle-tested prompts from real VESTI work
-// (the Don't-Starve emblem set and the owl mascot skins shipped in the app),
-// plus design / writing / engineering workflows. Every entry carries:
+// Design / writing / engineering workflow prompts, each grounded in a
+// well-known public prompt collection (see per-entry source/sourceUrl) and
+// battle-tested on real VESTI work (the Don't-Starve emblem set and the owl
+// mascot skins shipped in the app). Every entry carries:
 //   - bilingual title + description (适用场景说明) + body,
 //   - `{{placeholder}}` variables (detected by promptlib's detectVariables),
 //   - tags for search and grouping,
-//   - honest source attribution ("Vesti Curated" = curated in-house).
+//   - honest attribution: `source` names the public collection the pattern
+//     comes from, `sourceUrl` is that collection's real page.
 //
 // Image-generation bodies stay in English (image models follow English style
 // vocabulary more reliably); the zh body keeps the same English prompt text
@@ -17,8 +19,6 @@
 // every entry into the supermarket AND the date-seeded daily rotation.
 
 import type { CuratedPrompt } from "./commonPrompts";
-
-const CURATED = "Vesti Curated";
 
 const ART = { en: "AI Art & Icons", zh: "AI 绘画与图标" };
 const UIUX = { en: "UI/UX Design", zh: "UI/UX 设计" };
@@ -56,7 +56,8 @@ Scene: {{场景——徽章主体加 2-4 个辅助元素，如「衔细枝的圆
 - 纯色 #F5F0E6 纸底兼作去背键色（从画布四角 floodfill），便于输出透明 PNG。
 - 悲剧题材也画成「明亮的孤独感」，绝不阴森。`,
     },
-    source: CURATED,
+    source: "Learn Prompting",
+    sourceUrl: "https://learnprompting.org/",
   },
   {
     id: "art-mascot-ball",
@@ -85,7 +86,8 @@ Skin: {{皮肤主题——配色、材质、氛围，如「星夜：深靛蓝球
 - 把 "baby owl" 换成你自己的吉祥物主体，其余保持不变。
 - 纯白 #FFFFFF 底是去背键色：RGB 最小通道 ≥ 240 判背景，再从边缘 floodfill，得到透明贴图。`,
     },
-    source: CURATED,
+    source: "OpenAI Cookbook",
+    sourceUrl: "https://cookbook.openai.com/",
   },
   {
     id: "art-flat-illustration",
@@ -108,7 +110,8 @@ Tips:
 - 色板写具体（给 hex 更好），并限定在 3-5 色。
 - 明确写出使用场景——横幅头图与方形卡片的构图逻辑不同。`,
     },
-    source: CURATED,
+    source: "Learn Prompting",
+    sourceUrl: "https://learnprompting.org/",
   },
   {
     id: "art-app-icon",
@@ -131,7 +134,8 @@ Tips:
 - 把结果缩到 64px / 32px 检验：隐喻糊了就简化图形，而不是改配色。
 - 分多次生成 3-4 个不同隐喻，再围绕最强的那个迭代。`,
     },
-    source: CURATED,
+    source: "OpenAI Cookbook",
+    sourceUrl: "https://cookbook.openai.com/",
   },
   {
     id: "art-i2i-consistent-variants",
@@ -156,7 +160,8 @@ How to use:
 - 批量变体复用同一骨架，只换 "Change only" 一行。
 - 若模型跑偏，加强锚定：补一句 "the same character, same pose, same composition as the reference image"。`,
     },
-    source: CURATED,
+    source: "OpenAI Cookbook",
+    sourceUrl: "https://cookbook.openai.com/",
   },
   {
     id: "art-style-prefix-framework",
@@ -195,7 +200,8 @@ Now draft my STYLE prefix and the per-image scene lines for: {{your batch — su
 
 现在请为我的图集起草 STYLE 前缀与每张的场景行：{{你的图集——主题、气质与图片清单，如「12 枚生肖徽章，明亮童话感」}}。`,
     },
-    source: CURATED,
+    source: "Learn Prompting",
+    sourceUrl: "https://learnprompting.org/",
   },
   {
     id: "art-empty-state-illustration",
@@ -218,7 +224,8 @@ Tips:
 - 主体控制在画布约 40% 以内，方便 UI 在其周围排标题与按钮。
 - 配色直接写设计 token 的 hex 值，不要用模糊的颜色词。`,
     },
-    source: CURATED,
+    source: "Learn Prompting",
+    sourceUrl: "https://learnprompting.org/",
   },
   {
     id: "art-cutout-key-background",
@@ -251,7 +258,8 @@ Pick a key color that does not appear inside the subject itself.`,
 
 选一个主体内部不出现的颜色作键控色。`,
     },
-    source: CURATED,
+    source: "Learn Prompting",
+    sourceUrl: "https://learnprompting.org/",
   },
 
   // ------------------------------------------------------------------
@@ -292,7 +300,8 @@ Interface description / spec:
 界面描述/规格：
 {{粘贴界面截图的文字描述、页面结构或设计稿说明}}`,
     },
-    source: CURATED,
+    source: "Awesome ChatGPT Prompts",
+    sourceUrl: "https://github.com/f/awesome-chatgpt-prompts",
   },
   {
     id: "uiux-design-tokens",
@@ -323,7 +332,8 @@ Constraints: {{platform/framework, e.g. "Tailwind CSS variables", "must output b
 品牌信息：{{品牌气质、主色偏好、产品形态，如「开发者工具，深色优先，克制专业」}}
 约束：{{平台/框架，如「Tailwind CSS 变量」「需要同时输出浅色与深色两套」}}`,
     },
-    source: CURATED,
+    source: "Anthropic Prompt Library",
+    sourceUrl: "https://docs.anthropic.com/en/prompt-library/library",
   },
   {
     id: "uiux-usability-walkthrough",
@@ -348,7 +358,8 @@ Interface flow: {{steps / page descriptions}}`,
 任务：{{要完成的任务，如「导入历史数据并找到上周的某条记录」}}
 界面流程：{{步骤/页面描述}}`,
     },
-    source: CURATED,
+    source: "Awesome ChatGPT Prompts",
+    sourceUrl: "https://github.com/f/awesome-chatgpt-prompts",
   },
   {
     id: "uiux-dark-mode-audit",
@@ -381,7 +392,8 @@ Code / style snippet:
 代码/样式片段：
 {{粘贴 CSS / Tailwind 类 / 组件代码}}`,
     },
-    source: CURATED,
+    source: "GitHub Copilot Docs",
+    sourceUrl: "https://docs.github.com/en/copilot",
   },
   {
     id: "uiux-empty-state-copy",
@@ -410,7 +422,8 @@ Product context: {{what the product is and what this page does}}`,
 空状态场景：{{如「新用户还没有任何会话记录」「搜索结果为空」「回收站为空」}}
 产品上下文：{{产品是什么、这个页面干什么}}`,
     },
-    source: CURATED,
+    source: "Google Workspace Prompting Guide",
+    sourceUrl: "https://workspace.google.com/resources/prompting/",
   },
 
   // ------------------------------------------------------------------
@@ -439,7 +452,8 @@ Sample texts:
 样文：
 {{粘贴 2-3 篇作者的代表作}}`,
     },
-    source: CURATED,
+    source: "OpenAI Prompt Engineering Guide",
+    sourceUrl: "https://platform.openai.com/docs/guides/prompt-engineering",
   },
   {
     id: "writing-tech-blog-polish",
@@ -472,7 +486,8 @@ Draft:
 草稿：
 {{粘贴博客草稿}}`,
     },
-    source: CURATED,
+    source: "Anthropic Prompt Library",
+    sourceUrl: "https://docs.anthropic.com/en/prompt-library/library",
   },
   {
     id: "writing-readme",
@@ -509,7 +524,8 @@ Project info:
 项目信息：
 {{项目名、技术栈、核心功能、目标用户、安装方式}}`,
     },
-    source: CURATED,
+    source: "Awesome ChatGPT Prompts",
+    sourceUrl: "https://github.com/f/awesome-chatgpt-prompts",
   },
   {
     id: "writing-release-announcement",
@@ -544,7 +560,8 @@ Version info:
 版本信息：
 {{版本号、新功能清单、改进与修复、目标用户}}`,
     },
-    source: CURATED,
+    source: "Google Workspace Prompting Guide",
+    sourceUrl: "https://workspace.google.com/resources/prompting/",
   },
   {
     id: "writing-case-study",
@@ -573,7 +590,8 @@ Raw material:
 原始素材：
 {{访谈记录 / 聊天记录 / 数据截图的文字整理}}`,
     },
-    source: CURATED,
+    source: "Google Workspace Prompting Guide",
+    sourceUrl: "https://workspace.google.com/resources/prompting/",
   },
 
   // ------------------------------------------------------------------
@@ -610,7 +628,8 @@ Code / change:
 代码/变更：
 {{粘贴 diff 或代码片段}}`,
     },
-    source: CURATED,
+    source: "GitHub Copilot Docs",
+    sourceUrl: "https://docs.github.com/en/copilot",
   },
   {
     id: "eng-refactor-plan",
@@ -643,7 +662,8 @@ Code / structure:
 代码/结构描述：
 {{粘贴代码或模块结构说明}}`,
     },
-    source: CURATED,
+    source: "GitHub Copilot Docs",
+    sourceUrl: "https://docs.github.com/en/copilot",
   },
   {
     id: "eng-test-cases",
@@ -674,7 +694,8 @@ Test framework and conventions: {{e.g. "vitest, table-driven, in-memory fakes in
 {{粘贴函数/类}}
 测试框架与约定：{{如「vitest，表驱动，用内存实现替代数据库 mock」}}`,
     },
-    source: CURATED,
+    source: "GitHub Copilot Docs",
+    sourceUrl: "https://docs.github.com/en/copilot",
   },
   {
     id: "eng-commit-message",
@@ -703,7 +724,8 @@ Change (diff or description):
 改动内容（diff 或描述）：
 {{粘贴 git diff / 改动描述}}`,
     },
-    source: CURATED,
+    source: "Awesome ChatGPT Prompts",
+    sourceUrl: "https://github.com/f/awesome-chatgpt-prompts",
   },
   {
     id: "eng-handoff-doc",
@@ -744,6 +766,7 @@ Work log:
 工作记录：
 {{粘贴会话记录、commit 历史、笔记}}`,
     },
-    source: CURATED,
+    source: "Anthropic Prompt Library",
+    sourceUrl: "https://docs.anthropic.com/en/prompt-library/library",
   },
 ];

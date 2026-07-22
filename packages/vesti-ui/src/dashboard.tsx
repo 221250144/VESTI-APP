@@ -1498,8 +1498,12 @@ export function VestiDashboard({
 
   return (
     <LibraryDataProvider storage={storage}>
+      {/* h-full, not h-screen: the desktop shell mounts this below a fixed
+          title bar inside an overflow-hidden window — a 100vh root would be
+          taller than its slot and the bottom strip could never scroll into
+          view. */}
       <div
-        className={`${rootClassName ?? ""} relative flex h-screen flex-col bg-bg-primary text-text-primary`}
+        className={`${rootClassName ?? ""} relative flex h-full flex-col bg-bg-primary text-text-primary`}
       >
         {/* In controlled mode the desktop shell (title bar + dock) replaces
             the in-page header, so the whole row is skipped — brand and tabNav

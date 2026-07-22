@@ -184,6 +184,7 @@ describe('buildConversationTree — subagent folding (A1)', () => {
         parentSessionId: 'codex:parent',
         childSessionId: 'codex:child',
         agentId: 'a1',
+        agentRole: 'generalPurpose',
         filePath: 'C:\\work\\alpha\\child.jsonl',
         messageCount: 4,
       });
@@ -212,9 +213,13 @@ describe('buildConversationTree — subagent folding (A1)', () => {
       expect(child?.id).toBe('codex:child');
       expect(child?.role).toBe('subagent');
       expect(child?.parentSessionId).toBe('codex:parent');
+      // Display label from the link's agent_role (falls back to slug).
+      expect(child?.subagentRole).toBe('generalPurpose');
       expect(child?.childCount).toBe(1);
       expect(child?.descendantMessageCount).toBe(3);
       expect(child?.children?.[0].id).toBe('codex:grandchild');
+      // No role recorded on the nested link — the field stays absent.
+      expect(child?.children?.[0].subagentRole).toBeUndefined();
     });
   });
 

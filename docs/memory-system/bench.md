@@ -1,6 +1,6 @@
 # 记忆系统评测方案（bench）
 
-更新时间：2026-07-19
+更新时间：2026-07-21（新增 Bench T 追踪树完整性）
 
 适用范围：`scripts/bench/` 评测基建与 `docs/bench/` 报告。操作细节（命令、参数、指标口径）以 [docs/bench/README.md](../bench/README.md) 为准，本文说明设计与结论。首份基线报告：[../bench/baseline-2026-07-19.md](../bench/baseline-2026-07-19.md)。
 
@@ -18,6 +18,7 @@
 | `scripts/bench/corpus.mjs` | 合成语料生成器：按 capture-core schema 建 SQLite 库，埋针并输出 ground truth JSON |
 | `scripts/bench/bench-a.mjs` | Bench A 召回准确率：对合成库跑 `recallSessions`（FTS5+RRF），自动判分 |
 | `scripts/bench/bench-c.mjs` | Bench C digest 保真度：真实库只读快照上做关键事实清单核对 |
+| `scripts/bench/bench-t.mjs` | Bench T 追踪树完整性：真实库快照上审计子代理链接解析率与树挂载率，并复跑真实同步+解析代码路径给出 after 指标 |
 | `scripts/bench/common.mjs` | 公共工具（路径、随机种子、报告写出） |
 | `docs/bench/out/` | 每次运行的机器报告（`bench-a-<date>.json/.md`、`bench-c-<date>.json/.md`） |
 
@@ -44,6 +45,23 @@ RULER 式埋针 + 本地判分。
 **方法**：规则抽取器从消息原文抽关键事实 2438 条（决策句 653 / 文件路径 1219 / 数值 566），核对其在 digest 五字段拼接文本中的覆盖率；每条事实标注是否落在 digest 输入窗口内（复刻 `buildDigestTranscript`：最近 ≤60 条、尾部 6000 字符、不含 thinking）。决策句用 CJK 4-gram 包含判定，数值/路径用精确匹配。
 
 **指标**：总覆盖率、分类型覆盖率、窗口内/外对比、会话覆盖率分布、退化 digest（四字段全空）/ 滞后 / 缺失计数。
+
+## Bench T：追踪树完整性
+
+**动机**：用户可见症状「子 agent 被识别成独立对话」。这是结构正确性问题，不是检索质量问题，故单独成 bench。
+
+**语料**：真实库只读快照（SQLite backup API，快照文件与 Bench C 分开：`vesti-tree-snapshot.db`）。
+
+**方法**：两阶段对照。current 阶段直接审计快照；after 阶段在快照上运行**真实的修复后代码路径**（`SyncEngine.syncPlatform` + `resolveSubagentLinks`，与 App 同一套 dist 产物），再审计同一组指标。`--full-resync` 选项先清 `sync_state` 模拟解析器升级后的全量重放收敛态。
+
+**指标**：
+
+- 链接解析率：`subagent_links` 中 `child_session_id` 非空的比例，未解析行按转录文件是否还在盘上细分（在盘=可修复，丢失=不可修复）；
+- 惯例子代理数：按平台命名惯例（claude `subagents/agent-*`、kimi `--agent-*`、cursor `is_subagent` meta）独立识别的子代理会话数，交叉验证链接覆盖；
+- 树挂载数 / 泄漏数：`buildConversationTree` 中实际挂为 children 的子代理数，与泄漏为顶层 main 的子代理数（后者即用户看到的症状的直接度量）；
+- orphan 数：父缺失/跨项目降级节点。
+
+**结果（2026-07-21）**：current 0/125 解析、125 全部泄漏为顶层、挂载率 0%；after（全量重同步）138/138 解析、泄漏 0、orphan 0、挂载率 100%（新增 13 条来自 Cursor 谱系解析，修复前根本采不到）。报告：[../bench/out/bench-t-2026-07-21-full-resync.md](../bench/out/bench-t-2026-07-21-full-resync.md)。
 
 ## 基线结果摘要（2026-07-19）
 

@@ -6,7 +6,8 @@
  */
 
 import type { ParsedMessage, ParsedSession, SessionTokenUsage } from '../../types/agent.js';
-import type { ToolExecution } from '../../types/index.js';
+import type { TokenUsage, ToolExecution } from '../../types/index.js';
+import { estimateTokensFromText } from './estimate.js';
 
 type SqliteDatabase = import('better-sqlite3').Database;
 type JsonObject = Record<string, unknown>;
@@ -19,6 +20,29 @@ interface ComposerHeader extends JsonObject {
   isArchived?: boolean;
   isSubagent?: boolean;
   workspaceIdentifier?: unknown;
+}
+
+/**
+ * Subagent lineage carried by subagent composers (verified on Cursor 2026
+ * databases): subagentInfo.parentComposerId names the spawning composer,
+ * subagentTypeName the agent role, toolCallId the Task-tool call that
+ * spawned it. Parents additionally list children in subagentComposerIds.
+ */
+interface SubagentLineage {
+  parentComposerId: string;
+  typeName?: string;
+  toolCallId?: string;
+}
+
+function extractLineage(source: JsonObject): SubagentLineage | null {
+  const info = record(source.subagentInfo);
+  const parent = info.parentComposerId ?? info.rootParentConversationId;
+  if (typeof parent !== 'string' || !parent) return null;
+  return {
+    parentComposerId: parent,
+    typeName: typeof info.subagentTypeName === 'string' ? info.subagentTypeName : undefined,
+    toolCallId: typeof info.toolCallId === 'string' ? info.toolCallId : undefined,
+  };
 }
 
 function record(value: unknown): JsonObject {
@@ -83,6 +107,19 @@ function uriPath(value: unknown): string {
   return '';
 }
 
+/**
+ * Per-bubble usage: Cursor stamps assistant bubbles with
+ * tokenCount = { inputTokens, outputTokens }. Recent builds write zeros
+ * (usage moved server-side), so zeros are treated as "no data" rather than
+ * a real measurement — sums stay honest either way.
+ */
+function bubbleTokens(bubble: JsonObject): { input: number; output: number } {
+  const tc = record(bubble.tokenCount);
+  const input = typeof tc.inputTokens === 'number' && Number.isFinite(tc.inputTokens) ? tc.inputTokens : 0;
+  const output = typeof tc.outputTokens === 'number' && Number.isFinite(tc.outputTokens) ? tc.outputTokens : 0;
+  return { input: Math.max(0, input), output: Math.max(0, output) };
+}
+
 function extractThinking(bubble: JsonObject): string {
   if (typeof bubble.thinking === 'string') return bubble.thinking;
   const thinking = record(bubble.thinking);
@@ -129,6 +166,9 @@ export class CursorParser {
       const headers = this.readHeaders(db);
       const rows = db.prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%' AND value IS NOT NULL").all() as Array<{ key: string; value: unknown }>;
       const sessions: ParsedSession[] = [];
+      // child composerId → lineage; assembled from both sides (the child's
+      // subagentInfo and the parent's subagentComposerIds array).
+      const lineageByChild = new Map<string, SubagentLineage>();
 
       for (const row of rows) {
         const data = parseJson(row.value);
@@ -138,13 +178,63 @@ export class CursorParser {
           : row.key.slice('composerData:'.length);
         if (!composerId || composerId.length < 8) continue;
         const header = headers.get(composerId) ?? {};
+
+        // readHeaders merges the header row's JSON value into the header
+        // object, so subagentInfo is visible on either source.
+        const lineage = extractLineage(data) ?? extractLineage(header);
+        if (lineage && lineage.parentComposerId !== composerId) {
+          lineageByChild.set(composerId, lineage);
+        }
+        const childIds = Array.isArray(data.subagentComposerIds) ? data.subagentComposerIds : [];
+        for (const childId of childIds) {
+          if (typeof childId === 'string' && childId && childId !== composerId && !lineageByChild.has(childId)) {
+            lineageByChild.set(childId, { parentComposerId: composerId });
+          }
+        }
+
         const parsed = this.parseComposer(db, filePath, composerId, data, header);
         if (parsed && parsed.messages.length > 0) sessions.push(parsed);
       }
 
+      this.attachLineage(sessions, lineageByChild, filePath);
       return sessions.sort((a, b) => b.startTime - a.startTime);
     } finally {
       db.close();
+    }
+  }
+
+  /**
+   * Second pass over the parsed batch: mount subagent refs on parents (the
+   * child work-session id is known at parse time — no file-path resolution
+   * needed) and let headless subagents (workspace "empty-window") inherit
+   * the parent's project path so the tree mounts them in the same project.
+   */
+  private attachLineage(
+    sessions: ParsedSession[],
+    lineageByChild: Map<string, SubagentLineage>,
+    filePath: string,
+  ): void {
+    if (lineageByChild.size === 0) return;
+    const byId = new Map(sessions.map(session => [session.sessionId, session]));
+    for (const [childId, lineage] of lineageByChild) {
+      const child = byId.get(childId);
+      const parent = byId.get(lineage.parentComposerId);
+      if (!child || !parent) continue;
+      parent.subagents.push({
+        agentId: childId,
+        slug: lineage.typeName,
+        agentRole: lineage.typeName,
+        filePath,
+        childSessionId: `cursor:${childId}`,
+      });
+      if (child.meta) {
+        child.meta.parent_composer_id = lineage.parentComposerId;
+        if (lineage.typeName) child.meta.subagent_type = lineage.typeName;
+        if (lineage.toolCallId) child.meta.spawned_by_tool_call = lineage.toolCallId;
+      }
+      if (!child.projectPath && parent.projectPath) {
+        child.projectPath = parent.projectPath;
+      }
     }
   }
 
@@ -208,6 +298,8 @@ export class CursorParser {
     const bubbles = bubbleEntries.map(entry => entry.bubble);
     let firstPrompt = '';
     let sequence = 0;
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
 
     for (const { bubble, header: bubbleHeader } of bubbleEntries) {
       const bubbleId = typeof bubble.bubbleId === 'string'
@@ -237,6 +329,20 @@ export class CursorParser {
         continue;
       }
 
+      const tokens = bubbleTokens(bubble);
+      totalInputTokens += tokens.input;
+      totalOutputTokens += tokens.output;
+      const bubbleModel = record(bubble.modelInfo).modelName;
+      const usage: TokenUsage | undefined = tokens.input > 0 || tokens.output > 0
+        ? {
+            inputTokens: tokens.input,
+            outputTokens: tokens.output,
+            cacheCreationTokens: 0,
+            cacheReadTokens: 0,
+            model: typeof bubbleModel === 'string' ? bubbleModel : '',
+          }
+        : undefined;
+
       if (Object.keys(tool).length > 0) {
         const callId = String(tool.toolCallId ?? bubbleId);
         const name = String(tool.name ?? `cursor_tool_${String(tool.tool ?? 'unknown')}`);
@@ -250,6 +356,7 @@ export class CursorParser {
           contentText: text || undefined,
           contentThinking: thinking || undefined,
           toolCalls: [{ id: callId, name, input }],
+          usage,
           isToolResult: false,
           depth: 0,
         });
@@ -292,6 +399,7 @@ export class CursorParser {
           timestamp: ts,
           contentText: text || undefined,
           contentThinking: thinking || undefined,
+          usage,
           isToolResult: false,
           depth: 0,
         });
@@ -304,9 +412,27 @@ export class CursorParser {
     const startTime = timestamps.length ? Math.min(...timestamps) : fallbackStart;
     const endTime = timestamps.length ? Math.max(...timestamps) : toTimestamp(data.lastUpdatedAt ?? header.lastUpdatedAt, startTime);
     const model = extractModel(data, bubbles);
+
+    // Recent Cursor builds write bubble.tokenCount as zeros; fall back to a
+    // character-based estimate (flagged via meta.token_estimated) so cursor
+    // sessions register real activity instead of a misleading 0.
+    let tokenEstimated = false;
+    if (totalInputTokens === 0 && totalOutputTokens === 0) {
+      for (const message of messages) {
+        const inputText = (message.role === 'user' ? message.contentText ?? '' : '')
+          + (message.toolResults ?? []).map(result => result.content).join('\n');
+        const outputText = message.role === 'assistant'
+          ? `${message.contentText ?? ''}\n${message.contentThinking ?? ''}`
+          : '';
+        totalInputTokens += estimateTokensFromText(inputText);
+        totalOutputTokens += estimateTokensFromText(outputText);
+      }
+      tokenEstimated = totalInputTokens > 0 || totalOutputTokens > 0;
+    }
+
     const tokenUsage: SessionTokenUsage = {
-      totalInputTokens: 0,
-      totalOutputTokens: 0,
+      totalInputTokens,
+      totalOutputTokens,
       totalCacheCreationTokens: 0,
       totalCacheReadTokens: 0,
       models: new Set(model ? [model] : []),
@@ -335,9 +461,12 @@ export class CursorParser {
       meta: {
         first_prompt: title || firstPrompt || undefined,
         composer_name: title || undefined,
-        archived: header.isArchived === true || data.isArchived === true,
-        is_subagent: header.isSubagent === true || data.isSubagent === true,
+        // composerHeaders stores these as SQLite integers (0/1), the JSON
+        // value as booleans — accept both.
+        archived: header.isArchived === true || (header.isArchived as unknown) === 1 || data.isArchived === true,
+        is_subagent: header.isSubagent === true || (header.isSubagent as unknown) === 1 || data.isSubagent === true,
         empty_window: isEmptyWindow || undefined,
+        token_estimated: tokenEstimated || undefined,
         source_database: filePath,
         unified_mode: data.unifiedMode,
         force_mode: data.forceMode,

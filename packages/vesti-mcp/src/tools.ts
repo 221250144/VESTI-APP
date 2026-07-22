@@ -173,6 +173,47 @@ export interface TimelineTurn {
   output_tokens: number;
 }
 
+/** Subagent line spawned by this session — one more disclosure level down:
+ * call vesti_timeline / vesti_get_turns with its session_id to drill in. */
+export interface TimelineSubagent {
+  session_id: string;
+  role: string | null;
+  title: string;
+  message_count: number;
+  one_liner: string | null;
+}
+
+function listSubagents(db: VestiDatabase, sessionId: string): TimelineSubagent[] {
+  try {
+    const rows = db
+      .prepare(
+        `SELECT sl.child_session_id, sl.agent_role, sl.slug, ws.title, ws.message_count, sd.one_liner
+         FROM subagent_links sl
+         JOIN work_sessions ws ON ws.id = sl.child_session_id
+         LEFT JOIN session_digests sd ON sd.session_id = sl.child_session_id
+         WHERE sl.parent_session_id = ? AND sl.child_session_id IS NOT NULL
+         ORDER BY ws.started_at`,
+      )
+      .all(sessionId) as unknown as Array<{
+        child_session_id: string;
+        agent_role: string | null;
+        slug: string | null;
+        title: string;
+        message_count: number | null;
+        one_liner: string | null;
+      }>;
+    return rows.map(row => ({
+      session_id: row.child_session_id,
+      role: row.agent_role ?? row.slug,
+      title: oneLine(row.title, 120),
+      message_count: row.message_count ?? 0,
+      one_liner: row.one_liner ? oneLine(row.one_liner, 160) : null,
+    }));
+  } catch {
+    return []; // older schema without subagent_links — degrade silently
+  }
+}
+
 export function vestiTimeline(
   db: VestiDatabase,
   args: { session_id: string; around_turn?: number; window?: number },
@@ -191,6 +232,8 @@ export function vestiTimeline(
   total_turns: number;
   showing: { from_seq: number; to_seq: number };
   turns: TimelineTurn[];
+  /** Subagent lines spawned by this session (absent when there are none). */
+  subagents?: TimelineSubagent[];
 } {
   const session = resolveSession(db, args.session_id);
   if (!session) {
@@ -224,6 +267,8 @@ export function vestiTimeline(
     rows = allTurns.slice(start, start + window * 2 + 1);
   }
 
+  const subagents = listSubagents(db, session.id);
+
   return {
     session: {
       session_id: session.id,
@@ -236,6 +281,7 @@ export function vestiTimeline(
       turn_count: session.turn_count ?? allTurns.length,
       message_count: session.message_count ?? 0,
     },
+    ...(subagents.length > 0 ? { subagents } : {}),
     total_turns: allTurns.length,
     showing: {
       from_seq: rows[0]?.sequence ?? 0,

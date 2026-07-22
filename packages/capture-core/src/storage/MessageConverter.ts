@@ -40,11 +40,27 @@ export class MessageConverter {
     const subagentLinks: SubagentLink[] = session.subagents.map(sub => ({
       id: `${sessionId}:${sub.agentId}`,
       parentSessionId: sessionId,
+      childSessionId: sub.childSessionId,
       agentId: sub.agentId,
+      agentRole: sub.agentRole,
       slug: sub.slug,
       filePath: sub.filePath,
       messageCount: 0,
     }));
+    // Child-side lineage (e.g. Cursor background agents): same id scheme as
+    // the parent-side ref, so INSERT OR IGNORE dedups if both sides exist.
+    if (session.subagentOf) {
+      subagentLinks.push({
+        id: `${session.subagentOf.parentSessionId}:${session.sessionId}`,
+        parentSessionId: session.subagentOf.parentSessionId,
+        childSessionId: sessionId,
+        agentId: session.sessionId,
+        agentRole: session.subagentOf.agentRole,
+        slug: session.subagentOf.agentRole,
+        filePath: typeof session.meta?.source_database === 'string' ? session.meta.source_database : '',
+        messageCount: session.messages.length,
+      });
+    }
 
     // Count stats
     const userInputMessages = messages.filter(m => m.source === 'user_input');

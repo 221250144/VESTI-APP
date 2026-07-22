@@ -369,21 +369,23 @@ describe('DigestService degraded retries', () => {
     expect(store.digests.get('codex:s1')!.embeddingStatus).toBe('skipped');
   });
 
-  it('marks the row degraded and stops retrying when the retry still fails', async () => {
+  it('keeps the row skipped (recoverable) when the retry LLM call fails, once per run', async () => {
     const store = degradedStore();
     const agent = makeAgent(async () => ({ content: 'not json at all' } as never));
     const service = new DigestService(store, agent, makeEmbedding(), () => true);
 
     await service.enqueuePending();
     expect(agent.run).toHaveBeenCalledTimes(2); // one retry pass = two attempts
-    expect(store.digests.get('codex:s1')!.embeddingStatus).toBe('degraded');
+    // A transport/parse failure says nothing about the session — the row
+    // stays 'skipped' so a healthy LLM in a later run can regenerate it.
+    expect(store.digests.get('codex:s1')!.embeddingStatus).toBe('skipped');
 
-    // Marked rows are never auto-retried again.
+    // The per-run attempted set stops same-run retry storms.
     await service.enqueuePending();
     expect(agent.run).toHaveBeenCalledTimes(2);
     const stats = service.getDigestStats();
-    expect(stats.run.degradedGaveUp).toBe(1);
-    expect(stats.store.gaveUp).toBe(1);
+    expect(stats.run.degradedGaveUp).toBe(0);
+    expect(stats.store.gaveUp).toBe(0);
     expect(stats.store.emptyStructured).toBe(1);
   });
 

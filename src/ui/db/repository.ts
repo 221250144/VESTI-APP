@@ -1014,6 +1014,14 @@ export async function listConversations(
   // reconcile cleanly) but never surface in library/explore listings.
   results = results.filter((record) => !record.is_trash)
 
+  // A1: subagent runs fold under their parent conversation; only callers
+  // that render the folded strip themselves ask for them.
+  if (!filters?.includeSubagents) {
+    results = results.filter(
+      (record) => !(record as { _subagent_of?: unknown })._subagent_of
+    )
+  }
+
   if (filters?.search) {
     const q = filters.search.toLowerCase()
     results = results.filter(
@@ -1542,6 +1550,8 @@ export async function listConversationsByRange(
 ): Promise<Conversation[]> {
   const records = await db.conversations.toArray()
   return records
+    // A1: folded subagent runs roll up into their parent conversation.
+    .filter((record) => !(record as { _subagent_of?: unknown })._subagent_of)
     .map(toConversation)
     .filter((conversation) => {
       const originAt = getConversationOriginAt(conversation)

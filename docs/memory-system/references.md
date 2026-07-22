@@ -1,6 +1,6 @@
 # 参考文献与工具
 
-更新时间：2026-07-19
+更新时间：2026-07-21（补追踪树/子代理谱系相关条目）
 
 记忆系统 v2 调研与设计中参考的文献、工具与官方文档，按主题分类。arXiv 编号已逐条核实；每条一句话说明其与 VESTI 的关联。
 
@@ -43,7 +43,8 @@
 - **claude-mem**：Claude Code 的会话记忆插件（会话结束压缩 + 启动注入），对照方案见 [design.md](design.md) 对照表。
 - **ccusage**：读取 Claude Code 本地 JSONL 做用量统计的 CLI，验证 JSONL 作为可挖掘数据源的成熟度。
 - **ATIF / Harbor**：Agent Trajectory Interchange Format 与其评测运行器，会话轨迹标准化的社区参照（VESTI 的 ParsedSession 中间协议同思路）。
-- **OpenTelemetry GenAI**：GenAI 语义约定，agent 遥测字段（token、模型、工具调用）命名的对齐标准。
+- **OpenTelemetry GenAI**：GenAI 语义约定，agent 遥测字段（token、模型、工具调用）命名的对齐标准；其 span 父子链（`parent_span_id`）是「子代理必须挂回父轨迹」这一结构约束的行业通行表达——VESTI 的 `subagent_links`（parent/child/`agent_role`/`spawned_by_tool_call`）即本地归档语境下的等价物。
+- **Cursor `state.vscdb` 社区逆向**（cursor-chat-export 等工具族）：`composerData`/`bubbleId` KV 层级的公开先例；子代理谱系字段（`subagentInfo.parentComposerId`/`subagentComposerIds`）为本项目 2026-07 实地建模补充，见 [agent-formats.md](agent-formats.md)。
 
 ## 官方文档
 
