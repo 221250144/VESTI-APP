@@ -38,6 +38,7 @@ linux:
   category: Office
   executableName: vesti
   synopsis: AI conversation capture and reflection hub
+  maintainer: VESTI Team <team@vesti.local>
 
 nsis:
   oneClick: false

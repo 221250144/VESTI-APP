@@ -3,7 +3,7 @@
   "productName": "Vesti",
   "version": "0.3.0",
   "description": "Local-first desktop hub for AI conversation capture and reflection",
-  "author": "VESTI Team",
+  "author": "VESTI Team <team@vesti.local>",
   "private": true,
   "main": ".vite/build/main.js",
   "scripts": {
