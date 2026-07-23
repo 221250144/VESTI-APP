@@ -26,6 +26,19 @@ mac:
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
 
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+    - target: deb
+      arch:
+        - x64
+  icon: assets/icon.png
+  category: Office
+  executableName: vesti
+  synopsis: AI conversation capture and reflection hub
+
 nsis:
   oneClick: false
   perMachine: false
