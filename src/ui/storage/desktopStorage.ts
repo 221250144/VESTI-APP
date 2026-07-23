@@ -1501,19 +1501,21 @@ export const desktopStorage: StorageApi = {
     });
 
     // Archive into explore_sessions (best-effort — storage failures must not
-    // sink a finished run).
+    // sink a finished run). A fully-failed run yields empty markdown and is
+    // not archived at all: an Ask history entry of "(turn failed)" markers
+    // would only be noise when the model service is down.
     try {
-      const titlePrefix = lang === "zh" ? "圆桌：" : "Roundtable: ";
-      const sessionId = await createExploreSession(
-        `${titlePrefix}${question.slice(0, 50)}` || "Roundtable",
-      );
-      await addExploreMessage(sessionId, {
-        role: "user",
-        content: question,
-        timestamp: startedAt,
-      });
       const markdown = buildRoundtableRecordMarkdown(result);
       if (markdown) {
+        const titlePrefix = lang === "zh" ? "圆桌：" : "Roundtable: ";
+        const sessionId = await createExploreSession(
+          `${titlePrefix}${question.slice(0, 50)}` || "Roundtable",
+        );
+        await addExploreMessage(sessionId, {
+          role: "user",
+          content: question,
+          timestamp: startedAt,
+        });
         await addExploreMessage(sessionId, {
           role: "assistant",
           content: markdown,

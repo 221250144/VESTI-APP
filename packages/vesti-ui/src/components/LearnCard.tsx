@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BookOpen, Compass, Loader2, MessagesSquare, Sparkles } from "lucide-react";
+import { BookOpen, ChevronDown, ChevronRight, Compass, Loader2, MessagesSquare, Sparkles } from "lucide-react";
 import type { DashboardLabels, LearnDeepenResult, LearnDomain, LearnProfile, StorageApi } from "../types";
 import { SendToMenu } from "./SendToMenu";
 import { buildLearnMarkdown } from "../lib/exploreMarkdown";
@@ -79,6 +79,7 @@ export function LearnCard({
   // the roundtable panel).
   const [llmConfigured, setLlmConfigured] = useState<boolean | undefined>(undefined);
   const [deepenByDomain, setDeepenByDomain] = useState<Record<string, DeepenState>>({});
+  const [showCompactDomains, setShowCompactDomains] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -177,12 +178,18 @@ export function LearnCard({
           <ExploreGateNote text={labels.llmMissing} className="mt-2" />
         ) : null}
 
-        {/* Domains */}
-        {profile.domains.length > 0 && (
+        {/* Domains — V2: expanded (key) domains render full cards;
+             compact/dormant/uncategorized render in a single-row variant
+             inside a collapsible section below. */}
+        {profile.domains.length > 0 && (() => {
+          const expandedDomains = profile.domains.filter((d) => !d.compact);
+          const compactDomains = profile.domains.filter((d) => d.compact);
+          return (
           <div className="mt-5">
             <div className="mb-2 text-[12px] font-medium text-text-secondary">{labels.domainsTitle}</div>
+            {/* Expanded (key) domains */}
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              {profile.domains.map((d) => {
+              {expandedDomains.map((d) => {
                 const total = Math.max(1, d.deep + d.moderate + d.superficial);
                 const deepPct = Math.round((d.deep / total) * 100);
                 const modPct = Math.round((d.moderate / total) * 100);
@@ -332,8 +339,60 @@ export function LearnCard({
                 );
               })}
             </div>
+
+            {/* Compact domains: collapsed by default, shown as single-row chips */}
+            {compactDomains.length > 0 && (
+              <div className="mt-3">
+                <button
+                  type="button"
+                  onClick={() => setShowCompactDomains((v) => !v)}
+                  className="flex w-full items-center gap-1.5 rounded-lg border border-border-subtle px-3 py-2 text-[11.5px] text-text-tertiary transition-colors hover:bg-bg-tertiary"
+                >
+                  {showCompactDomains ? (
+                    <ChevronDown className="h-3.5 w-3.5 shrink-0" strokeWidth={1.75} />
+                  ) : (
+                    <ChevronRight className="h-3.5 w-3.5 shrink-0" strokeWidth={1.75} />
+                  )}
+                  {labels.moreDomains?.replace("{n}", String(compactDomains.length)) ??
+                    `+ ${compactDomains.length} more`}
+                  {compactDomains.some((d) => d.topicId === null) && (
+                    <span className="text-text-tertiary/60">
+                      {labels.uncategorizedIncluded ?? "· includes uncategorized"}
+                    </span>
+                  )}
+                </button>
+                {showCompactDomains && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {compactDomains.map((d) => {
+                      const domainName = d.name || labels.uncategorized;
+                      return (
+                        <div
+                          key={`compact-${d.topicId ?? "null"}`}
+                          className="flex items-center gap-1.5 rounded-md border border-border-subtle bg-bg-surface-card px-2.5 py-1 text-[11px] text-text-secondary"
+                        >
+                          <span className="max-w-[160px] truncate">{domainName}</span>
+                          <span className="text-text-tertiary/60">{d.count}</span>
+                          {onExploreTopic && d.topicId !== null ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onExploreTopic(labels.deepenPrompt.replace("{topic}", domainName))
+                              }
+                              className="ml-1 text-accent-primary hover:underline"
+                            >
+                              {labels.deepen ?? "→"}
+                            </button>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
-        )}
+        );
+        })()}
 
         {/* Glossary */}
         {profile.glossary.length > 0 && (

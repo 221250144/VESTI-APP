@@ -199,6 +199,34 @@ describe("buildRoundtableRecordMarkdown", () => {
     expect(markdown).toContain("**建议**\n\n先小规模试。");
   });
 
+  it("returns an empty string for a fully-failed run so nothing junk gets archived", () => {
+    const result = aggregateRoundtable({
+      question: "q",
+      lang: "zh",
+      grounded: false,
+      seatTurns: [turn("skeptic", "", false), turn("optimist", "", false)],
+      synthesisRaw: "",
+      sources: [],
+      totalDurationMs: 1,
+    });
+    expect(buildRoundtableRecordMarkdown(result)).toBe("");
+  });
+
+  it("still records failed seats alongside successful ones", () => {
+    const result = aggregateRoundtable({
+      question: "q",
+      lang: "zh",
+      grounded: false,
+      seatTurns: [turn("skeptic", "我反对。"), turn("optimist", "", false)],
+      synthesisRaw: "",
+      sources: [],
+      totalDurationMs: 1,
+    });
+    const markdown = buildRoundtableRecordMarkdown(result);
+    expect(markdown).toContain("**怀疑者**\n\n我反对。");
+    expect(markdown).toContain("**乐观者**（发言失败）");
+  });
+
   it("falls back to the raw synthesis text when parsing failed (en)", () => {
     const result = aggregateRoundtable({
       question: "q",

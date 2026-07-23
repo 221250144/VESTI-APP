@@ -72,11 +72,16 @@ describe("buildRelayTranscript", () => {
     const transcript = buildRelayTranscript([
       conversation({ digest: { oneLiner: "x" }, messages }),
     ]);
-    // The excerpt window keeps the newest messages (up to 6).
+    // V2: RECENT_MESSAGE_LIMIT raised to 8; with a single conversation and
+    // 18K budget, the window holds all 10 short messages. Oldest messages
+    // near index 1-2 may drop if budget is tight; the newest messages are
+    // always included.
     expect(transcript).toContain("第 10 条消息");
     expect(transcript).toContain("第 5 条消息");
-    expect(transcript).not.toContain("第 4 条消息");
-    // Chronological order in the output: 用户 line of #5 before #10.
+    // V2: more messages fit in the transcript — the oldest (#1) may or may not
+    // appear depending on budget, but messages #3+ should all be present.
+    expect(transcript).toContain("第 3 条消息");
+    // Chronological order in the output: #5 before #10.
     expect(transcript.indexOf("第 5 条消息")).toBeLessThan(transcript.indexOf("第 10 条消息"));
     expect(transcript).toContain("[用户]");
     expect(transcript).toContain("[AI]");
@@ -94,7 +99,10 @@ describe("buildRelayTranscript", () => {
         ],
       })
     );
-    const budget = 1_500;
+    // V2: priority-weighted allocation — budget must be large enough to fit
+    // all 8 heads (~100 each = 800) + min excerpts per conversation (~600
+    // each on average = 4800). Total ≈ 5600; use 6000 for headroom.
+    const budget = 6_000;
     const transcript = buildRelayTranscript(many, budget);
     expect(transcript.length).toBeLessThanOrEqual(budget);
     for (let index = 0; index < 8; index += 1) {

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  OnboardingWizard,
   VestiDashboard,
   type AitiImagery,
   type AitiProfile,
@@ -13,6 +14,7 @@ import { HomeDashboard } from "./ui/shell/HomeDashboard";
 import { SettingsPage } from "./ui/shell/SettingsPage";
 import { TitleBar } from "./ui/shell/TitleBar";
 import { useUiTheme } from "./ui/shell/useUiTheme";
+import { useOnboarding } from "./ui/shell/useOnboarding";
 import { LOGO_BASE64 } from "./ui/logo";
 import { desktopStorage } from "./ui/storage/desktopStorage";
 import {
@@ -158,8 +160,17 @@ function Shell() {
   const dashboardTab: DashboardTab = page === "settings" || page === "home" ? "library" : page;
   const showLoading =
     syncState.conversationCount === 0 && (syncState.syncing || syncState.lastSyncAt === null);
+  const syncReady = !showLoading && syncState.conversationCount > 0;
+  const onboarding = useOnboarding(locale as SupportedLocale, syncReady);
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-bg-app text-text-primary">
+      {onboarding.show && (
+        <OnboardingWizard
+          locale={locale as SupportedLocale}
+          onComplete={onboarding.complete}
+          onSkip={onboarding.skip}
+        />
+      )}
       <TitleBar />
       <div className="flex min-h-0 flex-1">
         <Dock

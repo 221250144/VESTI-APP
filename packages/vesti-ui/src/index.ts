@@ -9,6 +9,8 @@ export { DailyTab } from "./tabs/daily-tab";
 export { AitiCard } from "./components/AitiCard";
 export { LearnCard } from "./components/LearnCard";
 export { RoundtablePanel } from "./components/RoundtablePanel";
+export { OnboardingWizard } from "./components/OnboardingWizard";
+export type { OnboardingProps } from "./components/OnboardingWizard";
 export { StructuredSummaryCard } from "./components/StructuredSummaryCard";
 export { SummaryPipelineProgress } from "./components/SummaryPipelineProgress";
 export { MOCK_NOTES } from "./mock-data";

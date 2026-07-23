@@ -3,7 +3,11 @@ import type { RelayFileTouchRow } from "../../shared/contracts";
 import {
   extractRelayFileAnchors,
   extractTouchPath,
+  extractTouchPathStructured,
+  extractTouchPathV2,
+  extractVerificationCommands,
   formatRelayFileAnchorBlock,
+  formatVerificationBlock,
   RELAY_FILE_ANCHOR_LIMIT,
   sameAnchorPath,
 } from "./relayFiles";
@@ -153,5 +157,132 @@ describe("sameAnchorPath", () => {
   it("matches case- and separator-folded paths", () => {
     expect(sameAnchorPath("Src\\A.ts", "src/a.ts/")).toBe(true);
     expect(sameAnchorPath("src/a.ts", "src/b.ts")).toBe(false);
+  });
+});
+
+// ---- V2: Structured Extraction & Verification Tests -------------------------
+
+describe("extractTouchPathStructured", () => {
+  it("extracts from standard keys", () => {
+    expect(extractTouchPathStructured({ file_path: "src/main.ts" })).toBe("src/main.ts");
+    expect(extractTouchPathStructured({ filePath: "src/lib.ts" })).toBe("src/lib.ts");
+    expect(extractTouchPathStructured({ path: "config.json" })).toBe("config.json");
+  });
+
+  it("extracts from non-standard keys (notebook, target_file, etc.)", () => {
+    expect(extractTouchPathStructured({ notebook_path: "notes.ipynb" })).toBe("notes.ipynb");
+    expect(extractTouchPathStructured({ target_file: "out/bundle.js" })).toBe("out/bundle.js");
+    expect(extractTouchPathStructured({ old_path: "src/old.ts", new_path: "src/new.ts" }))
+      .toBe("src/old.ts"); // first matching key wins
+  });
+
+  it("returns null for non-file objects", () => {
+    expect(extractTouchPathStructured(null)).toBeNull();
+    expect(extractTouchPathStructured(undefined)).toBeNull();
+    expect(extractTouchPathStructured({ query: "search something" })).toBeNull();
+  });
+
+  it("skips URLs", () => {
+    expect(extractTouchPathStructured({ file_path: "https://example.com/file.ts" })).toBeNull();
+  });
+});
+
+describe("extractTouchPathV2", () => {
+  it("prefers structured over regex", () => {
+    const result = extractTouchPathV2(
+      { file_path: "src/structured.ts" },
+      '{"file_path": "src/legacy.ts"}',
+    );
+    expect(result).toBe("src/structured.ts");
+  });
+
+  it("falls back to regex when structured is null", () => {
+    const result = extractTouchPathV2(
+      { query: "no path" },
+      '{"file_path": "src/legacy.ts"}',
+    );
+    expect(result).toBe("src/legacy.ts");
+  });
+});
+
+describe("extractVerificationCommands", () => {
+  const makeRow = (overrides: {
+    toolName?: string;
+    toolInput?: string;
+    toolOutput?: string;
+    toolError?: string;
+    timestamp?: number;
+  }) => ({
+    toolName: overrides.toolName ?? "bash",
+    toolInput: overrides.toolInput ?? "",
+    toolOutput: overrides.toolOutput ?? "",
+    toolError: overrides.toolError ?? null,
+    timestamp: overrides.timestamp ?? 1000,
+  });
+
+  it("extracts npm test commands", () => {
+    const cmds = extractVerificationCommands([
+      makeRow({ toolName: "bash", toolInput: "npm test -- --run", toolOutput: "42 passed" }),
+    ]);
+    expect(cmds).toHaveLength(1);
+    expect(cmds[0].command).toContain("npm test");
+    expect(cmds[0].passed).toBe(true);
+  });
+
+  it("detects failed verification", () => {
+    const cmds = extractVerificationCommands([
+      makeRow({
+        toolName: "bash",
+        toolInput: "pnpm test",
+        toolOutput: "3 tests failed. exit code 1",
+      }),
+    ]);
+    expect(cmds).toHaveLength(1);
+    expect(cmds[0].passed).toBe(false);
+  });
+
+  it("detects tsc typecheck", () => {
+    const cmds = extractVerificationCommands([
+      makeRow({ toolName: "bash", toolInput: "npx tsc --noEmit", toolOutput: "" }),
+    ]);
+    expect(cmds).toHaveLength(1);
+    expect(cmds[0].command).toContain("tsc");
+  });
+
+  it("ignores non-verification shell tools", () => {
+    const cmds = extractVerificationCommands([
+      makeRow({ toolName: "bash", toolInput: "echo hello world" }),
+    ]);
+    expect(cmds).toHaveLength(0);
+  });
+
+  it("ignores non-shell tools", () => {
+    const cmds = extractVerificationCommands([
+      makeRow({ toolName: "read", toolInput: "pnpm test src/test.ts" }),
+    ]);
+    expect(cmds).toHaveLength(0);
+  });
+
+  it("sorts most recent first", () => {
+    const cmds = extractVerificationCommands([
+      makeRow({ toolName: "bash", toolInput: "npm test", timestamp: 100 }),
+      makeRow({ toolName: "bash", toolInput: "npm run build", timestamp: 300 }),
+    ]);
+    expect(cmds[0].command).toContain("build");
+  });
+});
+
+describe("formatVerificationBlock", () => {
+  it("renders a block with the latest verification result", () => {
+    const block = formatVerificationBlock([
+      { command: "npm test", output: "42 passed", passed: true, timestamp: 200 },
+    ]);
+    expect(block).toContain("程序提取的验证命令");
+    expect(block).toContain("npm test");
+    expect(block).toContain("✓ 通过");
+  });
+
+  it("returns null for empty list", () => {
+    expect(formatVerificationBlock([])).toBeNull();
   });
 });

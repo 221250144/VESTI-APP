@@ -274,6 +274,10 @@ export function buildRoundtableRecordMarkdown(result: RoundtableResult): string 
   const lines: string[] = [];
   const okTurns = result.seatTurns.filter((turn) => turn.ok && turn.content.trim());
   const failedTurns = result.seatTurns.filter((turn) => !turn.ok);
+  // A fully-failed run (LLM service down: quota, network…) has nothing worth
+  // archiving — an empty string tells the storage layer to skip the Ask
+  // history entry instead of filling it with "(turn failed)" markers.
+  if (okTurns.length === 0 && !result.synthesis && !result.synthesisRaw.trim()) return "";
   if (okTurns.length > 0) {
     lines.push(`## ${text.seats}`, "");
     for (const turn of okTurns) {

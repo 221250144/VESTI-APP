@@ -2049,6 +2049,21 @@ export interface DashboardLabels {
     groundedHint: string;
     /** Note that the deep-dive was archived into the Ask history. */
     savedHint: string;
+    /** Domain recency line: "{n}" conversations in the last 7 days, "{m}" in
+     * the last 30. Shown when the domain saw any activity in 30 days. */
+    domainActivity: string;
+    /** Domain recency line when nothing happened in the last 30 days. */
+    domainIdle: string;
+    /** Caption over the domain's unresolved "next step" question. */
+    nextStepTitle: string;
+    /** Button: seed Ask with a follow-up on the unresolved question. */
+    followUp: string;
+    /** Prefilled Ask template for the follow-up; "{question}" = the thread. */
+    followUpPrompt: string;
+    /** Button: hand the domain to the roundtable as a discussion topic. */
+    toRoundtable: string;
+    /** Roundtable question template for that handoff; "{topic}" = domain name. */
+    roundtablePrompt: string;
   };
   roundtable: {
     title: string;
@@ -2100,6 +2115,18 @@ export interface DashboardLabels {
     /** Prefilled Ask template; "{question}" = topic, "{persona}" = seat name,
      * "{excerpt}" = a short excerpt of that seat's viewpoint. */
     deepenPrompt: string;
+    /** Caption over the scenario preset chips (one-click seat lineups). */
+    scenesLabel: string;
+    sceneTechReview: string;
+    sceneStudyQa: string;
+    sceneDecisionDebate: string;
+    /** Copy the whole result (seats + synthesis) as Markdown to the clipboard. */
+    copyResult: string;
+    copied: string;
+    copyFailed: string;
+    /** Shown instead of the result when every seat's turn failed — usually the
+     * model service is down (out of quota / network), not a user mistake. */
+    allSeatsFailed: string;
   };
 }
 
@@ -2202,6 +2229,24 @@ export interface LearnDomain {
   /** Up to 3 conversations that best represent this domain (deepest first,
    * then most recent) — the evidence-chain jump targets. */
   representatives: Array<{ conversationId: number; title: string }>;
+  /** Recency (optional — computeLearn fills these; hand-built profiles may
+   * omit them): conversations updated in the last 7 / 30 days, and the last
+   * activity timestamp. Drives the domain card's "still active vs dormant"
+   * line. */
+  recent7?: number;
+  recent30?: number;
+  lastActiveAt?: number;
+  /** The domain's most recently-left unresolved thread — the concrete "next
+   * step" the card offers to follow up on. Absent when no conversation in the
+   * domain left one. */
+  openQuestion?: { text: string; conversationId: number };
+  /** V2: domain importance score (0-1). Key domains (≥0.5) render expanded;
+   * minor domains render compact. Computed from count recency, depth mix,
+   * and open questions. */
+  importanceScore?: number;
+  /** V2: when true, this domain has so few conversations (or is dormant)
+   * that it renders in a compact single-row variant to save space. */
+  compact?: boolean;
 }
 export interface LearnGlossaryEntry {
   term: string;

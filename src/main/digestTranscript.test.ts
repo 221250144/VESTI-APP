@@ -212,3 +212,87 @@ describe('formatDigestMessage', () => {
     expect(out).toContain('工具：Read');
   });
 });
+
+// ---- Numeric Fact Extraction Tests -----------------------------------------
+
+import {
+  extractNumericFacts,
+  formatNumericFactsBlock,
+  scoreFactDensity,
+} from './digestTranscript';
+
+describe('extractNumericFacts', () => {
+  it('extracts semantic version numbers', () => {
+    const facts = extractNumericFacts('升级到 v2.3.1 后解决了问题。也试过 1.0.0-beta.2');
+    const versions = facts.filter(f => f.label === '版本').map(f => f.value);
+    expect(versions).toContain('v2.3.1');
+    expect(versions).toContain('1.0.0-beta.2');
+  });
+
+  it('extracts numbers with units', () => {
+    const facts = extractNumericFacts('超时设为 30s，内存限制 512MB，压缩到 85%');
+    const unitFacts = facts.filter(f => f.label === '数值+单位');
+    expect(unitFacts.some(f => f.value.includes('30s'))).toBe(true);
+    expect(unitFacts.some(f => f.value.includes('512MB'))).toBe(true);
+    expect(unitFacts.some(f => f.value.includes('85%'))).toBe(true);
+  });
+
+  it('extracts port numbers in context', () => {
+    const facts = extractNumericFacts('服务启动在 port 3000，调试端口 :9229');
+    const ports = facts.filter(f => f.label === '端口').map(f => f.value);
+    expect(ports.some(p => p.includes('3000'))).toBe(true);
+    expect(ports.some(p => p.includes('9229'))).toBe(true);
+  });
+
+  it('extracts config parameters', () => {
+    const facts = extractNumericFacts('timeout: 5000, max_retries=3, chunk_size: 64KB');
+    const configs = facts.filter(f => f.label === '配置参数');
+    expect(configs.some(f => f.value.includes('5000'))).toBe(true);
+    expect(configs.some(f => f.value.includes('3'))).toBe(true);
+  });
+
+  it('skips long numeric IDs (10+ digits)', () => {
+    const facts = extractNumericFacts('事务 ID 12345678901 和用户 ID 98765432101');
+    // No facts should match 10+ digit "IDs".
+    const longDigits = facts.filter(f => /\d{10,}/.test(f.value));
+    expect(longDigits).toHaveLength(0);
+  });
+
+  it('deduplicates identical values', () => {
+    const facts = extractNumericFacts('版本 v2.0.0 已发布。v2.0.0 是主要版本。');
+    const versions = facts.filter(f => f.value === 'v2.0.0');
+    expect(versions).toHaveLength(1);
+  });
+
+  it('formats a facts block from extracted facts', () => {
+    const facts = extractNumericFacts('升级到 v2.3.1，超时 30s');
+    const block = formatNumericFactsBlock(facts);
+    expect(block).toContain('系统自动提取的数值事实');
+    expect(block).toContain('v2.3.1');
+    expect(block).toContain('30s');
+  });
+
+  it('returns empty string when no facts found', () => {
+    expect(formatNumericFactsBlock([])).toBe('');
+  });
+});
+
+describe('scoreFactDensity', () => {
+  it('scores higher for messages with quoted strings and numbers', () => {
+    const low = scoreFactDensity('用户：好的，我看看');
+    const high = scoreFactDensity('AI：配置文件 "config.json" 中 timeout: 5000ms, retries=3');
+    expect(high).toBeGreaterThan(low);
+  });
+
+  it('scores higher for messages with version/error keywords', () => {
+    const low = scoreFactDensity('用户：你好');
+    const high = scoreFactDensity('AI：版本 v2.0 修复了 migration 错误，breaking change 需要更新');
+    expect(high).toBeGreaterThan(low);
+  });
+
+  it('prefers medium-length messages over very short or very long', () => {
+    const tooShort = scoreFactDensity('短');
+    const medium = scoreFactDensity('A'.repeat(500) + ' fix: deploy v2.0 breaking change timeout=30s');
+    expect(medium).toBeGreaterThan(tooShort);
+  });
+});

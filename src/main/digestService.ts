@@ -1,4 +1,4 @@
-import { deriveProjectKey, serializeVector } from '@vesti/capture-core';
+import { deriveProjectKey, serializeVector, stripInjectedContextBlocks } from '@vesti/capture-core';
 import type { SessionDigest, SessionDigestStats } from '@vesti/capture-core';
 import type {
   AgentResult,
@@ -11,6 +11,8 @@ import {
   RECENT_MESSAGE_LIMIT,
   TRANSCRIPT_BUDGET_CHARS,
   buildDigestTranscript as buildTranscript,
+  extractNumericFacts,
+  formatNumericFactsBlock,
 } from './digestTranscript';
 
 /**
@@ -29,8 +31,14 @@ import {
  * still degrades is marked embedding_status='degraded' and left alone until
  * the session grows or the version bumps. No new columns — the mark reuses
  * the existing embedding_status field (runtime judgment elsewhere).
+ *
+ * v3 (2026-07-22 发布前检查): injected-context stripping in the transcript
+ * window and the fallback one_liner (codex <environment_context>, cursor
+ * <timestamp>/<user_query>, kimi <git-context> were echoed into digests and
+ * from there into project cards/briefs). The bump regenerates every digest
+ * written during the 07-19..07-22 LLM outage in one pass.
  */
-export const DIGEST_VERSION = 2;
+export const DIGEST_VERSION = 3;
 
 const FALLBACK_ONE_LINER_CHARS = 100;
 const MAX_RETRIES = 2;
@@ -129,8 +137,12 @@ export interface DigestEmbedder {
 }
 
 function firstUserText(messages: SessionMessage[]): string {
-  const firstUser = messages.find(message => message.role === 'user' && message.contentText?.trim());
-  return (firstUser?.contentText ?? messages[0]?.contentText ?? '');
+  // Stripped of injected context so echo comparisons and fallbacks see the
+  // user's actual words, matching what the digest transcript now carries.
+  const firstUser = messages.find(
+    message => message.role === 'user' && stripInjectedContextBlocks(message.contentText ?? '').trim(),
+  );
+  return stripInjectedContextBlocks(firstUser?.contentText ?? messages[0]?.contentText ?? '');
 }
 
 export class DigestService {
@@ -268,8 +280,18 @@ export class DigestService {
   private async process(sessionId: string): Promise<void> {
     const detail = this.store.getSession(sessionId);
     if (!detail || detail.messages.length === 0) return;
-    const transcript = buildDigestTranscript(detail.messages);
+    let transcript = buildDigestTranscript(detail.messages);
     if (!transcript.trim()) return;
+
+    // V4 (Digest V2): pre-extract numeric/unit facts from the transcript and
+    // append them as a structured reference block so the LLM can integrate
+    // provided values rather than discover them from scratch. Bench C showed
+    // 6.4% numerical fidelity — this block addresses the root cause.
+    const numericFacts = extractNumericFacts(transcript);
+    const factsBlock = formatNumericFactsBlock(numericFacts);
+    if (factsBlock) {
+      transcript = `${transcript}\n\n${factsBlock}`;
+    }
 
     // A degraded row gets exactly one retry pass; still-degraded output is
     // marked 'degraded' and never auto-retried again.
@@ -381,6 +403,8 @@ export class DigestService {
   }
 
   private fallbackOneLiner(messages: SessionMessage[]): string {
+    // firstUserText strips injected context, so outage-fallback rows no longer
+    // surface raw machine tags in the tree, project cards and relay packs.
     return collapseWhitespace(firstUserText(messages)).slice(0, FALLBACK_ONE_LINER_CHARS);
   }
 

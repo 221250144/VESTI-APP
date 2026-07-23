@@ -876,6 +876,13 @@ const DEFAULT_LABELS: DashboardLabels = {
     llmMissing: "No model configured — set up an LLM in Settings first; the AI deep-dive needs one to analyze.",
     groundedHint: "Grounded in {n} of your past conversations",
     savedHint: "Saved to your Ask history — replay it anytime from the Ask tab.",
+    domainActivity: "{n} in the last 7 days · {m} in the last 30",
+    domainIdle: "No new conversations in the last 30 days",
+    nextStepTitle: "Still unresolved",
+    followUp: "Follow up",
+    followUpPrompt: "I left a question unresolved: \"{question}\". Walk me through it properly, drawing on my past conversations.",
+    toRoundtable: "Take it to the roundtable",
+    roundtablePrompt: "On \"{topic}\": where is my understanding still weak, and what is worth investing in next?",
   },
   roundtable: {
     title: "AI Roundtable",
@@ -912,6 +919,14 @@ const DEFAULT_LABELS: DashboardLabels = {
     personaDevilsAdvocate: "Devil's Advocate",
     deepen: "Go deeper",
     deepenPrompt: "In the roundtable on \"{question}\", {persona} argued: \"{excerpt}\". Dig into this viewpoint against my past conversations — where does it hold, where does it not?",
+    scenesLabel: "Scenario presets",
+    sceneTechReview: "Tech review",
+    sceneStudyQa: "Study Q&A",
+    sceneDecisionDebate: "Decision debate",
+    copyResult: "Copy result",
+    copied: "Copied",
+    copyFailed: "Copy failed",
+    allSeatsFailed: "The discussion couldn't run: every panelist's turn failed. This usually means the model service is unavailable (out of quota, or a network issue) — check the model settings and try again.",
   },
 };
 
@@ -1003,6 +1018,12 @@ export function VestiDashboard({
   const handleExploreTopic = useCallback((text: string) => {
     setAskSeed({ text, nonce: Date.now() });
     setExploreMode("ask");
+  }, []);
+  // Learn → Roundtable handoff ("发起圆桌"): same pattern, other pane.
+  const [roundtableSeed, setRoundtableSeed] = useState<{ text: string; nonce: number } | null>(null);
+  const handleRoundtableTopic = useCallback((text: string) => {
+    setRoundtableSeed({ text, nonce: Date.now() });
+    setExploreMode("roundtable");
   }, []);
   const handleGoAiti = useCallback(() => setExploreMode("aiti"), []);
 
@@ -1605,6 +1626,7 @@ export function VestiDashboard({
                     onOpenConversation={handleOpenConversation}
                     onOpenAiti={handleGoAiti}
                     onExploreTopic={handleExploreTopic}
+                    onRoundtableTopic={handleRoundtableTopic}
                     storage={storage}
                     sendToLabels={labels.library}
                     lang={lang}
@@ -1624,6 +1646,7 @@ export function VestiDashboard({
                       learn?.available ? learnTopicSuggestions(learn) : undefined
                     }
                     onExploreTopic={handleExploreTopic}
+                    seedQuestion={roundtableSeed}
                   />
                 </div>
               )}

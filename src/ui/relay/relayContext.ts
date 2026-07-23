@@ -2,19 +2,101 @@
 // agent kind. Pure functions — the caller (desktopStorage) gathers digests,
 // summaries and recent messages from Dexie and passes them in; everything
 // budget-related is deterministic and unit-tested here.
+//
+// V2 (2026-07): unified relay pack schema, priority-weighted budget allocation,
+// primary conversation support, and cross-session timeline assembly.
 
 import {
   formatRelayFileAnchorBlock,
   type RelayFileAnchor,
 } from "./relayFiles";
 
-/** Total transcript budget handed to the relay agent (~24K chars). The main
- * process caps transcriptOverride at 30K, so this always fits. */
-export const RELAY_CONTEXT_BUDGET_CHARS = 24_000;
-const RECENT_MESSAGE_LIMIT = 6;
-const MESSAGE_EXCERPT_MAX_CHARS = 500;
+/** Total transcript budget handed to the relay agent. The main process caps
+ * transcriptOverride at 30K, so this always fits.
+ * V2: raised from 24K to 28K — modern models comfortably hold >28K of
+ * structured context per turn and the extra headroom buys significantly more
+ * message excerpts for multi-conversation relays. */
+export const RELAY_CONTEXT_BUDGET_CHARS = 28_000;
+/** Budget when only a single conversation is selected — most of the handoff
+ * value comes from the target session's own details. */
+export const RELAY_SINGLE_CONVERSATION_BUDGET_CHARS = 18_000;
+const RECENT_MESSAGE_LIMIT = 8;
+const MESSAGE_EXCERPT_MAX_CHARS = 600;
 const SUMMARY_FALLBACK_MAX_CHARS = 600;
 const SNIPPET_FALLBACK_MAX_CHARS = 200;
+/** Minimum excerpt budget per conversation so none is voiceless. */
+const MIN_PER_CONVERSATION_EXCERPT_CHARS = 800;
+/** Fraction of remaining budget reserved for the primary conversation. */
+const PRIMARY_CONVERSATION_BUDGET_FRACTION = 0.5;
+
+// ---- V2 Unified Relay Pack Schema -------------------------------------------
+
+/** Environment state captured from tool executions and session metadata. */
+export interface RelayPackEnvironment {
+  gitBranch?: string;
+  gitRemote?: string;
+  dirtyFiles?: string[];
+  lastCommits?: string[];
+  nodeVersion?: string;
+  packageManager?: string;
+}
+
+/** A structured decision with rationale. */
+export interface RelayPackDecision {
+  decision: string;
+  rationale: string;
+}
+
+/** A failed/dead-end path that was tried and abandoned. */
+export interface RelayPackFailedPath {
+  approach: string;
+  whyFailed: string;
+  /** Where in the conversation this is evidenced (message index or digest ref). */
+  evidence: string;
+}
+
+/** Verification state — programmatically extracted when possible. */
+export interface RelayPackVerification {
+  /** The last verification command that was actually executed. */
+  lastCommand: string;
+  /** Its most recent output (truncated). */
+  lastResult: string;
+  /** Whether the last run passed (inferred from exit code or output signal). */
+  passed: boolean;
+}
+
+/** Confidence assessment for the relay pack. */
+export interface RelayPackConfidence {
+  overall: number;   // 0-1
+  lowAreas: string[];
+}
+
+/** V2 unified relay pack schema — the single machine-readable format shared
+ * across the relay LLM pack, capsule draft, and VESTI-SKILLS handoff. */
+export interface RelayPackV2 {
+  meta: {
+    version: 2;
+    createdAt: string;           // ISO 8601
+    conversationCount: number;
+    primaryConversationId?: number;
+  };
+  goal: string;
+  state: {
+    completed: string[];
+    inProgress: string[];
+    blocked: string[];           // new: items blocked by unresolved dependencies
+  };
+  files: RelayFileAnchor[];      // program-extracted, not LLM-invented
+  decisions: RelayPackDecision[];
+  failedPaths: RelayPackFailedPath[];
+  verification: RelayPackVerification;
+  nextSteps: string[];
+  confidence: RelayPackConfidence;
+  /** Environment snapshot gathered from tool executions. */
+  environment?: RelayPackEnvironment;
+  /** Paste-ready handoff prompt with framing prefix + verify-first suffix. */
+  handoffPrompt: string;
+}
 
 export interface RelayContextDigest {
   oneLiner?: string | null;
@@ -53,6 +135,34 @@ export interface RelayContextConversation {
   messages: RelayContextMessage[];
   /** A1: briefs of subagent runs spawned by this conversation (optional). */
   subagents?: RelayContextSubagent[];
+  /** Timestamp for timeline ordering (epoch ms). */
+  createdAt?: number;
+  /** V2: when true, this conversation is the primary and gets weighted budget. */
+  isPrimary?: boolean;
+}
+
+/**
+ * V2: compute a conversation's information density score for budget weighting.
+ * Decision-heavy and file-rich conversations carry more relay value and get
+ * proportionally more excerpt budget.
+ */
+export function computeConversationPriority(
+  conversation: RelayContextConversation
+): number {
+  let score = 1.0;
+  if (conversation.isPrimary) score += 0.5;
+  if ((conversation.digest?.decisions?.length ?? 0) > 0) score += 0.3;
+  if ((conversation.digest?.keyFiles?.length ?? 0) > 0) score += 0.2;
+  if ((conversation.digest?.openQuestions?.length ?? 0) > 0) score += 0.2;
+  if (conversation.git?.branch) score += 0.1;
+  // Platforms that carry structured agent work (tool calls, file edits)
+  // typically have richer handoff content than casual chat platforms.
+  const structuredPlatforms = new Set([
+    'claude-code', 'kimi-code', 'codex', 'cursor', 'aider',
+    'Claude Code', 'Kimi Code', 'Codex', 'Cursor', 'Aider',
+  ]);
+  if (structuredPlatforms.has(conversation.platform)) score += 0.1;
+  return score;
 }
 
 function collapseWhitespace(value: string): string {
@@ -204,21 +314,44 @@ function collectMessageExcerpts(
 
 /**
  * Assemble the relay transcript. Head blocks (digest/summary/fallback) are
- * always kept; the remaining budget is split evenly across conversations for
- * recent-message excerpts. The result never exceeds `budgetChars` (beyond a
- * possible few chars of truncation marker).
+ * always kept; the remaining budget is split across conversations with
+ * priority-weighted allocation (V2). When a primary conversation is marked
+ * (isPrimary), it receives 50% of the excerpt budget.
  *
  * `options.fileAnchors` (P4a quality): deterministically extracted key-file
  * anchors — when present, a "关键文件（程序提取，带锚点）" block rides at the
  * very top of the transcript (counted against the budget) and the relay
  * prompt pins the model's key_files output to that list.
+ *
+ * `options.primaryConversationId` (V2): when set, the matching conversation
+ * is treated as the weighted primary for budget allocation regardless of
+ * its `isPrimary` flag.
  */
 export function buildRelayTranscript(
   conversations: RelayContextConversation[],
   budgetChars: number = RELAY_CONTEXT_BUDGET_CHARS,
-  options: { fileAnchors?: RelayFileAnchor[] } = {}
+  options: {
+    fileAnchors?: RelayFileAnchor[];
+    primaryConversationId?: number;
+  } = {}
 ): string {
   if (conversations.length === 0) return "";
+
+  // V2: single-conversation relay gets the higher budget.
+  const effectiveBudget =
+    conversations.length === 1
+      ? Math.min(budgetChars, RELAY_SINGLE_CONVERSATION_BUDGET_CHARS)
+      : budgetChars;
+
+  // V2: mark the primary conversation.
+  if (options.primaryConversationId !== undefined) {
+    for (const conversation of conversations) {
+      if (conversation.id === options.primaryConversationId) {
+        conversation.isPrimary = true;
+        break;
+      }
+    }
+  }
 
   const anchorBlock = formatRelayFileAnchorBlock(
     options.fileAnchors ?? [],
@@ -242,19 +375,77 @@ export function buildRelayTranscript(
   const fixedTotal =
     fixedBlocks.reduce((sum, block) => sum + block.length, 0) +
     separator.length * (fixedBlocks.length - 1);
-  if (fixedTotal >= budgetChars) {
-    return `${fixedBlocks.join(separator).slice(0, Math.max(0, budgetChars - 12))}\n[上下文已截断]`;
+  if (fixedTotal >= effectiveBudget) {
+    return `${fixedBlocks.join(separator).slice(0, Math.max(0, effectiveBudget - 12))}\n[上下文已截断]`;
   }
 
-  const perConversation = Math.floor((budgetChars - fixedTotal) / conversations.length);
+  const excerptBudget = effectiveBudget - fixedTotal;
+
+  // V2: priority-weighted budget allocation.
+  const hasPrimary = conversations.some((c) => c.isPrimary);
+  const priorities = conversations.map((c) => computeConversationPriority(c));
+  const totalPriority = priorities.reduce((a, b) => a + b, 0);
+
+  let perConversationBudgets: number[];
+  if (hasPrimary && conversations.length > 1) {
+    // Primary conversation gets a guaranteed fraction; the rest is
+    // priority-weighted.
+    const primaryReserve = Math.floor(
+      excerptBudget * PRIMARY_CONVERSATION_BUDGET_FRACTION
+    );
+    const remainder = excerptBudget - primaryReserve;
+    perConversationBudgets = conversations.map((c, i) => {
+      if (c.isPrimary) {
+        // Primary gets its reserve + its share of remainder.
+        const shareOfRemainder =
+          totalPriority > 0
+            ? Math.floor(remainder * (priorities[i] / totalPriority))
+            : 0;
+        return primaryReserve + shareOfRemainder;
+      }
+      const nonPrimaryTotal = totalPriority - (conversations.find(c => c.isPrimary) ? priorities[conversations.findIndex(c => c.isPrimary)] : 0);
+      return nonPrimaryTotal > 0
+        ? Math.floor(remainder * (priorities[i] / nonPrimaryTotal))
+        : Math.floor(remainder / (conversations.length - 1));
+    });
+  } else {
+    // No primary: pure priority-weighted split, with a floor per conversation.
+    perConversationBudgets = conversations.map((c, i) =>
+      totalPriority > 0
+        ? Math.max(
+            MIN_PER_CONVERSATION_EXCERPT_CHARS,
+            Math.floor(excerptBudget * (priorities[i] / totalPriority))
+          )
+        : Math.floor(excerptBudget / conversations.length)
+    );
+  }
+
+  // Ensure budgets sum to ≤ excerptBudget (floating point guard).
+  let budgetSum = perConversationBudgets.reduce((a, b) => a + b, 0);
+  if (budgetSum > excerptBudget && perConversationBudgets.length > 0) {
+    // Proportionally scale all budgets down to fit.
+    const scale = excerptBudget / budgetSum;
+    perConversationBudgets = perConversationBudgets.map((b) =>
+      Math.max(MIN_PER_CONVERSATION_EXCERPT_CHARS, Math.floor(b * scale))
+    );
+    // If the proportional scale still overflows (floor keeps values high),
+    // drop the floor and evenly distribute — budget is genuinely too tight.
+    budgetSum = perConversationBudgets.reduce((a, b) => a + b, 0);
+    if (budgetSum > excerptBudget) {
+      const equal = Math.floor(excerptBudget / perConversationBudgets.length);
+      perConversationBudgets = perConversationBudgets.map(() => equal);
+    }
+  }
+
   const headCount = (anchorBlock ? 1 : 0) + (aggregate ? 1 : 0);
   const blocks = conversations.map((conversation, index) => {
-    const excerpts = collectMessageExcerpts(conversation.messages, perConversation);
+    const budgetForThis = perConversationBudgets[index] ?? Math.floor(excerptBudget / conversations.length);
+    const excerpts = collectMessageExcerpts(conversation.messages, budgetForThis);
     if (excerpts.length === 0) return heads[index];
     return `${heads[index]}\n最近消息：\n${excerpts.join("\n")}`;
   });
 
   const assembled = [...fixedBlocks.slice(0, headCount), ...blocks].join(separator);
-  if (assembled.length <= budgetChars) return assembled;
-  return `${assembled.slice(0, Math.max(0, budgetChars - 12))}\n[上下文已截断]`;
+  if (assembled.length <= effectiveBudget) return assembled;
+  return `${assembled.slice(0, Math.max(0, effectiveBudget - 12))}\n[上下文已截断]`;
 }

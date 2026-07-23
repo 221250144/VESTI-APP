@@ -3,6 +3,9 @@
 // the captured tool_executions (read/write/edit touches) of the selected
 // sessions. Pure functions: the caller (desktopStorage) fetches raw touch
 // rows over IPC and resolves capture session ids to conversation ids.
+//
+// V2 (2026-07): structured extraction from parsed JSON tool inputs (not regex
+// on stringified JSON), and verification command extraction from tool calls.
 
 import type { RelayFileTouchRow } from "../../shared/contracts";
 
@@ -49,6 +52,169 @@ export function extractTouchPath(inputSummary: string | null | undefined): strin
   if (!trimmed || trimmed.length > 500) return null;
   if (/^https?:\/\//i.test(trimmed)) return null;
   return trimmed;
+}
+
+// ---- V2: Structured File Extraction ----------------------------------------
+
+/** File-path keys in priority order — checked against a parsed JSON object
+ * so the exact key name does not matter. This covers tools that use
+ * non-standard schemas (str_replace_editor, apply_patch, etc.). */
+const STRUCTURED_PATH_KEYS = [
+  'file_path', 'filePath', 'path',
+  'notebook_path', 'notebookPath',
+  'target_file', 'targetFile',
+  'old_path', 'new_path',  // rename/move tools
+  'output_file', 'outputFile',
+];
+
+/**
+ * V2: extract a file path from a properly parsed JSON tool input object.
+ * Checks known path keys in priority order, returns the first non-URL,
+ * non-empty file path found. Returns null when the input carries no path.
+ */
+export function extractTouchPathStructured(
+  toolInput: Record<string, unknown> | null | undefined,
+): string | null {
+  if (!toolInput || typeof toolInput !== 'object') return null;
+  for (const key of STRUCTURED_PATH_KEYS) {
+    const value = toolInput[key];
+    if (typeof value !== 'string') continue;
+    const trimmed = value.trim();
+    if (!trimmed || trimmed.length > 500) continue;
+    if (/^https?:\/\//i.test(trimmed)) continue;
+    return trimmed;
+  }
+  return null;
+}
+
+/**
+ * V2: dual-tier file path extraction. Attempts structured extraction first
+ * (from a parsed JSON object), falls back to the legacy regex-based extraction
+ * (for rows where the tool input is only available as a string).
+ */
+export function extractTouchPathV2(
+  toolInput: Record<string, unknown> | null | undefined,
+  inputSummary: string | null | undefined,
+): string | null {
+  // Tier 1: structured extraction from parsed JSON.
+  const structured = extractTouchPathStructured(toolInput);
+  if (structured) return structured;
+  // Tier 2: regex fallback on stringified input.
+  return extractTouchPath(inputSummary);
+}
+
+// ---- V2: Verification Command Extraction -----------------------------------
+
+/** Tool names that represent verification/check commands. */
+const VERIFICATION_TOOL_NAMES = new Set([
+  'bash', 'shell', 'execute_command', 'run',
+  'terminal', 'exec', 'command',
+]);
+
+/** Patterns identifying verification-intent commands. */
+const VERIFICATION_COMMAND_PATTERNS = [
+  /\b(npm\s+(test|run\s+build|lint|typecheck|tsc))\b/i,
+  /\b(pnpm\s+(test|build|lint|typecheck))\b/i,
+  /\b(yarn\s+(test|build|lint))\b/i,
+  /\b(npx\s+(vitest|jest|tsc|eslint|prettier)\b[^|&;]*)/i,
+  /\b(python\s+-m\s+pytest)\b/i,
+  /\b(cargo\s+(test|build|clippy))\b/i,
+  /\b(go\s+(test|build|vet))\b/i,
+  /\b(make\s+(test|check|build))\b/i,
+  /\b(npm\s+run\b[^|&;]*)/i,
+];
+
+export interface VerificationCommand {
+  /** The full command string. */
+  command: string;
+  /** The tool output (truncated). */
+  output: string;
+  /** Whether the command appears to have passed. */
+  passed: boolean;
+  /** Epoch ms timestamp. */
+  timestamp: number;
+}
+
+/** Failure-indicating output patterns. */
+const FAILURE_PATTERNS = [
+  /\b(FAIL|FAILED|FAILURE)\b/,
+  /\b(error|Error|ERROR)[:\s]/,
+  /\b\d+\s+failing\b/i,
+  /\btest(s)?\s+failed\b/i,
+  /\bexit\s*(code)?\s*[1-9]\d*\b/i,
+  /\bcommand\s+not\s+found\b/i,
+  /\bmodule\s+not\s+found\b/i,
+  /\bcannot\s+find\s+module\b/i,
+  /\b(npm\s+ERR!|pnpm\s+ERR|yarn\s+error)\b/i,
+];
+
+/**
+ * V2: extract verification commands from tool execution rows. Scans for
+ * tool calls that match known verification patterns (npm test, pnpm build,
+ * tsc, etc.) and returns their trimmed command + output + pass/fail judgment.
+ */
+export function extractVerificationCommands(
+  rows: Array<{
+    toolName?: string | null;
+    toolInput?: string | null;
+    toolOutput?: string | null;
+    toolError?: string | null;
+    timestamp: number;
+  }>,
+): VerificationCommand[] {
+  const commands: VerificationCommand[] = [];
+
+  for (const row of rows) {
+    const toolName = (row.toolName || '').toLowerCase().trim();
+    // Only look at shell/execution tools.
+    if (!VERIFICATION_TOOL_NAMES.has(toolName)) continue;
+
+    const input = row.toolInput || '';
+    // Check if this command matches a verification pattern.
+    let matchedCommand = '';
+    for (const pattern of VERIFICATION_COMMAND_PATTERNS) {
+      const match = pattern.exec(input);
+      if (match) {
+        matchedCommand = match[0].trim();
+        break;
+      }
+    }
+    if (!matchedCommand) continue;
+
+    const output = (row.toolOutput || row.toolError || '').slice(0, 2000);
+    // Judge pass/fail from output patterns.
+    const passed = !FAILURE_PATTERNS.some(p => p.test(output));
+
+    commands.push({
+      command: matchedCommand,
+      output: output.slice(0, 500),
+      passed,
+      timestamp: row.timestamp ?? 0,
+    });
+  }
+
+  // Most recent first.
+  commands.sort((a, b) => b.timestamp - a.timestamp);
+  return commands;
+}
+
+/**
+ * Format extracted verification commands into a transcript block.
+ * Returns null when none were found.
+ */
+export function formatVerificationBlock(
+  commands: VerificationCommand[],
+): string | null {
+  if (commands.length === 0) return null;
+  const latest = commands[0];
+  const status = latest.passed ? '✓ 通过' : '✗ 失败';
+  const lines = [
+    `## 程序提取的验证命令（最新一次）`,
+    `- 命令：\`${latest.command}\``,
+    `- 状态：${status}`,
+    `- 输出：${latest.output.slice(0, 300)}`,
+  ];
+  return lines.join('\n');
 }
 
 /** Dedupe key: separators and case folded, trailing slashes stripped. */

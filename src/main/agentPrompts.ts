@@ -152,8 +152,9 @@ registerAgentKind('digest', {
         role: 'user',
         content: [
           '请为下面的会话生成索引摘要，内容字段使用设置中指定的输出语言，输出一个 JSON 对象，字段如下：',
-          '{"one_liner": "一句话概括会话主题（50 字以内）", "key_topics": ["关键主题，至多 6 个"], "key_files": ["涉及的关键文件路径，至多 6 个"], "decisions": ["已做出的决定，至多 6 条"], "open_questions": ["未解决的问题，至多 6 条"]}',
+          '{"one_liner": "一句话概括会话做了什么、结果如何（50 字以内）", "key_topics": ["关键主题，至多 6 个"], "key_files": ["涉及的关键文件路径，至多 6 个"], "decisions": ["已做出的决定，至多 6 条"], "open_questions": ["未解决的问题，至多 6 条"]}',
           '硬性规则：',
+          '- one_liner 概括实际完成的工作与结论（如「修复了 X 的 Y 问题」「调研了 Z，结论是…」），不要复述用户的原始提问，不要以「用户要求」「请」开头。',
           '- one_liner、key_topics 和 decisions 中涉及具体数值（版本号、配置值、端口号、日期、数量、金额、时长、阈值等）时，必须原样保留数值与单位，不得概括化。反例（禁止）：把「超时时间定为 30s」写成「调整了超时参数」；把「升级到 v2.5.0」写成「升级了版本」；把「预算 1500 元」写成「讨论了预算」。正确写法：「超时时间定为 30s」「升级到 v2.5.0」「预算定为 1500 元」。',
           '- key_files 保留完整文件路径，不要只写目录名或框架名。',
           '没有内容的字段输出空数组。只输出 JSON 本身。',
@@ -407,6 +408,152 @@ export function parseRelayPayload(raw: string): RelayPackPayload {
   };
 }
 
+// ---- V2 Relay Pack Parser (backward-compatible) ----------------------------
+
+interface RelayPackDecisionV2 {
+  decision: string;
+  rationale: string;
+}
+
+interface RelayPackFailedPathV2 {
+  approach: string;
+  whyFailed: string;
+  evidence: string;
+}
+
+interface RelayPackVerificationV2 {
+  lastCommand: string;
+  lastResult: string;
+  passed: boolean;
+}
+
+interface RelayPackEnvironmentV2 {
+  gitBranch?: string;
+  gitRemote?: string;
+  dirtyFiles?: string[];
+  nodeVersion?: string;
+  packageManager?: string;
+}
+
+/**
+ * Parse V2 relay pack output. Auto-detects V1 vs V2 format and normalizes
+ * both into the existing RelayPackPayload shape so downstream consumers
+ * (RelayPanel, capsule, export) continue to work unchanged.
+ */
+export function parseRelayPayloadV2(raw: string): RelayPackPayload {
+  const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start === -1 || end <= start) throw new Error('relay 输出不是 JSON');
+  const parsed = JSON.parse(cleaned.slice(start, end + 1)) as Record<string, unknown>;
+
+  // Auto-detect V2 format: meta.version === 2 and state is an object.
+  const meta = (parsed.meta as Record<string, unknown> | undefined);
+  const isV2 = meta?.version === 2 && typeof parsed.state === 'object' && parsed.state !== null;
+
+  if (isV2) {
+    return parseV2ToPayload(parsed);
+  }
+  // V1 fallback: delegate to the existing parser.
+  return parseRelayPayload(raw);
+}
+
+function parseV2ToPayload(parsed: Record<string, unknown>): RelayPackPayload {
+  const title = asTrimmedString(parsed.goal, 200) || asTrimmedString((parsed.meta as Record<string, unknown>)?.createdAt, 200) || 'V2 交接包';
+  const goal = asTrimmedString(parsed.goal, 4_000);
+  if (!goal) throw new Error('relay V2 输出缺少 goal');
+
+  const state = (parsed.state as Record<string, unknown> | undefined) ?? {};
+  const completed = asStringList(state.completed, 12);
+  const inProgress = asStringList(state.inProgress, 12);
+  const blocked = asStringList(state.blocked, 8);
+
+  // V2 decisions: [{decision, rationale}] → flatten to "decision — rationale" strings
+  const decisionsV2 = Array.isArray(parsed.decisions)
+    ? (parsed.decisions as Array<Record<string, unknown>>)
+        .filter((d): d is Record<string, unknown> => Boolean(d && typeof d === 'object'))
+        .map((d) => {
+          const dec = asTrimmedString(d.decision, 300);
+          const rat = asTrimmedString(d.rationale, 300);
+          return rat ? `${dec} — ${rat}` : dec;
+        })
+        .filter(Boolean)
+        .slice(0, 12)
+    : [];
+
+  // V2 failedPaths: [{approach, whyFailed, evidence}]
+  const failedPathsV2 = Array.isArray(parsed.failedPaths)
+    ? (parsed.failedPaths as Array<Record<string, unknown>>)
+        .filter((fp): fp is Record<string, unknown> => Boolean(fp && typeof fp === 'object'))
+        .map((fp) => ({
+          approach: asTrimmedString(fp.approach, 400),
+          why_failed: asTrimmedString(fp.whyFailed || fp.why_failed, 400),
+        }))
+        .filter((fp) => fp.approach)
+        .slice(0, 8)
+    : asFailedPathList(parsed.failedPaths || parsed.failed_paths, 8);
+
+  // V2 verification: {lastCommand, lastResult, passed}
+  const verificationV2 = (parsed.verification as Record<string, unknown> | undefined);
+  const verification: RelayPackVerification = verificationV2
+    ? {
+        commands: verificationV2.lastCommand ? [asTrimmedString(verificationV2.lastCommand, 500)] : [],
+        last_results: verificationV2.lastResult ? [asTrimmedString(verificationV2.lastResult, 500)] : [],
+      }
+    : { commands: [], last_results: [] };
+
+  // V2 environment → merge into git_state
+  const env = parsed.environment as RelayPackEnvironmentV2 | undefined;
+  const gitState: RelayPackGitState = {};
+  if (env?.gitBranch) gitState.branch = env.gitBranch;
+  if (env?.gitRemote) {
+    // Store remote in the branch field as "branch · remote" format if both exist
+    gitState.branch = gitState.branch
+      ? `${gitState.branch} · ${env.gitRemote}`
+      : env.gitRemote;
+  }
+  if (env?.dirtyFiles?.length) gitState.dirty_files = env.dirtyFiles.slice(0, 20);
+
+  // Merge blocked items into open_issues so they're visible in V1 consumers.
+  const openIssues = [
+    ...asStringList(parsed.open_issues || parsed.openIssues, 12),
+    ...(blocked.length > 0 ? blocked.map((b) => `[阻塞] ${b}`) : []),
+  ].slice(0, 12);
+
+  const handoffPrompt = asTrimmedString(
+    parsed.handoffPrompt ?? parsed.suggested_prompt ?? '',
+    RELAY_SUGGESTED_PROMPT_MAX_CHARS
+  );
+  if (!handoffPrompt) throw new Error('relay V2 输出缺少 handoffPrompt');
+
+  const confidence = asConfidence(parsed.confidence);
+
+  // Current state synthesizes completed + in_progress + blocked for v1 consumers.
+  const currentStateParts = [
+    ...completed.map((c) => `✓ ${c}`),
+    ...inProgress.map((ip) => `↻ ${ip}`),
+    ...blocked.map((b) => `⊘ ${b}`),
+  ];
+  const currentState = currentStateParts.join('\n').slice(0, 4_000);
+
+  return {
+    title,
+    goal,
+    current_state: currentState,
+    completed,
+    in_progress: inProgress,
+    git_state: gitState,
+    key_decisions: [...decisionsV2, ...asStringList(parsed.key_decisions, 12)].slice(0, 12),
+    key_files: asKeyFileList(parsed.files ?? parsed.key_files, 12),
+    failed_paths: failedPathsV2,
+    open_issues: openIssues,
+    verification,
+    next_steps: asStringList(parsed.nextSteps ?? parsed.next_steps, 12),
+    ...(confidence ? { confidence } : {}),
+    suggested_prompt: handoffPrompt,
+  };
+}
+
 registerAgentKind('relay', {
   buildPrompt({ transcript, preferences }) {
     const english = preferences.outputLanguage === 'en-US';
@@ -415,30 +562,38 @@ registerAgentKind('relay', {
     const language = english
       ? 'Write the whole pack in clear, concise English.'
       : '使用简洁的中文。';
+    // V2 schema: unified format with structured decisions, environment capture,
+    // blocked items, and programmatic verification fields.
     const schema = english
-      ? '{"title": "pack title (<= 12 words)", "goal": "what this work aims to achieve", "completed": ["what is already done, <= 8 items"], "in_progress": ["what is underway and where it stopped, <= 8 items"], "git_state": {"branch": "branch name, omit if unknown", "dirty_files": ["uncommitted files"], "last_commits": ["recent commit summaries"]}, "key_decisions": ["key decisions with rationale, <= 8"], "key_files": [{"path": "key file path", "why": "why it matters", "last_state": "its current change state"}, "<= 8"], "failed_paths": [{"approach": "an approach that was tried and abandoned", "why_failed": "why it failed"}, "<= 6"], "open_issues": ["unresolved problems, <= 8"], "verification": {"commands": ["commands used to verify the work (build/test/lint)"], "last_results": ["the latest result of each verification step"]}, "next_steps": ["suggested next steps by priority, <= 8"], "confidence": {"overall": 0.0, "low_areas": ["areas you are least sure about"]}, "suggested_prompt": "a self-contained handoff prompt, paste-ready at the top of a fresh AI session: background, goal, state, key files and todos, <= 800 chars"}'
-      : '{"title": "交接包标题（30 字以内）", "goal": "这项工作要达成的目标", "completed": ["已经完成的事项，至多 8 条"], "in_progress": ["正在进行的事项及停在哪一步，至多 8 条"], "git_state": {"branch": "分支名，不知道就省略", "dirty_files": ["未提交的文件"], "last_commits": ["最近提交摘要"]}, "key_decisions": ["已做出的关键决定及理由，至多 8 条"], "key_files": [{"path": "关键文件路径", "why": "为什么重要", "last_state": "该文件目前的改动状态"}，至多 8 个], "failed_paths": [{"approach": "试过但放弃的方案", "why_failed": "失败原因"}，至多 6 条], "open_issues": ["尚未解决的问题，至多 8 条"], "verification": {"commands": ["用于验证工作的命令（构建/测试/lint）"], "last_results": ["各验证步骤的最近一次结果"]}, "next_steps": ["建议的下一步，按优先级排序，至多 8 条"], "confidence": {"overall": 0.0, "low_areas": ["你最没把握的部分"]}, "suggested_prompt": "一段可直接粘贴到任意 AI 新会话开头的自包含交接提示词：包含背景、目标、现状、关键文件和待办，800 字以内"}';
+      ? '{“meta”: {“version”: 2, “createdAt”: “ISO 8601 timestamp”, “conversationCount”: <N>}, “goal”: “what this work aims to achieve (1-2 sentences, testable)”, “state”: {“completed”: [“done items with evidence anchors, <= 8”], “inProgress”: [“underway items and where they stopped, <= 8”], “blocked”: [“items blocked by unresolved dependencies, <= 6”]}, “files”: [{“path”: “file path (verbatim from anchor list)”, “why”: “why this file matters”, “last_state”: “its current change state”}, “<= 8 — MUST choose from the program-extracted anchor list”], “decisions”: [{“decision”: “what was decided”, “rationale”: “why, and what alternatives were rejected”}, “<= 8”], “failedPaths”: [{“approach”: “approach tried and abandoned”, “whyFailed”: “why it failed”, “evidence”: “where in the conversation this is shown”}, “<= 6”], “verification”: {“lastCommand”: “the last verification command actually run”, “lastResult”: “its most recent output (truncated)”, “passed”: true}, “nextSteps”: [“suggested next steps in priority order, <= 8”], “confidence”: {“overall”: 0.0, “lowAreas”: [“areas you are least sure about”]}, “environment”: {“gitBranch”: “...”, “gitRemote”: “...”, “dirtyFiles”: [“...”], “nodeVersion”: “...”, “packageManager”: “...”}, “handoffPrompt”: “self-contained prompt for a fresh AI session: background, goal, state, key files, todos; paste-ready at session start, <= 800 chars”}'
+      : '{“meta”: {“version”: 2, “createdAt”: “ISO 8601 时间戳”, “conversationCount”: <N>}, “goal”: “这项工作要达成的可检验目标（一两句）”, “state”: {“completed”: [“已完成事项，带证据锚点，至多 8 条”], “inProgress”: [“进行中事项及停在哪一步，至多 8 条”], “blocked”: [“被未解决依赖阻塞的事项，至多 6 条”]}, “files”: [{“path”: “文件路径（必须原样取自锚点清单）”, “why”: “为什么重要”, “last_state”: “该文件目前的改动状态”}, “至多 8 个，必须从程序提取的锚点清单选取”], “decisions”: [{“decision”: “做了什么决定”, “rationale”: “理由及否决的替代方案”}, “至多 8 条”], “failedPaths”: [{“approach”: “试过但放弃的方案”, “whyFailed”: “失败原因”, “evidence”: “上下文中的证据位置”}, “至多 6 条”], “verification”: {“lastCommand”: “实际执行的最后验证命令”, “lastResult”: “最近一次输出（截断）”, “passed”: true}, “nextSteps”: [“建议的下一步，按优先级排序，至多 8 条”], “confidence”: {“overall”: 0.0, “lowAreas”: [“你最没把握的部分”]}, “environment”: {“gitBranch”: “...”, “gitRemote”: “...”, “dirtyFiles”: [“...”], “nodeVersion”: “...”, “packageManager”: “...”}, “handoffPrompt”: “可直接粘贴到新 AI 会话开头的自包含交接提示词：背景、目标、现状、关键文件、待办，800 字以内”}';
     const notes = english
       ? [
           'Rules:',
           '- confidence.overall is a number between 0 and 1.',
-          '- Fill git_state from the Git lines in the context; if the context carries no git information, output "git_state": {}.',
-          '- When the context contains a "## Key files (program-extracted, with anchors)" / "## 关键文件（程序提取，带锚点）" section, key_files MUST be chosen from that list with the paths kept verbatim — never invent files beyond it; derive "why" and "last_state" from the context.',
-          '- failed_paths MUST preserve every failed attempt and rejection reason visible in the context — never drop them to make the pack look cleaner; output an empty array only when there genuinely were none.',
-          '- If nothing was verified, output "verification": {"commands": [], "last_results": []}.',
-          `- The suggested_prompt MUST start with this exact fixed sentence, verbatim:\n${prefix}`,
-          `- The suggested_prompt MUST end with this exact fixed sentence, verbatim:\n${rule}`,
+          '- state.blocked lists things that CANNOT proceed until something else is resolved — distinct from inProgress.',
+          '- decisions.rationale MUST include what alternatives were considered and rejected.',
+          '- When the context contains a “## Key files (program-extracted, with anchors)” / “## 关键文件（程序提取，带锚点）” section, files MUST be chosen from that list with the paths kept verbatim — never invent files beyond it; derive “why” and “last_state” from the context.',
+          '- failedPaths MUST preserve every failed attempt and rejection reason visible in the context — never drop them to make the pack look cleaner; output an empty array only when there genuinely were none. Include an “evidence” field pointing to which conversation or message shows the failure.',
+          '- verification.lastCommand and verification.lastResult should be extracted from actual tool executions in the context when visible; set passed=false when the output indicates failure.',
+          '- If nothing was verified, output “verification”: {“lastCommand”: “”, “lastResult”: “”, “passed”: false}.',
+          '- environment: extract git branch/remote from Git lines, node/package versions from tool output if visible. Omit the environment key entirely when nothing is known.',
+          `- The handoffPrompt MUST start with this exact fixed sentence, verbatim:\n${prefix}`,
+          `- The handoffPrompt MUST end with this exact fixed sentence, verbatim:\n${rule}`,
           'Use empty arrays for fields with no content. Output JSON only.',
         ]
       : [
           '要求：',
           '- confidence.overall 是 0 到 1 之间的数字。',
-          '- git_state 依据上下文里的 Git 行填写；上下文没有 git 信息时输出 "git_state": {}。',
-          '- 上下文包含「## 关键文件（程序提取，带锚点）」部分时，key_files 必须从该清单中选取并原样沿用其路径，不得虚构清单之外的文件；why 和 last_state 依据上下文推断。',
-          '- failed_paths 必须完整保留上下文中出现的失败尝试与否决原因，不得为了让交接显得顺利而省略；确实没有时才输出空数组。',
-          '- 没有做过任何验证时输出 "verification": {"commands": [], "last_results": []}。',
-          `- suggested_prompt 必须以下面这句固定开场白原样开头：\n${prefix}`,
-          `- suggested_prompt 必须以下面这句固定规则原样结尾：\n${rule}`,
+          '- state.blocked 列出因依赖未解决而无法推进的事项——与 inProgress 不同。',
+          '- decisions.rationale 必须写明考虑过并否决了哪些替代方案。',
+          '- 上下文包含「## 关键文件（程序提取，带锚点）」部分时，files 必须从该清单中选取并原样沿用其路径，不得虚构清单之外的文件；why 和 last_state 依据上下文推断。',
+          '- failedPaths 必须完整保留上下文中出现的失败尝试与否决原因，不得为了让交接显得顺利而省略；确实没有时才输出空数组。每条附带 “evidence” 字段指向哪条会话或消息显示了该失败。',
+          '- verification.lastCommand 和 verification.lastResult 应尽量从上下文中的工具执行记录提取；输出表明失败时 passed 设为 false。',
+          '- 没有做过任何验证时输出 “verification”: {“lastCommand”: “”, “lastResult”: “”, “passed”: false}。',
+          '- environment：从 Git 行提取分支/远程，从工具输出提取 node/包管理版本。完全未知时省略整个 environment 键。',
+          `- handoffPrompt 必须以下面这句固定开场白原样开头：\n${prefix}`,
+          `- handoffPrompt 必须以下面这句固定规则原样结尾：\n${rule}`,
           '没有内容的数组字段输出空数组。只输出 JSON 本身。',
         ];
     return [
@@ -450,8 +605,8 @@ registerAgentKind('relay', {
         role: 'user',
         content: [
           english
-            ? 'Below is the condensed context of several related conversations (digest summaries + recent key messages). Distill them into a "handoff pack" that lets another AI continue this work. ' + language + ' Output one JSON object with these fields:'
-            : '下面是若干个相关会话的浓缩上下文（索引摘要 + 最近关键消息）。请把它们归纳成一份“交接包”，让另一个 AI 能接着继续这项工作。' + language + '输出一个 JSON 对象，字段如下：',
+            ? 'Below is the condensed context of several related conversations (digest summaries + recent key messages). Distill them into a “handoff pack” that lets another AI continue this work. ' + language + ' Output one JSON object with these fields:'
+            : '下面是若干个相关会话的浓缩上下文（索引摘要 + 最近关键消息）。请把它们归纳成一份”交接包”，让另一个 AI 能接着继续这项工作。' + language + '输出一个 JSON 对象，字段如下：',
           schema,
           ...notes,
           '',
@@ -461,7 +616,7 @@ registerAgentKind('relay', {
     ];
   },
   parse(raw) {
-    return JSON.stringify(parseRelayPayload(raw));
+    return JSON.stringify(parseRelayPayloadV2(raw));
   },
 });
 

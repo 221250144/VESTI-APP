@@ -81,6 +81,7 @@ export {
   OPEN_QUESTIONS_LIMIT,
 } from './state/projectState.js';
 export { getFileTimeline, pathMatches } from './state/fileTimeline.js';
+export { stripInjectedContextBlocks } from './utils/injectedBlocks.js';
 export type { FileTimelineQuery } from './state/fileTimeline.js';
 export { ExportEngine } from './export/ExportEngine.js';
 export { VaultManager } from './storage/VaultManager.js';

@@ -225,16 +225,21 @@ describe('relay agent kind', () => {
     });
     expect(messages[0].role).toBe('system');
     expect(messages[0].content).toContain('严格 JSON');
-    expect(messages[1].content).toContain('suggested_prompt');
-    expect(messages[1].content).toContain('key_files');
+    // V2: field renamed from suggested_prompt to handoffPrompt.
+    expect(messages[1].content).toContain('handoffPrompt');
+    // V2: key_files → files (program-extracted anchors)
+    expect(messages[1].content).toContain('files');
     expect(messages[1].content).toContain('800 字以内');
     // schema v2 fields
     expect(messages[1].content).toContain('completed');
-    expect(messages[1].content).toContain('in_progress');
-    expect(messages[1].content).toContain('git_state');
-    expect(messages[1].content).toContain('failed_paths');
+    expect(messages[1].content).toContain('inProgress');
+    expect(messages[1].content).toContain('blocked');
+    // V2: failed_paths → failedPaths (camelCase)
+    expect(messages[1].content).toContain('failedPaths');
     expect(messages[1].content).toContain('verification');
     expect(messages[1].content).toContain('confidence');
+    // V2: new fields
+    expect(messages[1].content).toContain('environment');
     expect(messages[1].content).toContain('TRANSCRIPT');
   });
 

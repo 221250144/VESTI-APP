@@ -1,3 +1,4 @@
+import { stripInjectedContextBlocks } from '@vesti/capture-core';
 import type { SessionMessage } from '../shared/contracts';
 
 /**
@@ -52,8 +53,15 @@ export function isFileWriteTool(toolName?: string): boolean {
 }
 
 export function formatDigestMessage(message: SessionMessage): string {
+  // User messages carry system-injected context (<environment_context>,
+  // <timestamp>, <git-context>…) that is not the user's words — it crowds the
+  // window and the LLM echoes it into one_liners. Strip it here; the stored
+  // message record keeps the original.
+  const contentText = message.role === 'user' && message.contentText
+    ? stripInjectedContextBlocks(message.contentText)
+    : message.contentText;
   const values = [
-    message.contentText,
+    contentText,
     message.contentToolName ? `工具：${message.contentToolName}` : undefined,
     message.contentToolOutput ? `工具结果：${message.contentToolOutput.slice(0, TOOL_OUTPUT_CHARS)}` : undefined,
     message.contentToolError ? `工具错误：${message.contentToolError.slice(0, TOOL_OUTPUT_CHARS)}` : undefined,
@@ -167,4 +175,138 @@ export function buildDigestTranscript(
   });
 
   return [...sections, ...parts].join('\n');
+}
+
+// ---- Numeric/Value Fact Pre-Extraction (Digest V2) -------------------------
+//
+// Bench C showed 6.4% numerical fidelity in digest one-liners — numbers
+// embedded in long messages are almost never correctly transcribed by the
+// summarization LLM. The pre-extraction pass (no LLM, pure regex) scans the
+// assembled transcript for high-signal numeric patterns and appends a
+// structured block the digest agent can reference directly, turning the task
+// from "discover and transcribe numbers" into "integrate provided values."
+//
+// Significance heuristic: skip 10+ digit numbers (IDs/timestamps), prefer
+// numbers near technical keywords (version, threshold, port, config, timeout…).
+
+const NUMERIC_SIGNAL_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
+  // Semantic version numbers: v1.2.3, 2.0.0-beta.1
+  { pattern: /\b(v?\d+\.\d+(?:\.\d+)?(?:-[a-zA-Z0-9.]+)?)\b/g, label: '版本' },
+  // Numbers with units (time, memory, percentage, pixels, etc.).
+  // Trailing \b replaced with (?!\d) so % (a non-word char) still matches.
+  { pattern: /\b(\d+(?:\.\d+)?\s*(?:ms|s|sec|min|hour|MB|GB|KB|TB|%|px|em|rem|rpm|bps|Hz|MHz|GHz))(?!\d)/gi, label: '数值+单位' },
+  // Port numbers in context: :3000, port 8080
+  { pattern: /(?:port|端口|:)\s*(\d{2,5})(?!\d|[.\-_/][\w.])/gi, label: '端口' },
+  // Config values: key=value, key: value (numeric value).
+  // Uses (?![a-z_]) instead of \b so compound keys (chunk_size, maxRetries) match.
+  { pattern: /(?:timeout|limit|threshold|max|min|size|chunk|batch|pool|workers?|threads?|retries?|ttl|interval|delay|rate|cache|buffer)(?:_\w+)?\s*[:=]\s*(\d+(?:\.\d+)?(?:\s*[a-zA-Z]+)?)/gi, label: '配置参数' },
+  // Commands with version output: --version, -v
+  { pattern: /\b(node|npm|pnpm|yarn|python|go|rust|tsc|eslint|prettier)\s+(?:--version|-v|version)\b[:\s]*(\S+)/gi, label: '工具版本' },
+  // File count / line count patterns
+  { pattern: /\b(\d+)\s*(?:个?文件|files?|行|lines?|条|项|个|tests?|测试|cases?|用例)/gi, label: '数量统计' },
+];
+
+/** Minimum significance: skip pure numeric IDs (10+ digits) and single-digit
+ * values that are rarely meaningful outside a specific context. */
+const MIN_SIGNIFICANT_DIGITS = 2;
+const MAX_ID_DIGITS = 9;
+
+export interface NumericFact {
+  value: string;
+  label: string;
+  /** The surrounding ~40 chars for context in the digest. */
+  snippet: string;
+}
+
+/**
+ * Scan the assembled digest transcript for numeric/semantic-value facts.
+ * Returns a deduplicated list ordered by occurrence, max 24 items so the
+ * block never dominates the transcript budget.
+ */
+export function extractNumericFacts(transcript: string): NumericFact[] {
+  const facts: NumericFact[] = [];
+  const seen = new Set<string>();
+
+  for (const { pattern, label } of NUMERIC_SIGNAL_PATTERNS) {
+    // Reset lastIndex for global regexps.
+    pattern.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(transcript)) !== null) {
+      const rawValue = (match[1] || match[0]).trim();
+      // Skip values that look like IDs/timestamps (very long digit runs).
+      const digitCount = (rawValue.match(/\d/g) || []).length;
+      if (digitCount > MAX_ID_DIGITS) continue;
+      // Config params and ports: even single-digit values are significant
+      // (e.g. retries=3, port 80). Other labels need ≥2 digits or a letter.
+      const isInherentlySignificant = label === '配置参数' || label === '端口';
+      if (!isInherentlySignificant && digitCount < MIN_SIGNIFICANT_DIGITS && !/[a-zA-Z]/.test(rawValue)) continue;
+      // Deduplicate by normalized value + label.
+      const normalKey = `${label}:${rawValue.toLowerCase().replace(/\s+/g, '')}`;
+      if (seen.has(normalKey)) continue;
+      seen.add(normalKey);
+
+      const matchStart = Math.max(0, match.index - 20);
+      const matchEnd = Math.min(transcript.length, match.index + rawValue.length + 20);
+      const snippet = transcript.slice(matchStart, matchEnd).replace(/\s+/g, ' ').trim();
+
+      facts.push({ value: rawValue, label, snippet: `…${snippet}…` });
+      if (facts.length >= 24) break;
+    }
+    if (facts.length >= 24) break;
+  }
+
+  return facts;
+}
+
+/**
+ * Format extracted numeric facts into a transcript-ready block the digest
+ * agent can reference. Returns empty string when no facts were found.
+ */
+export function formatNumericFactsBlock(facts: NumericFact[]): string {
+  if (facts.length === 0) return '';
+  const lines = ['## 系统自动提取的数值事实（请保留原值并融入摘要）'];
+  for (const fact of facts) {
+    lines.push(`- [${fact.label}] ${fact.value}  (${fact.snippet})`);
+  }
+  return lines.join('\n');
+}
+
+// ---- Fact-Aware Backfill Scoring (Digest V2) -------------------------------
+
+const FACT_SIGNAL_KEYWORDS = [
+  'version', 'v\d+', 'port', 'timeout', 'threshold', 'config',
+  'error', 'fail', 'success', 'pass', 'merge', 'deploy', 'release',
+  'fix', 'breaking', 'deprecat', 'migrat',
+];
+
+/**
+ * Score a formatted message entry for fact density. Messages with high
+ * scores contain version numbers, error messages, configuration values,
+ * or structured output — the kinds of content that carry digest facts.
+ * Used to backfill high-density old messages beyond the recency limit.
+ */
+export function scoreFactDensity(formatted: string): number {
+  let score = 0;
+  const lower = formatted.toLowerCase();
+
+  // Double-quoted strings often carry literal values (paths, config keys).
+  const quotedCount = (lower.match(/"[^"]{3,}"/g) || []).length;
+  score += quotedCount * 2;
+
+  // Technical signal keywords.
+  for (const kw of FACT_SIGNAL_KEYWORDS) {
+    const re = new RegExp(`\\b${kw}\\b`, 'gi');
+    const hits = (lower.match(re) || []).length;
+    score += hits;
+  }
+
+  // Numeric patterns (highly correlated with digest facts).
+  const numericCount = (lower.match(/\d+(?:\.\d+)?\s*(?:ms|s|MB|GB|%|px)?/g) || []).length;
+  score += numericCount;
+
+  // Non-code length: very short or very long messages are less useful.
+  if (formatted.length > 200 && formatted.length < 4000) score += 3;
+  else if (formatted.length >= 4000) score += 1; // oversized; head+tail in truncation
+
+  return score;
 }

@@ -13,6 +13,7 @@
  */
 
 import { deriveProjectKey } from '../storage/projectRegistry.js';
+import { stripInjectedContextBlocks } from '../utils/injectedBlocks.js';
 import type { ProjectActiveFile, ProjectState } from '../types/unified.js';
 
 type Database = import('better-sqlite3').Database;
@@ -32,25 +33,59 @@ function parseJsonArray(value: string | null): string[] {
   }
 }
 
+/** JSON keys whose values are file paths across the captured platforms
+ * (Read/Edit/Write/Grep… store their input as a JSON object). */
+const PATH_JSON_KEYS = new Set([
+  'path', 'file_path', 'filepath', 'file', 'target_file', 'target_notebook',
+  'notebook_path', 'abs_path', 'absolute_path',
+]);
+
+function looksLikeFilePath(candidate: string): boolean {
+  // Real files carry a directory separator AND a final extension segment;
+  // this rejects code-fragment junk like `t.text` / `EXPERTS.map` that the
+  // old regex promoted into "active files".
+  if (candidate.length < 3 || !candidate.includes('/')) return false;
+  const base = candidate.slice(candidate.lastIndexOf('/') + 1);
+  if (!/^[\p{L}\p{N}_.@+-]+\.[\p{L}\p{N}]{1,10}$/u.test(base)) return false;
+  // Ignore version strings and URLs.
+  if (/^\d+\.\d+/.test(base)) return false;
+  if (/^https?:/i.test(candidate)) return false;
+  return true;
+}
+
 /**
- * Pull plausible file paths out of a tool input summary. Deterministic:
- * matches absolute-ish and relative paths carrying an extension. Paths are
- * normalized to forward slashes; surrounding quotes/punctuation are trimmed.
+ * Pull plausible file paths out of a tool input summary. Deterministic.
+ * Tool inputs are JSON objects on every captured platform, so path-named
+ * keys are read directly; free text falls back to a path regex. Either way
+ * a candidate must look like a real file (separator + extension) — the old
+ * bare-word regex filled active_files with member-access fragments.
  */
 export function extractFilePaths(text: string): string[] {
   if (!text) return [];
   const out = new Set<string>();
-  const pattern = /(?:[A-Za-z]:[\\/]|~?[\\/]|\.{1,2}[\\/])?(?:[\p{L}\p{N}_.@+-]+[\\/])*[\p{L}\p{N}_.@+-]+\.[\p{L}\p{N}]{1,10}/gu;
-  for (const match of text.matchAll(pattern)) {
-    let candidate = match[0].replace(/\\/g, '/');
-    // Skip bare words like "v1.2" or "file.ts" fragments shorter than a name.
-    if (candidate.length < 3) continue;
-    // Trim trailing punctuation the regex may have absorbed.
-    candidate = candidate.replace(/[.,;:)\]]+$/, '');
-    // Ignore obvious non-files (urls, version strings).
-    if (/^\d+\.\d+/.test(candidate)) continue;
-    out.add(candidate);
+  const add = (value: string) => {
+    const candidate = value.replace(/\\/g, '/').replace(/[.,;:)\]]+$/, '');
+    if (looksLikeFilePath(candidate)) out.add(candidate);
+  };
+  const pattern = /(?:[A-Za-z]:[\\/]|~?[\\/]|\.{1,2}[\\/])?(?:[\p{L}\p{N}_.@+-]+[\\/])+[\p{L}\p{N}_.@+-]+\.[\p{L}\p{N}]{1,10}/gu;
+  if (text.trimStart().startsWith('{')) {
+    try {
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      for (const [key, value] of Object.entries(parsed)) {
+        if (typeof value !== 'string') continue;
+        if (PATH_JSON_KEYS.has(key.toLowerCase())) {
+          add(value);
+        } else if (key.toLowerCase() === 'command') {
+          // Shell commands legitimately reference files; content-ish values
+          // (contents/new_string/…) are skipped — code text is where the
+          // member-access junk came from.
+          for (const match of value.matchAll(pattern)) add(match[0]);
+        }
+      }
+      return [...out];
+    } catch { /* not valid JSON — fall through to the regex */ }
   }
+  for (const match of text.matchAll(pattern)) add(match[0]);
   return [...out];
 }
 
@@ -135,11 +170,29 @@ export function buildProjectState(db: Database, projectKey: string, now: Date = 
   const sessionIds = sessions.map(row => row.id);
 
   const digests = sessionIds.length === 0 ? [] : (db.prepare(`
-    SELECT one_liner, open_questions, updated_at
+    SELECT one_liner, key_topics, key_files, decisions, open_questions, updated_at
     FROM session_digests
     WHERE session_id IN (${sessionIds.map(() => '?').join(',')})
     ORDER BY updated_at DESC
-  `).all(...sessionIds) as Array<{ one_liner: string | null; open_questions: string | null; updated_at: string | null }>);
+  `).all(...sessionIds) as Array<{
+    one_liner: string | null;
+    key_topics: string | null;
+    key_files: string | null;
+    decisions: string | null;
+    open_questions: string | null;
+    updated_at: string | null;
+  }>);
+
+  // Prefer the newest REAL digest for the card headline: fallback rows (LLM
+  // outage) copy the raw first user prompt — often a pasted agent brief or
+  // injected <environment_context>, useless as a project one-liner. A digest
+  // with any structured field filled came from a parsed LLM answer.
+  const isRealDigest = (row: (typeof digests)[number]) =>
+    parseJsonArray(row.key_topics).length > 0 ||
+    parseJsonArray(row.key_files).length > 0 ||
+    parseJsonArray(row.decisions).length > 0 ||
+    parseJsonArray(row.open_questions).length > 0;
+  const headline = digests.find(isRealDigest) ?? digests[0];
 
   const sinceMs = now.getTime() - ACTIVE_FILES_WINDOW_DAYS * 24 * 60 * 60 * 1000;
   const touchRows = sessionIds.length === 0 ? [] : (db.prepare(`
@@ -154,7 +207,7 @@ export function buildProjectState(db: Database, projectKey: string, now: Date = 
 
   return {
     projectKey,
-    oneLiner: (digests[0]?.one_liner ?? '').trim(),
+    oneLiner: stripInjectedContextBlocks(headline?.one_liner ?? '').slice(0, 200),
     activeFiles: rankActiveFiles(
       touchRows.map(row => ({ timestampMs: row.timestamp, paths: extractFilePaths(row.input_summary ?? '') })),
     ),

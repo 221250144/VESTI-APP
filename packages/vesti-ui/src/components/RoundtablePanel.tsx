@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import {
   AlertTriangle,
   Check,
+  Clipboard,
   Compass,
   Flame,
   GraduationCap,
@@ -24,6 +25,11 @@ import type {
 } from "../types";
 import { SendToMenu } from "./SendToMenu";
 import { buildRoundtableMarkdown } from "../lib/exploreMarkdown";
+import {
+  ROUNDTABLE_SCENES,
+  sceneMatchesSelection,
+  type RoundtableSceneId,
+} from "../lib/roundtableScenes";
 import {
   ExploreBulletSection,
   ExploreEmptyState,
@@ -60,6 +66,9 @@ interface RoundtablePanelProps {
   topicSuggestions?: string[];
   /** "继续深入": jump to Ask with a prefilled follow-up on a seat's viewpoint. */
   onExploreTopic?: (question: string) => void;
+  /** 学习页发起的圆桌: the host hands a prefilled question; the box adopts it
+   * once per nonce (same handoff pattern as the Ask composer's seedQuery). */
+  seedQuestion?: { text: string; nonce: number } | null;
 }
 
 type SelectablePersonaId = Exclude<RoundtablePersonaId, "moderator">;
@@ -119,6 +128,7 @@ export function RoundtablePanel({
   onOpenConversation,
   topicSuggestions,
   onExploreTopic,
+  seedQuestion,
 }: RoundtablePanelProps) {
   const [question, setQuestion] = useState("");
   const [selected, setSelected] = useState<SelectablePersonaId[]>([
@@ -132,6 +142,15 @@ export function RoundtablePanel({
   const [error, setError] = useState<string | null>(null);
   // undefined = still probing; false = gate the run and say why.
   const [llmConfigured, setLlmConfigured] = useState<boolean | undefined>(undefined);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+
+  // Adopt a host-seeded question (发起圆桌 from the Learn map) once per nonce.
+  const seededNonceRef = useRef(0);
+  useEffect(() => {
+    if (!seedQuestion || seedQuestion.nonce === seededNonceRef.current) return;
+    seededNonceRef.current = seedQuestion.nonce;
+    setQuestion(seedQuestion.text);
+  }, [seedQuestion]);
 
   useEffect(() => {
     let alive = true;
@@ -170,6 +189,24 @@ export function RoundtablePanel({
     });
   };
 
+  const sceneNameOf = (id: RoundtableSceneId): string =>
+    ({
+      tech_review: labels.sceneTechReview,
+      study_qa: labels.sceneStudyQa,
+      decision_debate: labels.sceneDecisionDebate,
+    })[id];
+
+  const copyResult = async () => {
+    if (!result) return;
+    try {
+      await navigator.clipboard.writeText(buildRoundtableMarkdown(result, labels));
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+    window.setTimeout(() => setCopyState("idle"), 2200);
+  };
+
   const run = async () => {
     const q = question.trim();
     if (!q) {
@@ -181,6 +218,7 @@ export function RoundtablePanel({
     setRunning(true);
     setResult(null);
     setLiveTurns([]);
+    setCopyState("idle");
     try {
       const res = await storage.runRoundtable(q, selected, {
         lang,
@@ -200,6 +238,14 @@ export function RoundtablePanel({
   const synthesisPending = running && allSeatsDone;
   const runDisabled =
     running || selected.length < MIN_SEATS || llmConfigured === false || !storage.runRoundtable;
+  // A fully-failed run (model service down: quota, network…) gets one clear
+  // failure note instead of a stack of identical per-seat errors and a
+  // missing synthesis. Matches the storage layer, which archives nothing.
+  const allSeatsFailed =
+    result !== null && result.seatTurns.length > 0 && result.seatTurns.every((turn) => !turn.ok);
+  const firstSeatError = allSeatsFailed
+    ? result.seatTurns.find((turn) => !turn.ok && turn.error)?.error ?? null
+    : null;
 
   return (
     <div className="h-full overflow-y-auto px-6 py-6">
@@ -245,6 +291,31 @@ export function RoundtablePanel({
             </div>
           </div>
         ) : null}
+
+        {/* 场景模板: one click swaps in the seat lineup for a common use —
+         * faster than reasoning about five personas one by one. */}
+        <div className="mt-3">
+          <div className="mb-1.5 text-[12px] text-text-secondary">{labels.scenesLabel}</div>
+          <div className="flex flex-wrap gap-1.5">
+            {ROUNDTABLE_SCENES.map((scene) => {
+              const active = sceneMatchesSelection(scene, selected);
+              return (
+                <button
+                  key={scene.id}
+                  type="button"
+                  onClick={() => setSelected([...scene.seats])}
+                  className={`rounded-full border px-2.5 py-1 text-[11.5px] transition-colors ${
+                    active
+                      ? "border-accent-primary bg-accent-primary-light text-accent-primary"
+                      : "border-border-subtle text-text-secondary hover:bg-bg-tertiary hover:text-accent-primary"
+                  }`}
+                >
+                  {sceneNameOf(scene.id)}
+                </button>
+              );
+            })}
+          </div>
+        </div>
 
         {/* Persona picker */}
         <div className="mt-3">
@@ -345,9 +416,27 @@ export function RoundtablePanel({
           <ExploreEmptyState Icon={Users} body={labels.empty} compact />
         ) : null}
 
-        {result ? (
+        {/* Fully-failed run: one honest failure card (with the underlying
+         * error) instead of N identical seat errors and no synthesis. */}
+        {result && allSeatsFailed ? (
+          <div className="mt-6 rounded-xl border border-border-subtle bg-bg-surface-card p-4">
+            <div className="flex items-start gap-2.5">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" strokeWidth={1.75} />
+              <div className="min-w-0">
+                <p className="text-[12.5px] leading-relaxed text-text-primary">
+                  {labels.allSeatsFailed}
+                </p>
+                {firstSeatError ? (
+                  <p className="mt-1.5 break-all text-[11.5px] text-text-tertiary">{firstSeatError}</p>
+                ) : null}
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {result && !allSeatsFailed ? (
           <div className="mt-6">
-            {/* Grounding + export row */}
+            {/* Grounding + export/copy row */}
             <div className="mb-2 flex items-center justify-between gap-3">
               {result.grounded && result.sources.length > 0 ? (
                 <p className="text-[11px] text-text-tertiary">
@@ -356,16 +445,36 @@ export function RoundtablePanel({
               ) : (
                 <span />
               )}
-              {sendToLabels ? (
-                <SendToMenu
-                  storage={storage}
-                  labels={sendToLabels}
-                  payload={{
-                    title: `${labels.title} — ${result.question}`.slice(0, 120),
-                    markdown: buildRoundtableMarkdown(result, labels),
-                  }}
-                />
-              ) : null}
+              <div className="flex items-center gap-2">
+                {/* 复制结论: whole run as Markdown — works even when neither
+                 * Notion nor Obsidian is configured. */}
+                <button
+                  type="button"
+                  onClick={() => void copyResult()}
+                  className="inline-flex h-9 items-center gap-1.5 px-1 text-[11px] uppercase tracking-[0.14em] text-text-tertiary transition-colors hover:text-text-primary"
+                >
+                  {copyState === "copied" ? (
+                    <Check className="h-4 w-4 shrink-0 text-accent-primary" strokeWidth={1.7} />
+                  ) : (
+                    <Clipboard className="h-4 w-4 shrink-0" strokeWidth={1.7} />
+                  )}
+                  {copyState === "copied"
+                    ? labels.copied
+                    : copyState === "failed"
+                      ? labels.copyFailed
+                      : labels.copyResult}
+                </button>
+                {sendToLabels ? (
+                  <SendToMenu
+                    storage={storage}
+                    labels={sendToLabels}
+                    payload={{
+                      title: `${labels.title} — ${result.question}`.slice(0, 120),
+                      markdown: buildRoundtableMarkdown(result, labels),
+                    }}
+                  />
+                ) : null}
+              </div>
             </div>
 
             {/* Seats */}
