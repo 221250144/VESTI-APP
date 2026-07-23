@@ -14,6 +14,18 @@ win:
   icon: assets/icon.ico
   executableName: vesti
 
+mac:
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  icon: assets/icon.icns
+  category: public.app-category.productivity
+  hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+
 nsis:
   oneClick: false
   perMachine: false
@@ -34,5 +46,9 @@ nsis:
   installerHeaderIcon: assets/icon.ico
   include: build/installer.nsh
   artifactName: Vesti-${version}-Setup.${ext}
+
+dmg:
+  artifactName: Vesti-${version}-${arch}.${ext}
+  title: Vesti
 
 publish: null
