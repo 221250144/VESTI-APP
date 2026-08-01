@@ -869,6 +869,10 @@ export function composeDailyMarkdown(input: {
   let body = input.llmBody.trim();
   // Drop a model-emitted H1 — the canonical title wins.
   body = body.replace(/^#\s+[^\n]*\n+/, "");
+  // Sanitize headings: earlier prompts carried writing guidance inside the
+  // heading line and models still echo it ("## 今日完成（成就导向清单：…）").
+  // Headings are canonical labels — strip any trailing parenthetical notes.
+  body = body.replace(/^(#{2,3}\s*[^（(\n]+?)\s*[（(][^\n]*[）)]\s*$/gm, "$1");
   // The marker counts only as a standalone line — a model mentioning
   // "{{KEY_FILES}}" inside prose must not get the section injected
   // mid-sentence.

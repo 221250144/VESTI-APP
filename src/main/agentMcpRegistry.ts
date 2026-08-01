@@ -37,6 +37,13 @@ interface AgentMcpTarget {
   configPath: (home: string) => string;
   /** Any of these existing marks the agent as installed. */
   detectPaths: (home: string) => string[];
+  /**
+   * Global instruction file the agent reads at every session start, when the
+   * agent has one. Registration also installs a marked "session-start
+   * context" block there so new conversations pull Vesti project context
+   * instead of asking the user to re-explain.
+   */
+  instructionsPath?: (home: string) => string;
 }
 
 const TARGETS: AgentMcpTarget[] = [
@@ -46,6 +53,8 @@ const TARGETS: AgentMcpTarget[] = [
     kind: 'json-mcp-servers',
     configPath: home => path.join(home, '.kimi-code', 'mcp.json'),
     detectPaths: home => [path.join(home, '.kimi-code')],
+    // Kimi Code surfaces the MCP server's own `instructions` to the model, so
+    // the session-start contract travels with the server — no file needed.
   },
   {
     id: 'claude-code',
@@ -53,6 +62,7 @@ const TARGETS: AgentMcpTarget[] = [
     kind: 'json-mcp-servers',
     configPath: home => path.join(home, '.claude.json'),
     detectPaths: home => [path.join(home, '.claude.json'), path.join(home, '.claude')],
+    instructionsPath: home => path.join(home, '.claude', 'CLAUDE.md'),
   },
   {
     id: 'codex',
@@ -60,6 +70,7 @@ const TARGETS: AgentMcpTarget[] = [
     kind: 'toml-codex',
     configPath: home => path.join(home, '.codex', 'config.toml'),
     detectPaths: home => [path.join(home, '.codex')],
+    instructionsPath: home => path.join(home, '.codex', 'AGENTS.md'),
   },
   {
     id: 'cursor',
@@ -67,8 +78,59 @@ const TARGETS: AgentMcpTarget[] = [
     kind: 'json-mcp-servers',
     configPath: home => path.join(home, '.cursor', 'mcp.json'),
     detectPaths: home => [path.join(home, '.cursor')],
+    // Cursor's user-level rules live in app settings, not files; MCP server
+    // instructions carry the contract instead.
   },
 ];
+
+// ---- Session-start instruction block -------------------------------------
+
+export const SESSION_CONTEXT_BLOCK_START = '<!-- vesti:session-context:start -->';
+export const SESSION_CONTEXT_BLOCK_END = '<!-- vesti:session-context:end -->';
+
+/** The block installed into an agent's global instruction file. Kept short:
+ * it only tells the agent WHEN to call which vesti tool; the detailed
+ * contract stays in the MCP server's own instructions. */
+export function sessionContextBlock(): string {
+  return [
+    SESSION_CONTEXT_BLOCK_START,
+    '',
+    '## Vesti 记忆库（vesti-mcp）',
+    '',
+    '本机装有 Vesti 对话与项目记忆库（MCP server 名：`vesti`）。开始新会话或接手任务时：',
+    '',
+    '1. 先调用 `vesti_get_project_context`（传当前项目路径；跨项目/合并分支的任务传全部相关项目），获取项目状态、活跃文件与未决问题——不要先向用户追问背景。',
+    '2. 需要具体对话细节时按 `vesti_search` → `vesti_timeline` → `vesti_get_turns` 渐进拉取，只取所需，避免灌入长上下文。',
+    '3. 需要交接、压缩或延续他人（或自己此前）的工作时，调用 `vesti_get_handoff_context`。',
+    '',
+    SESSION_CONTEXT_BLOCK_END,
+  ].join('\n');
+}
+
+/** The currently installed block body (markers included), or null. */
+export function readSessionContextBlock(content: string): string | null {
+  const start = content.indexOf(SESSION_CONTEXT_BLOCK_START);
+  if (start === -1) return null;
+  const end = content.indexOf(SESSION_CONTEXT_BLOCK_END, start);
+  if (end === -1) return null;
+  return content.slice(start, end + SESSION_CONTEXT_BLOCK_END.length);
+}
+
+/** Install or remove the marked block, preserving every other line. */
+export function writeSessionContextBlock(content: string, install: boolean): string {
+  const block = sessionContextBlock();
+  const pattern = new RegExp(
+    `\\n?${escapeForRegex(SESSION_CONTEXT_BLOCK_START)}[\\s\\S]*?${escapeForRegex(SESSION_CONTEXT_BLOCK_END)}\\n?`,
+    'g',
+  );
+  const stripped = content.replace(pattern, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  if (!install) return stripped ? `${stripped}\n` : '';
+  return stripped ? `${stripped}\n\n${block}\n` : `${block}\n`;
+}
+
+function escapeForRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 export function resolveAgentMcpTargetId(value: unknown): AgentMcpTargetId | null {
   return TARGETS.some(target => target.id === value) ? (value as AgentMcpTargetId) : null;
@@ -257,6 +319,14 @@ export class AgentMcpRegistry {
       serverAvailable: this.options.serverEntry !== null,
       serverEntry: this.options.serverEntry ? slash(this.options.serverEntry) : null,
     };
+    if (target.instructionsPath) {
+      const instructionsFile = target.instructionsPath(home);
+      const content = fs.existsSync(instructionsFile) ? fs.readFileSync(instructionsFile, 'utf8') : '';
+      const installed = readSessionContextBlock(content);
+      status.instructionsPath = instructionsFile;
+      status.instructionsInstalled = installed !== null;
+      status.instructionsUpToDate = installed === sessionContextBlock();
+    }
     if (!fs.existsSync(configPath)) return status;
 
     if (target.kind === 'json-mcp-servers') {
@@ -287,8 +357,17 @@ export class AgentMcpRegistry {
   private write(target: AgentMcpTarget, install: boolean): AgentMcpWriteResult {
     const configPath = target.configPath(this.options.homeDir);
     try {
-      if (target.kind === 'json-mcp-servers') return this.writeJson(configPath, install);
-      return this.writeToml(configPath, install);
+      const result = target.kind === 'json-mcp-servers'
+        ? this.writeJson(configPath, install)
+        : this.writeToml(configPath, install);
+      if (!result.ok) return result;
+      const instructions = this.writeInstructions(target, install);
+      if (!instructions.ok) return instructions;
+      return {
+        ok: true,
+        changed: result.changed || instructions.changed,
+        backupPath: result.backupPath ?? instructions.backupPath,
+      };
     } catch (error) {
       return {
         ok: false,
@@ -297,6 +376,20 @@ export class AgentMcpRegistry {
         error: error instanceof Error ? error.message : String(error),
       };
     }
+  }
+
+  /** Install/remove the session-start block for agents with a global
+   * instruction file; a no-op (never an error) for agents without one. */
+  private writeInstructions(target: AgentMcpTarget, install: boolean): AgentMcpWriteResult {
+    if (!target.instructionsPath) return { ok: true, changed: false, backupPath: null };
+    const filePath = target.instructionsPath(this.options.homeDir);
+    const exists = fs.existsSync(filePath);
+    // Removing from a file that never existed must not create an empty file.
+    if (!exists && !install) return { ok: true, changed: false, backupPath: null };
+    const previous = exists ? fs.readFileSync(filePath, 'utf8') : '';
+    const next = writeSessionContextBlock(previous, install);
+    const { changed, backupPath } = this.persist(filePath, next, exists ? previous : null);
+    return { ok: true, changed, backupPath };
   }
 
   /** Backup + write helper: returns the changed flag and backup path. */

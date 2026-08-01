@@ -383,6 +383,31 @@ describe("composeDailyMarkdown", () => {
     expect(markdown).toContain("周报要不要并入日报");
   });
 
+  it("strips echoed writing guidance from heading lines", () => {
+    const model = buildModel();
+    const briefs = model.clusters.map((cluster) => buildDeterministicClusterBrief(cluster));
+    const llmBody = [
+      "## 今日完成（成就导向清单：每条具体、可验证，写清完成了什么、结果如何）",
+      "- 完成两遍日报管线联调",
+      "",
+      "## 项目工作流分解(每个项目一个 ### 子节)",
+      "### vesti-app",
+      "- 目标：落地日报升级",
+      "",
+      "## 明日线索（至多 5 条）",
+      "- 周报联调",
+    ].join("\n");
+    const markdown = composeDailyMarkdown({ llmBody, model, briefs, locale: "zh" });
+    expect(markdown).toContain("## 今日完成\n");
+    expect(markdown).not.toContain("成就导向清单");
+    expect(markdown).not.toContain("每个项目一个 ### 子节）");
+    expect(markdown).toContain("## 项目工作流分解\n");
+    expect(markdown).toContain("## 明日线索\n");
+    // Sanitized headings still count as present — no duplicate repairs.
+    expect(markdown.match(/## 今日完成/g)).toHaveLength(1);
+    expect(markdown.match(/## 明日线索/g)).toHaveLength(1);
+  });
+
   it("ignores a marker mentioned inside prose (only standalone lines are replaced)", () => {
     const model = buildModel();
     const briefs = model.clusters.map((cluster) => buildDeterministicClusterBrief(cluster));

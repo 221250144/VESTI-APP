@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   AgentMcpRegistry,
+  SESSION_CONTEXT_BLOCK_END,
+  SESSION_CONTEXT_BLOCK_START,
   defaultServerEntryCandidates,
   resolveAgentMcpTargetId,
   resolveServerEntry,
@@ -221,6 +223,90 @@ describe('codex TOML target', () => {
     expect(content).toContain('[mcp_servers.node_repl]');
     expect(registry.listStatus().find(s => s.id === 'codex')!.registered).toBe(false);
     expect(registry.unregister('codex')).toMatchObject({ ok: true, changed: false });
+  });
+});
+
+describe('session-start instruction block', () => {
+  const claudeInstructions = () => path.join(home, '.claude', 'CLAUDE.md');
+  const codexInstructions = () => path.join(home, '.codex', 'AGENTS.md');
+
+  it('installs the marked block into CLAUDE.md on register, idempotently', () => {
+    fs.writeFileSync(claudeConfig(), '{}', 'utf8');
+    expect(registry.register('claude-code')).toMatchObject({ ok: true, changed: true });
+
+    const content = fs.readFileSync(claudeInstructions(), 'utf8');
+    expect(content).toContain(SESSION_CONTEXT_BLOCK_START);
+    expect(content).toContain(SESSION_CONTEXT_BLOCK_END);
+    expect(content).toContain('vesti_get_project_context');
+    expect(registry.listStatus().find(s => s.id === 'claude-code')).toMatchObject({
+      instructionsInstalled: true,
+      instructionsUpToDate: true,
+    });
+
+    // Second register is a no-op for both config and instructions.
+    expect(registry.register('claude-code')).toMatchObject({ ok: true, changed: false, backupPath: null });
+  });
+
+  it('preserves existing instruction content and removes only the block on unregister', () => {
+    fs.mkdirSync(path.dirname(claudeInstructions()), { recursive: true });
+    fs.writeFileSync(claudeInstructions(), '# My rules\n\nAlways be terse.\n', 'utf8');
+    fs.writeFileSync(claudeConfig(), '{}', 'utf8');
+
+    registry.register('claude-code');
+    const after = fs.readFileSync(claudeInstructions(), 'utf8');
+    expect(after).toContain('# My rules');
+    expect(after).toContain('Always be terse.');
+    expect(after).toContain(SESSION_CONTEXT_BLOCK_START);
+
+    expect(registry.unregister('claude-code')).toMatchObject({ ok: true, changed: true });
+    const stripped = fs.readFileSync(claudeInstructions(), 'utf8');
+    expect(stripped).not.toContain(SESSION_CONTEXT_BLOCK_START);
+    expect(stripped).toContain('# My rules');
+    expect(stripped).toContain('Always be terse.');
+    expect(registry.listStatus().find(s => s.id === 'claude-code')!.instructionsInstalled).toBe(false);
+  });
+
+  it('installs the block into codex AGENTS.md alongside the TOML registration', () => {
+    fs.mkdirSync(path.join(home, '.codex'), { recursive: true });
+    expect(registry.register('codex')).toMatchObject({ ok: true, changed: true });
+    expect(fs.readFileSync(codexInstructions(), 'utf8')).toContain('vesti_get_handoff_context');
+    expect(registry.listStatus().find(s => s.id === 'codex')!.instructionsUpToDate).toBe(true);
+  });
+
+  it('flags an outdated block as installed but not up-to-date, and repairs it', () => {
+    fs.mkdirSync(path.dirname(claudeInstructions()), { recursive: true });
+    fs.writeFileSync(
+      claudeInstructions(),
+      `${SESSION_CONTEXT_BLOCK_START}\nold content\n${SESSION_CONTEXT_BLOCK_END}\n`,
+      'utf8',
+    );
+    const stale = registry.listStatus().find(s => s.id === 'claude-code')!;
+    expect(stale.instructionsInstalled).toBe(true);
+    expect(stale.instructionsUpToDate).toBe(false);
+
+    fs.writeFileSync(claudeConfig(), '{}', 'utf8');
+    registry.register('claude-code');
+    const repaired = fs.readFileSync(claudeInstructions(), 'utf8');
+    expect(repaired).not.toContain('old content');
+    expect(registry.listStatus().find(s => s.id === 'claude-code')!.instructionsUpToDate).toBe(true);
+  });
+
+  it('never writes instruction files for agents without one (kimi-code / cursor)', () => {
+    registry.register('kimi-code');
+    registry.register('cursor');
+    expect(fs.existsSync(path.join(home, '.kimi-code', 'AGENTS.md'))).toBe(false);
+    expect(fs.existsSync(path.join(home, '.cursor', 'AGENTS.md'))).toBe(false);
+    const status = registry.listStatus();
+    expect(status.find(s => s.id === 'kimi-code')!.instructionsPath).toBeUndefined();
+    expect(status.find(s => s.id === 'cursor')!.instructionsPath).toBeUndefined();
+  });
+
+  it('unregister without an existing instruction file stays a no-op', () => {
+    fs.writeFileSync(claudeConfig(), '{}', 'utf8');
+    registry.register('claude-code');
+    fs.rmSync(claudeInstructions());
+    expect(registry.unregister('claude-code').ok).toBe(true);
+    expect(fs.existsSync(claudeInstructions())).toBe(false);
   });
 });
 

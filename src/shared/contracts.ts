@@ -420,6 +420,14 @@ export interface AgentMcpTargetStatus {
   /** The built vesti-mcp server entry (dist/cli.js) exists on disk. */
   serverAvailable: boolean;
   serverEntry: string | null;
+  /**
+   * Global session-start instruction file (only agents that have one).
+   * Registration also installs a marked "call vesti_get_project_context at
+   * session start" block there; these report its state.
+   */
+  instructionsPath?: string;
+  instructionsInstalled?: boolean;
+  instructionsUpToDate?: boolean;
   /** Config read problem (e.g. malformed JSON); status never throws. */
   error?: string;
 }

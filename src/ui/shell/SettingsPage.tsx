@@ -280,6 +280,8 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     mcpServerMissing: "未找到 vesti-mcp 构建产物,请先在仓库根目录运行 pnpm mcp:build。",
     mcpBackupAt: "原配置已备份:",
     mcpFailed: "写入失败:",
+    mcpGuideOk: "开工指引已写入",
+    mcpGuideOutdated: "开工指引过旧,点注册更新",
   },
   en: {
     loading: "Loading settings…",
@@ -473,6 +475,8 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     mcpServerMissing: "vesti-mcp build output not found — run pnpm mcp:build at the repo root first.",
     mcpBackupAt: "Original config backed up:",
     mcpFailed: "Write failed:",
+    mcpGuideOk: "Session-start guide installed",
+    mcpGuideOutdated: "Session-start guide outdated, re-register",
   },
   ja: {
     loading: "設定を読み込み中…",
@@ -647,6 +651,8 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     mcpWorking: "書き込み中…",
     mcpServerMissing: "vesti-mcp のビルド成果物が見つかりません。リポジトリのルートで pnpm mcp:build を先に実行してください。",
     mcpBackupAt: "元の設定をバックアップ:",
+    mcpGuideOk: "セッション開始ガイド導入済み",
+    mcpGuideOutdated: "セッション開始ガイドが古い — 再登録で更新",
     mcpFailed: "書き込みに失敗:",
   },
   ko: {
@@ -822,6 +828,8 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     mcpWorking: "쓰는 중…",
     mcpServerMissing: "vesti-mcp 빌드 산출물을 찾을 수 없습니다. 저장소 루트에서 pnpm mcp:build를 먼저 실행하세요.",
     mcpBackupAt: "원본 설정 백업:",
+    mcpGuideOk: "세션 시작 가이드 설치됨",
+    mcpGuideOutdated: "세션 시작 가이드가 오래됨 — 재등록으로 업데이트",
     mcpFailed: "쓰기 실패:",
   },
 };
@@ -1701,6 +1709,19 @@ export function SettingsPage({
                     <div className="truncate text-[11px] font-sans text-text-tertiary">
                       {target.error ?? target.configPath}
                     </div>
+                    {target.instructionsPath && target.registered ? (
+                      <div
+                        className={`truncate text-[11px] font-sans ${
+                          target.instructionsInstalled && target.instructionsUpToDate
+                            ? "text-success"
+                            : "text-warning"
+                        }`}
+                      >
+                        {target.instructionsInstalled && target.instructionsUpToDate
+                          ? copy.mcpGuideOk
+                          : copy.mcpGuideOutdated}
+                      </div>
+                    ) : null}
                   </div>
                   <button
                     type="button"
