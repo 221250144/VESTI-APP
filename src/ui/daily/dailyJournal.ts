@@ -631,6 +631,7 @@ interface JournalSectionCopy {
   touches: (count: number) => string;
   fromConversation: (title: string) => string;
   browserLine: (title: string, platform: string, domain: string) => string;
+  webOverflow: (count: number) => string;
 }
 
 const JOURNAL_COPY: Record<DailyLocale, JournalSectionCopy> = {
@@ -650,6 +651,7 @@ const JOURNAL_COPY: Record<DailyLocale, JournalSectionCopy> = {
     touches: (count) => `触碰 ${count} 次`,
     fromConversation: (title) => `，来自《${title}》`,
     browserLine: (title, platform, domain) => `《${title}》（${platform} · ${domain}）`,
+    webOverflow: (count) => `……以及另外 ${count} 条对话（从略）`,
   },
   en: {
     note: "> No model configured — a deterministic work record from the local template (no AI polish). Configure a model to regenerate today with AI.",
@@ -667,6 +669,7 @@ const JOURNAL_COPY: Record<DailyLocale, JournalSectionCopy> = {
     touches: (count) => `${count} touch(es)`,
     fromConversation: (title) => `, from "${title}"`,
     browserLine: (title, platform, domain) => `"${title}" (${platform} · ${domain})`,
+    webOverflow: (count) => `…and ${count} more conversations (omitted)`,
   },
 };
 
@@ -755,6 +758,32 @@ function renderDecisionsSection(briefs: DailyClusterBrief[], locale: DailyLocale
   return `## ${copy.decisions}\n${lines.length > 0 ? lines.map((line) => `- ${line}`).join("\n") : copy.none}`;
 }
 
+/** Cap on rendered lines in the web-digest section (see renderWebSection). */
+export const MAX_WEB_SECTION_LINES = 25;
+
+/** True when the markdown is the deterministic no-LLM fallback — its note
+ * line marks it in either locale. */
+export function isDeterministicDailyJournal(markdown: string): boolean {
+  return markdown.includes("未配置模型") || markdown.includes("No model configured");
+}
+
+/**
+ * Decide whether a (re)generation's output may overwrite the stored log: an
+ * AI-polished log is never replaced by the deterministic fallback — a
+ * regenerate can degrade mid-run (model unreachable), and the polished log
+ * is strictly better. Everything else writes through.
+ */
+export function resolveDailyLogWrite(
+  existing: { contentMarkdown: string } | null,
+  newMarkdown: string
+): "write" | "keep" {
+  if (!existing) return "write";
+  if (isDeterministicDailyJournal(newMarkdown) && !isDeterministicDailyJournal(existing.contentMarkdown)) {
+    return "keep";
+  }
+  return "write";
+}
+
 function renderWebSection(
   briefs: DailyClusterBrief[],
   model: DailyWorkModel,
@@ -782,7 +811,15 @@ function renderWebSection(
       );
     }
   }
-  return `## ${copy.web}\n${lines.length > 0 ? lines.join("\n") : copy.none}`;
+  // Cap the section: a mass history import lands hundreds of web conversations
+  // on one day, and an uncapped list turns the fallback log into a raw dump.
+  const shown = lines.slice(0, MAX_WEB_SECTION_LINES);
+  const overflow = lines.length - shown.length;
+  const body =
+    shown.length === 0
+      ? copy.none
+      : shown.join("\n") + (overflow > 0 ? `\n- ${copy.webOverflow(overflow)}` : "");
+  return `## ${copy.web}\n${body}`;
 }
 
 function renderNextSection(briefs: DailyClusterBrief[], locale: DailyLocale): string {

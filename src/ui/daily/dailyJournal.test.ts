@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import type { RelayFileTouchRow } from "../../shared/contracts";
 import {
   KEY_FILES_MARKER,
+  MAX_WEB_SECTION_LINES,
   buildClusterExtractionTranscript,
   buildDailySynthesisTranscript,
   buildDailyWorkModel,
@@ -16,7 +17,9 @@ import {
   composeDailyMarkdown,
   extractDailyFileAnchors,
   groupDailyClusters,
+  isDeterministicDailyJournal,
   mergeDailyWorkItems,
+  resolveDailyLogWrite,
   type DailyWorkItem,
 } from "./dailyJournal";
 import {
@@ -477,6 +480,78 @@ describe("buildLocalDailyJournal", () => {
     expect(markdown).toContain("## Decisions & findings\nNone");
     expect(markdown).toContain("## Browser conversation digest\nNone");
     expect(markdown).toContain("## Leads for tomorrow\nNone");
+  });
+
+  it("caps the web digest section and summarizes the overflow", () => {
+    // A mass history import lands many web conversations on one day; the
+    // fallback journal must not turn into a raw dump.
+    const manyWeb = Array.from({ length: MAX_WEB_SECTION_LINES + 5 }, (_, i) =>
+      makeConversation({
+        id: 100 + i,
+        updatedAt: localTs(2026, 7, 18, 10),
+        source: "browser",
+        platform: "Kimi",
+        projectLabel: "kimi.com",
+        title: `网页会话 ${i}`,
+      })
+    );
+    const activity = collectDailyActivity("2026-07-18", {
+      conversations: manyWeb,
+      digests: [],
+      summaries: [],
+    });
+    const model = buildDailyWorkModel({
+      activity,
+      enrichments: [],
+      fileTouches: [],
+      resolveTouchConversationId: () => null,
+    });
+    const briefs = model.clusters.map((cluster) => buildDeterministicClusterBrief(cluster));
+    const markdown = buildLocalDailyJournal(model, briefs, "zh");
+    const web = markdown.slice(markdown.indexOf("## 网页端对话摘要"));
+    expect(web.match(/^- 《/gm)).toHaveLength(MAX_WEB_SECTION_LINES);
+    expect(web).toContain("……以及另外 5 条对话（从略）");
+  });
+});
+
+// ---- Regenerate write resolution (never downgrade to the fallback) ----------
+
+describe("isDeterministicDailyJournal / resolveDailyLogWrite", () => {
+  const polished = "# 2026-07-18 日报\n\n## 今日完成\n- 实现了日报功能";
+  const fallbackZh = buildLocalDailyJournal(
+    buildDailyWorkModel({
+      activity: collectDailyActivity("2026-07-18", {
+        conversations: [makeConversation({ id: 1, updatedAt: localTs(2026, 7, 18, 9) })],
+        digests: [],
+        summaries: [],
+      }),
+      enrichments: [],
+      fileTouches: [],
+      resolveTouchConversationId: () => null,
+    }),
+    [],
+    "zh"
+  );
+
+  it("detects the deterministic fallback in both locales", () => {
+    expect(isDeterministicDailyJournal(fallbackZh)).toBe(true);
+    expect(isDeterministicDailyJournal("# 2026-07-18 Daily log\n\n> No model configured — rest")).toBe(true);
+    expect(isDeterministicDailyJournal(polished)).toBe(false);
+  });
+
+  it("never overwrites an AI-polished log with the deterministic fallback", () => {
+    expect(resolveDailyLogWrite({ contentMarkdown: polished }, fallbackZh)).toBe("keep");
+  });
+
+  it("writes in every other case", () => {
+    expect(resolveDailyLogWrite(null, fallbackZh)).toBe("write");
+    expect(resolveDailyLogWrite(null, polished)).toBe("write");
+    // Fallback over fallback (regenerate while the model is still down).
+    expect(resolveDailyLogWrite({ contentMarkdown: fallbackZh }, fallbackZh)).toBe("write");
+    // Polished over fallback (model came back) — the upgrade path.
+    expect(resolveDailyLogWrite({ contentMarkdown: fallbackZh }, polished)).toBe("write");
+    // Polished over polished (normal regenerate).
+    expect(resolveDailyLogWrite({ contentMarkdown: polished }, polished)).toBe("write");
   });
 });
 

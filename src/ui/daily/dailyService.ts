@@ -13,6 +13,7 @@ import type { ConversationRecord } from "../db/schema";
 import type { DailyLog, WeeklyRecapV1, WeeklyReportRecord } from "../db/types";
 import {
   getAllSummaries,
+  getDailyLog,
   listDailyLogs,
   saveWeeklyReport,
   setDailyLogVaultPath,
@@ -44,6 +45,7 @@ import {
 } from "./dailyActivity";
 import {
   buildDailyWorkModel,
+  resolveDailyLogWrite,
   type DailySessionEnrichment,
 } from "./dailyJournal";
 import { runDailyTwoPassPipeline, type DailyLlmRunner } from "./dailyPipeline";
@@ -388,6 +390,13 @@ export async function generateDailyLog(
       run,
       locale,
     });
+
+    const existing = await getDailyLog(date).catch(() => null);
+    if (resolveDailyLogWrite(existing, contentMarkdown) === "keep") {
+      // The regenerate degraded to the deterministic fallback — keep the
+      // AI-polished log already stored for this date.
+      return existing;
+    }
 
     const log = await upsertDailyLog({
       date,
