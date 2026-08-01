@@ -1051,6 +1051,7 @@ export const zhTranslations = {
       downloadMarkdown: "下载 Markdown",
       exportMarkdown: "导出 .md 到目录…",
       exportedTo: "已导出到 {path}",
+      vaultSynced: "已同步到 vault：{path}",
       emptyTitle: "选择一天，或一份周报",
       emptyHint: "日志每天晚间自动生成；也可以点「现在生成」生成今天的日报，或在左侧查看时间线。",
     },
@@ -1638,6 +1639,9 @@ export const zhTranslations = {
       roundtablePrompt: "在「{topic}」上，我目前的理解还有哪些薄弱环节？接下来最值得投入什么？",
       moreDomains: "+ {n} 个领域",
       uncategorizedIncluded: "· 含零散探索",
+      synthesisRunning: "正在解读你的学习路线… {done}/{total}",
+      synthesisRegenerate: "重新生成解读",
+      synthesisNextSteps: "建议的下一步",
     },
     roundtable: {
       title: "AI 圆桌",

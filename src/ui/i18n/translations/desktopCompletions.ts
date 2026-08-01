@@ -74,6 +74,7 @@ export const jaDesktopCompletion = {
       timeline: "タイムライン", timelineEmpty: "ログはまだありません。毎晩自動生成されます。", sourceAuto: "自動", sourceManual: "手動",
       chipCli: "CLI {count}", chipBrowser: "Web {count}", chipMessages: "{count} 件", regenerate: "再生成", export: "出力", exporting: "出力中…",
       downloadMarkdown: "Markdown をダウンロード", exportMarkdown: ".md をフォルダーへ出力…", exportedTo: "{path} に出力しました",
+      vaultSynced: "vault に保存済み: {path}",
       emptyTitle: "日付または週間レポートを選択", emptyHint: "ログは毎晩自動生成されます。「今すぐ生成」で本日分を作成するか、左側のタイムラインを確認できます。",
     },
     aiti: {
@@ -181,6 +182,7 @@ export const koDesktopCompletion = {
       timeline: "타임라인", timelineEmpty: "아직 로그가 없습니다. 매일 저녁 자동으로 생성됩니다.", sourceAuto: "자동", sourceManual: "수동",
       chipCli: "CLI {count}", chipBrowser: "웹 {count}", chipMessages: "메시지 {count}개", regenerate: "다시 생성", export: "내보내기",
       exporting: "내보내는 중…", downloadMarkdown: "Markdown 다운로드", exportMarkdown: ".md를 폴더로 내보내기…", exportedTo: "{path}(으)로 내보냄",
+      vaultSynced: "vault에 저장됨: {path}",
       emptyTitle: "날짜 또는 주간 보고서 선택", emptyHint: "로그는 매일 저녁 자동 생성됩니다. 오늘은 ‘지금 생성’을 사용하거나 왼쪽 타임라인을 확인하세요.",
     },
     aiti: {

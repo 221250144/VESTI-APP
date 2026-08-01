@@ -888,6 +888,9 @@ const DEFAULT_LABELS: DashboardLabels = {
     roundtablePrompt: "On \"{topic}\": where is my understanding still weak, and what is worth investing in next?",
     moreDomains: "+ {n} more areas",
     uncategorizedIncluded: "· includes uncategorized",
+    synthesisRunning: "Reading your routes… {done}/{total}",
+    synthesisRegenerate: "Regenerate readings",
+    synthesisNextSteps: "Suggested next steps",
   },
   roundtable: {
     title: "AI Roundtable",

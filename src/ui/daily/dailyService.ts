@@ -1,9 +1,12 @@
-// P4c daily log + weekly report: IO orchestration. Gathers the renderer-side
-// inputs (Dexie conversations, P1.5 digests, browser summaries), runs the
-// pure aggregation (dailyActivity/weekly), calls the `daily` agent kind when
-// an LLM is configured and falls back to the local template otherwise, then
-// persists via the repository. Everything budget/decision-related lives in
-// the pure modules; this file only moves data.
+// Daily journal + weekly report: IO orchestration. Gathers the renderer-side
+// inputs (Dexie conversations, P1.5 digests, browser summaries, fork lineage
+// + subagent briefs from the conversation tree, capture-store open questions,
+// raw file-tool touches, project memory), builds the deterministic work model
+// (dailyJournal), runs the two-pass LLM pipeline (dailyPipeline) when a model
+// is configured — deterministic local journal otherwise — persists via the
+// repository and mirrors the result into the Obsidian vault as a long-term
+// journal (journalVault). Everything budget/decision-related lives in the
+// pure modules; this file only moves data.
 
 import { db } from "../db/schema";
 import type { ConversationRecord } from "../db/schema";
@@ -12,16 +15,21 @@ import {
   getAllSummaries,
   listDailyLogs,
   saveWeeklyReport,
+  setDailyLogVaultPath,
   upsertDailyLog,
 } from "../db/repository";
-import type { VestiDesktopApi } from "../../shared/contracts";
+import type {
+  ConversationTreeSession,
+  RelayFileTouchRow,
+  VestiDesktopApi,
+} from "../../shared/contracts";
 import { listConversationDigests } from "../sync/conversationDigests";
+import { loadConversationTree } from "../sync/conversationTree";
 import { getLanguageSettings } from "../services/languageSettingsService";
+import type { RelayProjectMemory } from "../relay/relayContext";
 import {
   DAILY_UPDATED_EVENT,
   addDaysToDateString,
-  buildDailyTranscript,
-  buildLocalDailyMarkdown,
   collectDailyActivity,
   computeDailyOverview,
   lastNDates,
@@ -34,6 +42,12 @@ import {
   type DailyLogOverview,
   type DailySummaryInput,
 } from "./dailyActivity";
+import {
+  buildDailyWorkModel,
+  type DailySessionEnrichment,
+} from "./dailyJournal";
+import { runDailyTwoPassPipeline, type DailyLlmRunner } from "./dailyPipeline";
+import { exportDailyJournalToVault } from "./journalVault";
 import {
   aggregateWeekly,
   buildLocalWeeklyMarkdown,
@@ -79,7 +93,16 @@ interface DailyInputs {
   summaries: DailySummaryInput[];
 }
 
-/** Dexie → the minimal shapes the pure aggregation core expects. */
+/**
+ * Dexie → the minimal shapes the pure aggregation core expects.
+ *
+ * Source classification: capture-sync records are stamped "local_terminal";
+ * EVERYTHING else (extension-bridge imports, JSON restores — older import
+ * paths never stamped a source) is browser-side. The previous inverse check
+ * (`_source === "browser_extension"`) silently bucketed un-stamped web
+ * conversations as CLI, which is how 1700+ browser conversations fell out of
+ * the daily data source.
+ */
 async function gatherDailyInputs(): Promise<DailyInputs> {
   const records = (await db.conversations.toArray()) as Array<
     ConversationRecord & LocalTerminalFields
@@ -93,20 +116,19 @@ async function gatherDailyInputs(): Promise<DailyInputs> {
     if (typeof record.id !== "number" || record.is_trash) continue;
     // A1: folded subagent runs roll up into their parent conversation's day.
     if ((record as { _subagent_of?: unknown })._subagent_of) continue;
-    const isBrowser = record._source === "browser_extension";
+    const isCli = record._source === "local_terminal";
     conversations.push({
       id: record.id,
       title: record.title,
       platform: record.platform,
       updatedAt: record.updated_at ?? 0,
       messageCount: record.message_count ?? 0,
-      source: isBrowser ? "browser" : "cli",
-      projectLabel:
-        typeof record._project_path === "string" && record._project_path
+      source: isCli ? "cli" : "browser",
+      projectLabel: isCli
+        ? typeof record._project_path === "string" && record._project_path
           ? record._project_path
-          : isBrowser
-            ? domainOf(record.url ?? "")
-            : null,
+          : null
+        : domainOf(record.url ?? ""),
     });
   }
   return { conversations, digests, summaries };
@@ -118,31 +140,219 @@ function notifyDailyUpdated(): void {
   }
 }
 
+// ---- Journal enrichment (tree lineage, capture extras, anchors, memory) ------
+
+interface DailyJournalBundle {
+  activity: DailyActivity;
+  enrichments: DailySessionEnrichment[];
+  fileTouches: RelayFileTouchRow[];
+  resolveTouchConversationId: (sessionId: string) => number | null;
+  projectMemory: RelayProjectMemory[];
+  previousLogMarkdown: string | null;
+}
+
+/** Collect every tree session (main + subagent descendants) into a flat map. */
+function indexTreeSessions(
+  sessions: ConversationTreeSession[],
+  into: Map<string, ConversationTreeSession>
+): void {
+  for (const session of sessions) {
+    into.set(session.id, session);
+    if (session.children?.length) indexTreeSessions(session.children, into);
+  }
+}
+
+/**
+ * Gather everything the work model needs beyond the Dexie activity: fork
+ * lineage + fork-deduped counts + subagent briefs from the conversation tree,
+ * capture-store open questions, raw file-tool touches (subagent descendants
+ * fold into their parent conversation, A1), L0/L2 project memory for the
+ * day's projects, and yesterday's log for continuity. Every piece is
+ * best-effort — a missing bridge or tree simply narrows the model.
+ */
+async function gatherDailyJournalBundle(
+  date: string,
+  inputs: DailyInputs
+): Promise<DailyJournalBundle> {
+  const activity = collectDailyActivity(date, inputs);
+  const api = vestiApi();
+  const cliItems = activity.items.filter((item) => item.source === "cli");
+
+  const records = (await db.conversations.toArray()) as Array<
+    ConversationRecord & LocalTerminalFields
+  >;
+  const cliIdByConversationId = new Map<number, string>();
+  for (const record of records) {
+    if (typeof record.id !== "number" || typeof record._cli_id !== "string") continue;
+    cliIdByConversationId.set(record.id, record._cli_id);
+  }
+
+  const tree = await loadConversationTree().catch(() => null);
+  const sessionByCliId = new Map<string, ConversationTreeSession>();
+  for (const source of tree?.sources ?? []) {
+    for (const project of source.projects) {
+      indexTreeSessions(project.sessions, sessionByCliId);
+    }
+  }
+
+  // Capture-store extras (open_questions never reach the tree digest).
+  const dayCliIds = cliItems
+    .map((item) => cliIdByConversationId.get(item.id))
+    .filter((cliId): cliId is string => Boolean(cliId));
+  const sessionContexts =
+    api && dayCliIds.length > 0
+      ? await api.getRelaySessionContexts(dayCliIds).catch(() => [])
+      : [];
+  const openQuestionsByCliId = new Map(
+    sessionContexts.map((context) => [
+      context.sessionId,
+      context.digest?.openQuestions ?? [],
+    ])
+  );
+
+  const enrichments: DailySessionEnrichment[] = cliItems.map((item) => {
+    const cliId = cliIdByConversationId.get(item.id) ?? null;
+    const treeSession = cliId ? sessionByCliId.get(cliId) : undefined;
+    return {
+      conversationId: item.id,
+      cliId,
+      forkedFrom: treeSession?.forkedFrom ?? null,
+      uniqueMessageCount: treeSession?.uniqueMessageCount ?? null,
+      openQuestions: (cliId && openQuestionsByCliId.get(cliId)) || [],
+      subagents: (treeSession?.children ?? []).map((child) => ({
+        role: child.subagentRole ?? null,
+        title: child.title,
+        oneLiner: child.oneLiner,
+      })),
+    };
+  });
+
+  // File touches: the day's CLI sessions plus their subagent descendants,
+  // resolved back to the parent conversation id (A1 fold-in).
+  const conversationIdByCliId = new Map<string, number>();
+  for (const [conversationId, cliId] of cliIdByConversationId) {
+    conversationIdByCliId.set(cliId, conversationId);
+  }
+  const dayCliIdSet = new Set(dayCliIds);
+  const touchCliIds = new Set<string>(dayCliIds);
+  for (const [cliId, treeSession] of sessionByCliId) {
+    if (!dayCliIdSet.has(cliId)) continue;
+    const parentConversationId = conversationIdByCliId.get(cliId);
+    if (parentConversationId === undefined) continue;
+    const descendants: string[] = [];
+    const collect = (session: ConversationTreeSession): void => {
+      for (const child of session.children ?? []) {
+        descendants.push(child.id);
+        collect(child);
+      }
+    };
+    collect(treeSession);
+    for (const descendantId of descendants) {
+      touchCliIds.add(descendantId);
+      if (!conversationIdByCliId.has(descendantId)) {
+        conversationIdByCliId.set(descendantId, parentConversationId);
+      }
+    }
+  }
+  const fileTouches =
+    api && touchCliIds.size > 0
+      ? await api
+          .getRelayFileTouches([...touchCliIds].slice(0, 200))
+          .catch(() => [] as RelayFileTouchRow[])
+      : [];
+  const dayConversationIds = new Set(activity.items.map((item) => item.id));
+  const resolveTouchConversationId = (sessionId: string): number | null => {
+    const conversationId = conversationIdByCliId.get(sessionId) ?? null;
+    return conversationId !== null && dayConversationIds.has(conversationId)
+      ? conversationId
+      : null;
+  };
+
+  // Project memory for the day's projects (cap 3 to bound the transcript).
+  const projectMemory: RelayProjectMemory[] = [];
+  if (api && dayCliIdSet.size > 0 && tree) {
+    const projects: Array<{ projectKey: string; label: string }> = [];
+    for (const source of tree.sources) {
+      for (const project of source.projects) {
+        const touchesDay = project.sessions.some(
+          (session) =>
+            dayCliIdSet.has(session.id) ||
+            (session.children ?? []).some((child) => dayCliIdSet.has(child.id))
+        );
+        if (touchesDay) {
+          projects.push({ projectKey: project.projectKey, label: project.label });
+          if (projects.length >= 3) break;
+        }
+      }
+      if (projects.length >= 3) break;
+    }
+    if (projects.length > 0) {
+      const states = await api.getProjectStates().catch(() => []);
+      const stateByKey = new Map(states.map((state) => [state.projectKey, state]));
+      for (const project of projects) {
+        const brief = await api.getProjectBrief(project.projectKey).catch(() => null);
+        const state = stateByKey.get(project.projectKey) ?? null;
+        if (!state && !brief?.contentMarkdown?.trim()) continue;
+        projectMemory.push({
+          label: project.label,
+          state,
+          briefMarkdown: brief?.contentMarkdown ?? null,
+        });
+      }
+    }
+  }
+
+  // Yesterday's log: continuity context for tomorrow's-leads reasoning.
+  const yesterday = addDaysToDateString(date, -1);
+  const previousLogMarkdown = yesterday
+    ? ((await listDailyLogs().catch(() => [])).find((log) => log.date === yesterday)
+        ?.contentMarkdown ?? null)
+    : null;
+
+  return {
+    activity,
+    enrichments,
+    fileTouches,
+    resolveTouchConversationId,
+    projectMemory,
+    previousLogMarkdown,
+  };
+}
+
 // ---- Daily log generation ----------------------------------------------------
 
 const inFlightDates = new Set<string>();
 
-/** Render the day's markdown: `daily` agent kind when the LLM is configured
- * (falling back to the local template on any agent failure), local template
- * otherwise. */
-async function renderDailyContent(activity: DailyActivity): Promise<string> {
-  const api = vestiApi();
-  if (api && (await isLlmConfigured(api))) {
-    try {
-      const result = await api.runAgent({
-        kind: "daily",
-        sessionId: `daily:${activity.date}`,
-        template: "daily",
-        transcriptOverride: buildDailyTranscript(activity),
-        persist: false,
-      });
-      if (result.content.trim()) return result.content;
-    } catch {
-      // Fall through to the local template — a failed agent call must never
-      // lose the day's record.
-    }
+/** The api.runAgent surface adapted to the pipeline's runner interface. */
+function makeDailyLlmRunner(api: VestiDesktopApi, date: string): DailyLlmRunner {
+  return async ({ template, transcript }) => {
+    const result = await api.runAgent({
+      kind: "daily",
+      sessionId: `daily:${date}:${template}`,
+      template,
+      transcriptOverride: transcript,
+      persist: false,
+    });
+    if (!result.content.trim()) throw new Error("模型没有返回内容");
+    return result.content;
+  };
+}
+
+/** Mirror the freshly generated log into the Obsidian vault journal and
+ * record the note path on the Dexie row. Best-effort: vault failures never
+ * fail the generation itself. */
+async function syncJournalToVault(log: DailyLog, locale: DailyLocale): Promise<void> {
+  try {
+    const logs = await listDailyLogs().catch(() => []);
+    const month = log.date.slice(0, 7);
+    const monthDates = logs
+      .map((entry) => entry.date)
+      .filter((entry) => entry.startsWith(month));
+    const result = await exportDailyJournalToVault({ log, monthDates, locale });
+    if (result) await setDailyLogVaultPath(log.date, result.relativePath);
+  } catch {
+    // The vault is an optional mirror — the Dexie log is the source of truth.
   }
-  return buildLocalDailyMarkdown(activity, await currentDailyLocale());
 }
 
 /**
@@ -159,15 +369,33 @@ export async function generateDailyLog(
   inFlightDates.add(date);
   try {
     const inputs = await gatherDailyInputs();
-    const activity = collectDailyActivity(date, inputs);
-    if (activity.items.length === 0) return null;
-    const contentMarkdown = await renderDailyContent(activity);
+    const bundle = await gatherDailyJournalBundle(date, inputs);
+    if (bundle.activity.items.length === 0) return null;
+
+    const locale = await currentDailyLocale();
+    const api = vestiApi();
+    const run = api && (await isLlmConfigured(api)) ? makeDailyLlmRunner(api, date) : null;
+    const model = buildDailyWorkModel({
+      activity: bundle.activity,
+      enrichments: bundle.enrichments,
+      fileTouches: bundle.fileTouches,
+      resolveTouchConversationId: bundle.resolveTouchConversationId,
+    });
+    const { contentMarkdown } = await runDailyTwoPassPipeline({
+      model,
+      projectMemory: bundle.projectMemory,
+      previousLogMarkdown: bundle.previousLogMarkdown,
+      run,
+      locale,
+    });
+
     const log = await upsertDailyLog({
       date,
       contentMarkdown,
-      stats: activity.stats,
+      stats: bundle.activity.stats,
       source,
     });
+    await syncJournalToVault(log, locale);
     notifyDailyUpdated();
     return log;
   } finally {
@@ -295,10 +523,12 @@ function countWeeklyConversations(
 }
 
 /**
- * Aggregate the last 7 local days (daily logs where present, raw activity
- * stats otherwise) into a weekly report: the `daily` agent kind with the
- * 'weekly' template when an LLM is configured, the local template otherwise.
- * Upserts into weekly_reports keyed by the (rangeStart, rangeEnd) pair.
+ * Aggregate the last 7 local days into a weekly report, summarizing the
+ * week's STORED DAILY LOGS (not re-deriving from raw conversations): days
+ * with a log contribute their sections, days with activity but no log a
+ * stats-only block. The `daily` agent kind with the 'weekly' template when an
+ * LLM is configured, the local template otherwise. Upserts into
+ * weekly_reports keyed by the (rangeStart, rangeEnd) pair.
  */
 export async function generateWeeklyReport(): Promise<WeeklyReportRecord> {
   if (weeklyInFlight) throw new Error("周报正在生成中，请稍候");

@@ -1034,4 +1034,7 @@ export interface DailyLog {
   stats: DailyLogStats
   /** 'auto' rows come from the scheduler, 'manual' from the generate button. */
   source: "auto" | "manual"
+  /** Vault-relative journal note path (journal/YYYY/YYYY-MM-DD.md) when the
+   * log was mirrored into the Obsidian vault; null/absent otherwise. */
+  vaultPath?: string | null
 }

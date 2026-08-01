@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { AgentService } from './main/agentService';
+import { AgentMcpRegistry, createAgentMcpRegistry, resolveAgentMcpTargetId } from './main/agentMcpRegistry';
 import { CaptureService } from './main/captureService';
 import { CapsuleWindowService } from './main/capsuleWindowService';
 import { DigestService } from './main/digestService';
@@ -80,6 +81,7 @@ let notion: NotionService;
 const uiPrefs = new UiPrefsService();
 let capsule: CapsuleWindowService;
 let extensionBridge: ExtensionBridgeService;
+let agentMcp: AgentMcpRegistry;
 
 // Pending /v1/import requests waiting for the renderer's idempotent import to
 // finish. Resolved by the IPC.extensionImportResult handler below.
@@ -700,6 +702,17 @@ function registerIpc(): void {
     if (typeof clientId !== 'string' || !clientId) throw new Error('Invalid client id');
     return extensionBridge.disconnectClient(clientId);
   });
+  ipcMain.handle(IPC.agentMcpStatus, () => agentMcp.listStatus());
+  ipcMain.handle(IPC.agentMcpRegister, (_event, id: unknown) => {
+    const targetId = resolveAgentMcpTargetId(id);
+    if (!targetId) throw new Error('无效的 Agent 目标');
+    return agentMcp.register(targetId);
+  });
+  ipcMain.handle(IPC.agentMcpUnregister, (_event, id: unknown) => {
+    const targetId = resolveAgentMcpTargetId(id);
+    if (!targetId) throw new Error('无效的 Agent 目标');
+    return agentMcp.unregister(targetId);
+  });
   ipcMain.handle(IPC.extensionImportResult, (_event, result: unknown) => {
     if (!result || typeof result !== 'object') return;
     const payload = result as ExtensionImportResultPayload;
@@ -993,6 +1006,7 @@ app.whenReady().then(async () => {
   digest = new DigestService(capture, agent, embedding, () => settings.isLlmConfigured());
   notion = new NotionService(settings);
   projectMemory = new ProjectMemoryService(capture, agent);
+  agentMcp = createAgentMcpRegistry(app.getAppPath(), process.resourcesPath);
   capture.setSyncCompletedListener(() => {
     digest.requestScan();
     projectMemory.requestScan();

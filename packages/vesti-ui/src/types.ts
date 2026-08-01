@@ -498,6 +498,22 @@ export type StorageApi = {
     domain: LearnDomain,
     opts?: { lang?: "zh" | "en" }
   ) => Promise<LearnDeepenResult>;
+  /** 路线级 LLM 合成 (Learn V4): one pass per learning route — full-sentence
+   * title + interpretation + next steps, cached by route fingerprint so
+   * unchanged routes never re-run. Sequential (concurrency 1). Returns the
+   * per-route map keyed by fingerprint; routes missing from the map (run
+   * failed / no LLM configured) fall back to the deterministic labels.
+   * Optional — the Learn card hides the synthesis affordances without it. */
+  runLearnSynthesis?: (
+    domains: LearnDomain[],
+    opts?: {
+      lang?: "zh" | "en";
+      /** Ignore the cache and re-synthesize every route ("重新生成"). */
+      force?: boolean;
+      /** Progressive status while synthesizing: routes settled of total. */
+      onProgress?: (done: number, total: number) => void;
+    }
+  ) => Promise<Record<string, LearnRouteSynthesis>>;
   getSummary?: (conversationId: number) => Promise<ChatSummaryData | null>;
   generateSummary?: (conversationId: number) => Promise<ChatSummaryData>;
   /** AITI coverage: how many live conversations already have a (structured)
@@ -1027,6 +1043,9 @@ export interface DailyLog {
   contentMarkdown: string;
   stats: DailyLogStats;
   source: "auto" | "manual";
+  /** Vault-relative journal note path (journal/YYYY/YYYY-MM-DD.md) when the
+   * log was mirrored into the Obsidian vault; null/absent otherwise. */
+  vaultPath?: string | null;
 }
 
 /** Stats header for the log view (streak + week activity). */
@@ -2076,6 +2095,12 @@ export interface DashboardLabels {
     roundtablePrompt: string;
     moreDomains: string;
     uncategorizedIncluded: string;
+    /** Route synthesis progress line; "{done}" of "{total}" routes settled. */
+    synthesisRunning: string;
+    /** Button: clear the route-synthesis cache and re-run every route. */
+    synthesisRegenerate: string;
+    /** Caption above a synthesized route's next-step bullets. */
+    synthesisNextSteps: string;
   };
   roundtable: {
     title: string;
@@ -2259,6 +2284,15 @@ export interface LearnDomain {
   /** V2: when true, this domain has so few conversations (or is dormant)
    * that it renders in a compact single-row variant to save space. */
   compact?: boolean;
+  /** V4: the route's full member conversation id set (sorted) — the input of
+   * the LLM-synthesis cache fingerprint (`learnRouteFingerprint`). Optional:
+   * hand-built profiles fall back to the representative ids. */
+  memberIds?: number[];
+  /** V4: the route members' source platforms, most frequent first (≤3). */
+  platforms?: string[];
+  /** V4: the route members' captured project labels, most frequent first
+   * (≤3) — grounding context for the route synthesis. */
+  projects?: string[];
 }
 export interface LearnGlossaryEntry {
   term: string;
@@ -2296,6 +2330,24 @@ export interface LearnDeepenResult {
   raw: string;
   sources: RelatedConversation[];
   durationMs: number;
+}
+
+/** 路线级 LLM 合成 (Learn V4): one synthesized reading of a learning route,
+ * cached by route fingerprint. Absent for a route → the card renders the
+ * deterministic computeLearn labels instead (zero-regression fallback). */
+export interface LearnRouteSynthesis {
+  /** Fingerprint of the route this reading belongs to (member id set hash). */
+  fingerprint: string;
+  lang: "zh" | "en";
+  /** Full-sentence, outcome-oriented route title ("用 RAG 重构了桌面端记忆召回",
+   * not "项目开发 · 综合探索"). */
+  title: string;
+  /** 2-4 sentence interpretation: what this route is, how far it got, how the
+   * knowledge fits together. */
+  summary: string;
+  /** 1-3 concrete next steps. */
+  nextSteps: string[];
+  synthesizedAt: number;
 }
 
 // ---- AI 圆桌 (Roundtable) ----

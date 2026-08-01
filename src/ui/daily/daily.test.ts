@@ -1,15 +1,14 @@
 // P4c daily log: unit tests for the pure cores — per-day activity
-// aggregation, condensed-context assembly, the no-LLM local template,
-// scheduler decision logic, weekly aggregation and the daily agent prompt.
-// Node environment, no Dexie/IPC involved. All timestamps are built with the
-// local Date constructor, so the tests are timezone-independent.
+// aggregation, scheduler decision logic, weekly aggregation and the daily
+// agent prompt. The journal model/two-pass pipeline/local template live in
+// dailyJournal/dailyPipeline with their own test files. Node environment, no
+// Dexie/IPC involved. All timestamps are built with the local Date
+// constructor, so the tests are timezone-independent.
 
 import { describe, expect, it } from "vitest";
 import { getAgentKindDefinition } from "../../main/agentPrompts";
 import {
   addDaysToDateString,
-  buildDailyTranscript,
-  buildLocalDailyMarkdown,
   collectDailyActivity,
   computeDailyOverview,
   computeDailyStreak,
@@ -25,7 +24,9 @@ import {
   aggregateWeekly,
   buildLocalWeeklyMarkdown,
   buildWeeklyTranscript,
+  dailyLogAccomplishments,
   excerptDailyLog,
+  extractDailyLogSection,
   type WeeklyDayInput,
 } from "./weekly";
 
@@ -177,90 +178,6 @@ describe("collectDailyActivity", () => {
   });
 });
 
-// ---- buildDailyTranscript ----------------------------------------------------
-
-describe("buildDailyTranscript", () => {
-  const activity = collectDailyActivity("2026-07-18", {
-    conversations: [
-      makeConversation({ id: 1, updatedAt: localTs(2026, 7, 18, 9) }),
-      makeConversation({
-        id: 2,
-        updatedAt: localTs(2026, 7, 18, 20),
-        source: "browser",
-        platform: "ChatGPT",
-      }),
-    ],
-    digests: [makeDigest(1)],
-    summaries: [{ conversationId: 2, content: "讨论了周报设计", createdAt: 1 }],
-  });
-
-  it("carries the stats header plus digest and summary content", () => {
-    const transcript = buildDailyTranscript(activity);
-    expect(transcript).toContain("日期：2026-07-18");
-    expect(transcript).toContain("CLI 会话 1 个");
-    expect(transcript).toContain("网页会话 1 个");
-    expect(transcript).toContain("一句话：实现了日报功能");
-    expect(transcript).toContain("关键文件：src/ui/daily/dailyService.ts");
-    expect(transcript).toContain("摘要要点：讨论了周报设计");
-  });
-
-  it("fits the budget and reports omitted conversations", () => {
-    const many = collectDailyActivity("2026-07-18", {
-      conversations: Array.from({ length: 30 }, (_, index) =>
-        makeConversation({
-          id: index + 1,
-          updatedAt: localTs(2026, 7, 18, 8) + index * 1000,
-        })
-      ),
-      digests: Array.from({ length: 30 }, (_, index) => makeDigest(index + 1)),
-      summaries: [],
-    });
-    const transcript = buildDailyTranscript(many, 2_000);
-    expect(transcript.length).toBeLessThanOrEqual(2_100);
-    expect(transcript).toContain("未列出");
-  });
-});
-
-// ---- buildLocalDailyMarkdown ---------------------------------------------------
-
-describe("buildLocalDailyMarkdown", () => {
-  it("renders the same section structure the agent prompt asks for", () => {
-    const activity = collectDailyActivity("2026-07-18", {
-      conversations: [
-        makeConversation({ id: 1, updatedAt: localTs(2026, 7, 18, 9) }),
-        makeConversation({
-          id: 2,
-          updatedAt: localTs(2026, 7, 18, 20),
-          source: "browser",
-          platform: "ChatGPT",
-          projectLabel: "chatgpt.com",
-        }),
-      ],
-      digests: [makeDigest(1)],
-      summaries: [{ conversationId: 2, content: "浏览器侧摘要", createdAt: 1 }],
-    });
-    const markdown = buildLocalDailyMarkdown(activity, "zh");
-    expect(markdown).toContain("# 2026-07-18 日报");
-    expect(markdown).toContain("## 今日概览");
-    expect(markdown).toContain("## 关键文件与状态");
-    expect(markdown).toContain("## 网页端 AI 对话摘要");
-    expect(markdown).toContain("## 明日待办线索");
-    expect(markdown).toContain("src/ui/daily/dailyService.ts");
-    expect(markdown).toContain("浏览器侧摘要");
-  });
-
-  it("marks empty sections instead of fabricating content", () => {
-    const activity = collectDailyActivity("2026-07-18", {
-      conversations: [makeConversation({ id: 1, updatedAt: localTs(2026, 7, 18, 9) })],
-      digests: [],
-      summaries: [],
-    });
-    const markdown = buildLocalDailyMarkdown(activity, "en");
-    expect(markdown).toContain("## Key files & status\nNone");
-    expect(markdown).toContain("## Leads for tomorrow\nNone");
-  });
-});
-
 // ---- Scheduler decision logic --------------------------------------------------
 
 describe("normalizeDailyTime", () => {
@@ -392,6 +309,42 @@ describe("excerptDailyLog", () => {
   it("skips headings and blockquotes, keeps body text", () => {
     expect(excerptDailyLog("# 标题\n\n> 模板说明\n正文内容。", 200)).toBe("正文内容。");
   });
+
+  it("skips journal frontmatter", () => {
+    expect(
+      excerptDailyLog('---\nuuid: "vesti-daily-2026-07-18"\ndate: 2026-07-18\n---\n# 标题\n正文内容。', 200)
+    ).toBe("正文内容。");
+  });
+});
+
+describe("extractDailyLogSection / dailyLogAccomplishments", () => {
+  const log = [
+    "# 2026-07-18 日报",
+    "",
+    "## 今日完成",
+    "- 实现了两遍日报管线并通过测试",
+    "- 修复浏览器会话分类",
+    "",
+    "## 关键文件",
+    "- `src/ui/daily/dailyJournal.ts`（修改）",
+    "",
+    "## 明日线索",
+    "- 继续周报联调",
+  ].join("\n");
+
+  it("pulls exactly the requested section body", () => {
+    expect(extractDailyLogSection(log, ["## 今日完成"])).toBe(
+      "- 实现了两遍日报管线并通过测试\n- 修复浏览器会话分类"
+    );
+    expect(extractDailyLogSection(log, ["## 不存在的节"])).toBeNull();
+  });
+
+  it("summarizes from the 今日完成 section, falling back to the whole-log excerpt", () => {
+    expect(dailyLogAccomplishments(log, 200)).toContain("实现了两遍日报管线");
+    expect(dailyLogAccomplishments(log, 200)).not.toContain("关键文件");
+    const legacy = "# 日报\n\n## 今日概览\n今天完成了日报功能。";
+    expect(dailyLogAccomplishments(legacy, 200)).toBe("今天完成了日报功能。");
+  });
 });
 
 describe("buildWeeklyTranscript", () => {
@@ -406,6 +359,25 @@ describe("buildWeeklyTranscript", () => {
     expect(transcript).toContain("### 2026-07-17");
     expect(transcript).toContain("今天完成了日报功能。");
     expect(transcript).toContain("当日有活动但未生成日报");
+  });
+
+  it("summarizes the stored log's 今日完成 section per day", () => {
+    const aggregate = aggregateWeekly([
+      makeDay("2026-07-17", {
+        logMarkdown: [
+          "# 2026-07-17 日报",
+          "",
+          "## 今日完成",
+          "- 完成了文件锚点确定性提取",
+          "",
+          "## 决策与发现",
+          "- 决定复用 relay 的锚点机制",
+        ].join("\n"),
+      }),
+    ]);
+    const transcript = buildWeeklyTranscript(aggregate);
+    expect(transcript).toContain("完成了文件锚点确定性提取");
+    expect(transcript).not.toContain("决定复用 relay 的锚点机制");
   });
 
   it("fits the budget with a truncation marker", () => {
@@ -451,7 +423,7 @@ describe("daily agent kind", () => {
     customInstructions: "",
   } as const;
 
-  it("builds the daily prompt with the four required sections", () => {
+  it("builds the synthesis prompt with the journal schema and the key-files marker", () => {
     const definition = getAgentKindDefinition("daily");
     const messages = definition.buildPrompt({
       transcript: "某日活动",
@@ -459,11 +431,34 @@ describe("daily agent kind", () => {
       preferences,
     });
     const user = messages.find((message) => message.role === "user");
-    expect(user?.content).toContain("今日概览");
-    expect(user?.content).toContain("关键文件与状态");
-    expect(user?.content).toContain("网页端 AI 对话摘要");
-    expect(user?.content).toContain("明日待办线索");
+    expect(user?.content).toContain("今日完成");
+    expect(user?.content).toContain("项目工作流分解");
+    expect(user?.content).toContain("{{KEY_FILES}}");
+    expect(user?.content).toContain("决策与发现");
+    expect(user?.content).toContain("网页端对话摘要");
+    expect(user?.content).toContain("明日线索");
     expect(user?.content).toContain("某日活动");
+    // Synthesis answers Markdown prose, not JSON.
+    const system = messages.find((message) => message.role === "system");
+    expect(system?.content).toContain("Markdown");
+  });
+
+  it("builds the pass-1 cluster prompt as strict JSON extraction", () => {
+    const definition = getAgentKindDefinition("daily");
+    const messages = definition.buildPrompt({
+      transcript: "某簇上下文",
+      template: "daily-cluster",
+      preferences,
+    });
+    const user = messages.find((message) => message.role === "user");
+    expect(user?.content).toContain('"theme"');
+    expect(user?.content).toContain('"completed"');
+    expect(user?.content).toContain('"open_questions"');
+    expect(user?.content).toContain("严格 JSON");
+    expect(user?.content).toContain("某簇上下文");
+    const system = messages.find((message) => message.role === "system");
+    expect(system?.content).toContain("严格 JSON");
+    expect(system?.content).not.toContain("Markdown 正文");
   });
 
   it("switches to the weekly directive with template=weekly", () => {
@@ -477,7 +472,8 @@ describe("daily agent kind", () => {
     expect(user?.content).toContain("本周完成");
     expect(user?.content).toContain("模式观察");
     expect(user?.content).toContain("下周线索");
-    expect(user?.content).not.toContain("明日待办线索");
+    expect(user?.content).not.toContain("明日线索");
+    expect(user?.content).toContain("日报");
   });
 
   it("parses leniently: any non-empty body passes", () => {

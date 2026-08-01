@@ -29,6 +29,13 @@ const KIND_MIN_MAX_TOKENS: Record<string, number> = {
   // Relay V2 pack: goal + state + decisions + failed paths + verification +
   // verify-first checklist + an embedded paste-ready handoff prompt.
   relay: 4096,
+  // Daily journal (P4c upgrade): the two-pass pipeline answers with either a
+  // per-cluster structured brief (pass 1) or a full achievement-oriented
+  // work-record document (pass 2); the global default (1600) truncates both.
+  daily: 4096,
+  // Learn route synthesis (V4): title + 2-4 sentence interpretation + next
+  // steps as one JSON document per route; 1600 risks mid-JSON truncation.
+  'learn-synthesis': 2048,
 };
 
 function effectiveMaxTokens(kind: string, configured: number): number {

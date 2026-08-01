@@ -3475,7 +3475,8 @@ function toDailyLog(record: DailyLogRecord & { id: number }): DailyLog {
     updatedAt: record.updated_at,
     contentMarkdown: record.content_markdown,
     stats: normalizeDailyLogStats(record.stats),
-    source: record.source === "manual" ? "manual" : "auto"
+    source: record.source === "manual" ? "manual" : "auto",
+    vaultPath: typeof record.vault_path === "string" ? record.vault_path : null
   }
 }
 
@@ -3520,6 +3521,15 @@ export async function getDailyLog(date: string): Promise<DailyLog | null> {
     return null
   }
   return toDailyLog(record as DailyLogRecord & { id: number })
+}
+
+/** Record the vault-relative journal note path after a successful vault
+ * mirror (daily journal export); a no-op when the day has no row. */
+export async function setDailyLogVaultPath(date: string, vaultPath: string): Promise<void> {
+  await enforceStorageWriteGuard()
+  const existing = await db.daily_logs.where("date").equals(date).first()
+  if (existing?.id === undefined) return
+  await db.daily_logs.update(existing.id, { vault_path: vaultPath })
 }
 
 export async function listDailyLogs(): Promise<DailyLog[]> {

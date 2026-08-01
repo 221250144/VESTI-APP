@@ -1420,7 +1420,10 @@ export const jaTranslations = {
       deepenAiFailed: "深化分析に失敗しました",
       llmMissing: "モデルが未設定です — 先に「設定」で LLM を設定してください。AI 深化にはモデルが必要です。",
       groundedHint: "過去の会話 {n} 件を背景にしています",
-      savedHint: "この分析は「Ask」履歴に保存されました。いつでも見返せます。"
+      savedHint: "この分析は「Ask」履歴に保存されました。いつでも見返せます。",
+      synthesisRunning: "学習ルートの解説を生成しています… {done}/{total}",
+      synthesisRegenerate: "解説を再生成",
+      synthesisNextSteps: "おすすめの次のステップ"
     },
     roundtable: {
       title: "AI 円卓会議",

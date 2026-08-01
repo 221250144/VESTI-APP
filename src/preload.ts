@@ -54,6 +54,9 @@ const api: VestiDesktopApi = {
   createExtensionPairCode: () => ipcRenderer.invoke(IPC.extensionPairCodeCreate),
   openExtensionPairingWindow: () => ipcRenderer.invoke(IPC.extensionPairingWindowOpen),
   disconnectExtensionClient: clientId => ipcRenderer.invoke(IPC.extensionClientDisconnect, clientId),
+  getAgentMcpStatus: () => ipcRenderer.invoke(IPC.agentMcpStatus),
+  registerAgentMcp: id => ipcRenderer.invoke(IPC.agentMcpRegister, id),
+  unregisterAgentMcp: id => ipcRenderer.invoke(IPC.agentMcpUnregister, id),
   reportExtensionImportResult: (result: ExtensionImportResultPayload) =>
     ipcRenderer.invoke(IPC.extensionImportResult, result),
   onExtensionImportRequest: listener => {

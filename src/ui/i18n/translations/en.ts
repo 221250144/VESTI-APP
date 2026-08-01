@@ -1052,6 +1052,7 @@ export const enTranslations = {
       downloadMarkdown: "Download Markdown",
       exportMarkdown: "Export .md to folder…",
       exportedTo: "Exported to {path}",
+      vaultSynced: "Saved to vault: {path}",
       emptyTitle: "Pick a day or a weekly report",
       emptyHint: "Logs generate automatically every evening; use “Generate now” for today, or review the timeline on the left.",
     },
@@ -1639,6 +1640,9 @@ export const enTranslations = {
       roundtablePrompt: "On \"{topic}\": where is my understanding still weak, and what is worth investing in next?",
       moreDomains: "+ {n} more areas",
       uncategorizedIncluded: "· incl. assorted",
+      synthesisRunning: "Reading your learning routes… {done}/{total}",
+      synthesisRegenerate: "Regenerate readings",
+      synthesisNextSteps: "Suggested next steps",
     },
     roundtable: {
       title: "AI Roundtable",

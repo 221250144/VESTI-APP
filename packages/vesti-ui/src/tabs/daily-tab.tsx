@@ -482,6 +482,14 @@ export function DailyTab({ storage, labels, sendToLabels }: DailyTabProps) {
                       }`
                     : l("weeklySubtitle", "Aggregated from the last 7 days of daily logs.")}
                 </p>
+                {viewLog?.vaultPath ? (
+                  <p className="mt-1 text-vesti-sm font-sans text-text-tertiary">
+                    {l("vaultSynced", "Saved to vault: {path}").replace(
+                      "{path}",
+                      viewLog.vaultPath,
+                    )}
+                  </p>
+                ) : null}
               </div>
             </div>
 

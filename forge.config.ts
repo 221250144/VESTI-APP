@@ -9,7 +9,7 @@ const config: ForgeConfig = {
     asar: true,
     executableName: 'vesti',
     icon: 'assets/icon',
-    extraResource: ['assets/icon.png', 'assets/icon.ico'],
+    extraResource: ['assets/icon.png', 'assets/icon.ico', '.build-cache/mcp-stage/vesti-mcp'],
     electronZipDir: process.env.VESTI_ELECTRON_ZIP_DIR
       || (process.platform === 'win32' ? path.join(process.cwd(), '.build-cache', 'electron') : undefined),
     // The capture core is bundled by Vite; copy only SQLite's runtime tree.

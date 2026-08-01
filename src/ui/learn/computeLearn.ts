@@ -17,6 +17,12 @@
 // platform. The long tail merges into a single descriptive fallback route
 // whose share of all conversations is hard-capped — a structure-less "未分类"
 // blob is never produced, even with no LLM configured.
+//
+// V4 (2026-08): route-level LLM synthesis support. Each route now also
+// exposes its full member conversation id set (the synthesis cache
+// fingerprint input) plus the members' platform / project labels — the
+// grounding context the synthesis transcript is built from. Still 100%
+// local: the LLM pass itself lives in src/ui/learn/learnSynthesis.
 
 import type { Conversation, SummaryRecord, Topic } from "../db/types";
 import type {
@@ -31,6 +37,8 @@ const MAX_GLOSSARY = 24;
 const MAX_OPEN_LOOPS = 14;
 /** Representative conversations surfaced per route (evidence-chain jumps). */
 const MAX_DOMAIN_REPS = 3;
+/** V4: platform / project context labels kept per route (synthesis input). */
+const MAX_CONTEXT_LABELS = 3;
 /** V3: named learning routes converge to a representative handful; the long
  * tail beyond this cap merges into one descriptive fallback route. */
 const MAX_LEARN_ROUTES = 7;
@@ -239,6 +247,10 @@ interface LearnCluster {
   lastActiveAt: number;
   openQuestion: { text: string; conversationId: number; at: number } | null;
   reps: Array<{ id: number; title: string; rank: number; updatedAt: number }>;
+  /** V4: member platform / project tallies — the route synthesis's grounding
+   * context (emitted as the top-3 labels on LearnDomain). */
+  platforms: Map<string, number>;
+  projects: Map<string, number>;
 }
 
 function emptyCluster(kind: LearnCluster["kind"], topicId: number | null, name: string): LearnCluster {
@@ -255,6 +267,8 @@ function emptyCluster(kind: LearnCluster["kind"], topicId: number | null, name: 
     lastActiveAt: 0,
     openQuestion: null,
     reps: [],
+    platforms: new Map(),
+    projects: new Map(),
   };
 }
 
@@ -284,6 +298,18 @@ function addToCluster(
     rank: d ? DEPTH_RANK[d] : 0,
     updatedAt,
   });
+  // V4: tally the route's platform / project mix for the synthesis context.
+  entry.platforms.set(conv.platform, (entry.platforms.get(conv.platform) ?? 0) + 1);
+  const project = projectLabelOf(conv);
+  if (project) entry.projects.set(project, (entry.projects.get(project) ?? 0) + 1);
+}
+
+/** Top-N labels of a tally map, most frequent first (ties alphabetical). */
+function topTallyLabels(tally: Map<string, number>, max: number): string[] {
+  return Array.from(tally.entries())
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, max)
+    .map(([label]) => label);
 }
 
 /** Merge tail clusters into the single fallback route. */
@@ -301,6 +327,12 @@ function mergeClusters(clusters: LearnCluster[]): LearnCluster {
       merged.openQuestion = cluster.openQuestion;
     }
     merged.reps.push(...cluster.reps);
+    for (const [platform, n] of cluster.platforms) {
+      merged.platforms.set(platform, (merged.platforms.get(platform) ?? 0) + n);
+    }
+    for (const [project, n] of cluster.projects) {
+      merged.projects.set(project, (merged.projects.get(project) ?? 0) + n);
+    }
   }
   return merged;
 }
@@ -436,6 +468,11 @@ export function computeLearn(
         .sort((a, b) => b.rank - a.rank || b.updatedAt - a.updatedAt)
         .slice(0, MAX_DOMAIN_REPS)
         .map((r) => ({ conversationId: r.id, title: r.title })),
+      // V4: the full member id set (synthesis cache fingerprint) + the
+      // platform / project context the route synthesis is grounded on.
+      memberIds: e.reps.map((r) => r.id).sort((a, b) => a - b),
+      platforms: topTallyLabels(e.platforms, MAX_CONTEXT_LABELS),
+      projects: topTallyLabels(e.projects, MAX_CONTEXT_LABELS),
       importanceScore,
       compact: shouldCompact(e, importanceScore),
     };

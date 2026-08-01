@@ -38,17 +38,34 @@ describe('MCP handshake', () => {
     expect(client.getServerCapabilities()?.tools).toBeDefined();
   });
 
-  it('lists the three progressive-disclosure tools plus the project-brief tool', async () => {
+  it('advertises the session-start behavior contract in its instructions', () => {
+    const instructions = client.getInstructions();
+    expect(instructions).toBeDefined();
+    expect(instructions).toContain('vesti_get_project_context');
+    expect(instructions).toContain('vesti_get_handoff_context');
+    expect(instructions).toMatch(/vesti_search.*vesti_timeline.*vesti_get_turns/s);
+  });
+
+  it('lists the context tools plus the three progressive-disclosure layers', async () => {
     const { tools } = await client.listTools();
-    expect(tools.map(t => t.name)).toEqual(['vesti_search', 'vesti_timeline', 'vesti_get_turns', 'vesti_project_brief']);
-    for (const tool of tools.slice(0, 3)) {
+    expect(tools.map(t => t.name)).toEqual([
+      'vesti_get_project_context',
+      'vesti_search',
+      'vesti_timeline',
+      'vesti_get_turns',
+      'vesti_project_brief',
+      'vesti_get_handoff_context',
+    ]);
+    for (const tool of tools.slice(1, 4)) {
       expect(tool.description).toMatch(/Layer [123] of 3/);
       expect(tool.inputSchema.type).toBe('object');
     }
-    expect(tools[0].inputSchema.required).toContain('query');
-    expect(tools[1].inputSchema.required).toContain('session_id');
+    expect(tools[1].inputSchema.required).toContain('query');
     expect(tools[2].inputSchema.required).toContain('session_id');
-    expect(tools[3].inputSchema.required).toContain('project');
+    expect(tools[3].inputSchema.required).toContain('session_id');
+    expect(tools[4].inputSchema.required).toContain('project');
+    // The session-start tool takes optional paths (defaults to most recent).
+    expect(tools[0].inputSchema.required ?? []).not.toContain('paths');
   });
 
   it('serves vesti_search → vesti_timeline → vesti_get_turns end to end', async () => {

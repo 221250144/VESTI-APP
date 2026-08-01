@@ -50,6 +50,7 @@ export {
   LEARN_TOPIC_SUGGESTION_MAX,
   learnTopicSuggestions,
 } from "./lib/learnTopics";
+export { learnRouteFingerprint } from "./lib/learnSynthesis";
 export {
   SUMMARY_BATCH_LIMIT,
   advanceSummaryBatch,
@@ -117,6 +118,7 @@ export type {
   LearnOpenLoop,
   LearnDeepenAnalysis,
   LearnDeepenResult,
+  LearnRouteSynthesis,
   RelatedConversation,
   RoundtablePersonaId,
   RoundtablePersona,

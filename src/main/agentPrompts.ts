@@ -878,27 +878,42 @@ registerAgentKind('deposit-maintain', {
 });
 
 /**
- * Daily log (P4c): turn one local day's condensed activity context (CLI
- * session digests + browser conversation summaries) into a structured daily
- * report. The prompt is parameterized by template: 'daily' (default) writes
- * the day report, 'weekly' aggregates a week of daily logs into a weekly
- * report. The output is free-form Markdown, so parse() is lenient: any
- * non-empty body passes.
+ * Daily journal (P4c quality upgrade): two prompt variants behind the 'daily'
+ * kind. 'daily-cluster' (pass 1) extracts one project's/session-cluster's
+ * condensed context into a strict-JSON work brief; 'daily' (pass 2, default)
+ * synthesizes the day report from the per-cluster briefs plus deterministic
+ * data; 'weekly' aggregates a week of daily logs into a weekly report. Both
+ * Markdown variants parse leniently (any non-empty body passes) — the cluster
+ * JSON is validated renderer-side (dailyPipeline.parseDailyClusterPayload).
  */
-export const DAILY_TEMPLATES = ['daily', 'weekly'] as const;
+export const DAILY_TEMPLATES = ['daily', 'weekly', 'daily-cluster'] as const;
 export type DailyTemplate = (typeof DAILY_TEMPLATES)[number];
 
 const DAILY_DIRECTIVES: Record<DailyTemplate, string> = {
+  'daily-cluster': [
+    '下面是某一天中一个项目/会话簇的浓缩上下文（fork/续写已合并为工作项，含会话索引摘要、子代理摘要、程序提取的文件锚点、网页摘要）。请把它提取成结构化工作要点，输出严格 JSON（不要 Markdown 代码围栏、不要任何额外文字），字段如下：',
+    '{"theme": "一句话工作主题（20 字以内）", "goal": "这项工作要达成的目标（一两句，可检验）", "completed": ["今天实际完成的具体事项，每条带可验证的结果，至多 6 条"], "in_progress": ["进行中事项及停在哪一步，至多 4 条"], "decisions": ["今天做出的决策或排查出的结论，至多 4 条"], "open_questions": ["仍未解决的问题，至多 4 条"]}',
+    '硬性规则：',
+    '- completed 必须成就导向：写清"完成了什么、结果如何"（如「修复了 X 的 Y 问题」「实现并验证了 Z」），禁止"进行了讨论""展开调研"式空话。',
+    '- 涉及具体数值（版本号、配置值、端口号、日期、数量、时长、阈值）时原样保留数值与单位，不得概括化。',
+    '- 文件路径以程序提取的锚点清单为准，不得虚构清单之外的路径。',
+    '- 多个 fork/续写会话是同一项工作，合并叙述，不要按会话逐条罗列。',
+    '没有内容的字段输出空数组。只输出 JSON 本身。',
+  ].join('\n'),
   daily: [
-    '请把下面这一天（本地时区）的 AI 使用活动写成一份日报，Markdown 格式，严格使用以下小节结构：',
-    '## 今日概览（基于哪些 agent / 平台完成了什么，3-6 句）',
-    '## 关键文件与状态（列出涉及的代码文件及进度状态；没有则写“无”）',
-    '## 网页端 AI 对话摘要（各网页会话的要点；没有则写“无”）',
-    '## 明日待办线索（从今天的未决问题与收尾状态推断，至多 5 条）',
-    '只依据提供的活动记录，不补造事实；不要输出小节之外的标题。',
+    '请把下面这一天（本地时区）的开发工作综合成一份高质量的个人开发工作记录（日报）。读者是未来的作者本人：读完要能准确回答"那天完成了什么、核心工作有哪些、和哪些文件相关"。',
+    '输入材料：按项目/会话簇预提取的结构化要点（主题/目标/已完成/进行中/决策/未决）、程序提取的关键文件锚点（确定性数据）、网页端对话清单、项目记忆（跨会话状态）、昨日日报摘录（连续性上下文）。',
+    'Markdown 输出，严格使用以下小节结构（标题原样使用、顺序不变；不要输出一级标题，不要新增其他小节）：',
+    '## 今日完成（成就导向清单：每条具体、可验证，写清完成了什么、结果如何；涉及数值/版本/路径时原样保留；忌"进行了讨论"式空话）',
+    '## 项目工作流分解（每个项目一个 ### 子节：目标 / 今日进展 / 当前状态；与项目记忆冲突时以项目记忆为准）',
+    '{{KEY_FILES}}',
+    '## 决策与发现（今天定下的技术决策、方案取舍、排查出的结论；没有则写"无"）',
+    '## 网页端对话摘要（输入中网页端对话的要点归纳，按主题合并；输入没有网页端对话时写"无"）',
+    '## 明日线索（基于未决问题与最近上下文推断的优先事项，至多 5 条；没有则写"无"）',
+    '规则：只依据提供的材料，不补造事实；关键文件小节由程序渲染——{{KEY_FILES}} 标记行必须原样保留在该位置，你不要自行罗列文件路径。',
   ].join('\n'),
   weekly: [
-    '请把下面最近 7 天的日报与活动统计汇总成一份周报，Markdown 格式，严格使用以下小节结构：',
+    '请把下面最近 7 天的日报条目汇总成一份周报。输入是各天日报的「今日完成」等小节摘录与统计——以日报内容为准归纳，不要从原始会话重新推导。Markdown 格式，严格使用以下小节结构：',
     '## 本周完成（跨天归纳实际完成的工作，按主题组织）',
     '## 关键进展（里程碑式的决定、突破或交付，至多 6 条）',
     '## 模式观察（工作习惯、平台/项目分布、反复出现的问题，3-5 条）',
@@ -918,14 +933,17 @@ registerAgentKind('daily', {
   buildPrompt({ transcript, template, preferences }) {
     const { language } = promptAffixes(preferences);
     const directive = buildDailyDirective(template);
+    const isCluster = template === 'daily-cluster';
     return [
       {
         role: 'system',
-        content: `你是 Vesti 的工作日志助手。只依据提供的活动记录做归纳，不补造事实；直接输出 Markdown 正文（不要 JSON、不要用代码围栏包裹全文）。${language}`,
+        content: isCluster
+          ? `你是 Vesti 的工作记录提取助手。只依据提供的簇上下文做提取，不补造事实；输出严格 JSON（不要 Markdown 代码围栏、不要任何额外文字）。${language}`
+          : `你是 Vesti 的工作日志助手。只依据提供的活动记录做归纳，不补造事实；直接输出 Markdown 正文（不要 JSON、不要用代码围栏包裹全文）。${language}`,
       },
       {
         role: 'user',
-        content: [directive, '', '活动记录：', transcript].join('\n'),
+        content: [directive, '', isCluster ? '簇上下文：' : '活动记录：', transcript].join('\n'),
       },
     ];
   },
@@ -1060,6 +1078,38 @@ registerAgentKind('learn-deepen', {
       .trim();
     if (!cleaned) throw new Error('learn-deepen 输出为空');
     return cleaned.slice(0, 4000);
+  },
+});
+
+/** 路线级 LLM 合成 (Learn V4 route synthesis): one pass per learning route —
+ * full-sentence title + interpretation + next steps. Same wiring as
+ * 'learn-deepen': the transcriptOverride (assembled in
+ * src/ui/learn/learnSynthesis) already carries the route stats, the digest
+ * grounding and the strict-JSON contract; this registration only wraps it
+ * with the assistant preamble + a lenient parse. The renderer applies the
+ * title quality bar and falls back to the deterministic route label. */
+registerAgentKind('learn-synthesis', {
+  buildPrompt({ transcript, preferences }) {
+    const { language, custom } = promptAffixes(preferences);
+    return [
+      {
+        role: 'system',
+        content: `你是 Vesti 的学习路线解读助手。只依据给出的路线统计与会话摘要做概括，不编造资料中没有的具体事实；标题必须是概括成果的完整句子，不要关键词堆砌；输出严格 JSON（不要 Markdown 代码围栏、不要任何额外文字）。${language}${custom}`,
+      },
+      {
+        role: 'user',
+        content: transcript,
+      },
+    ];
+  },
+  parse(raw) {
+    const cleaned = raw
+      .trim()
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/, '')
+      .trim();
+    if (!cleaned) throw new Error('learn-synthesis 输出为空');
+    return cleaned.slice(0, 2000);
   },
 });
 

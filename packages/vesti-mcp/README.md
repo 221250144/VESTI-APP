@@ -2,14 +2,18 @@
 
 Read-only MCP server that lets AI coding agents (kimi-code, Claude Code, codex, …) search the conversation memory that VESTI has captured locally (`~/.vesti/db/vesti.db`).
 
-The agent registers this package as a local stdio MCP server, then recalls past sessions through **three progressive-disclosure layers** — cheap index first, full content only at the end — plus a **project-level memory** tool:
+The agent registers this package as a local stdio MCP server. On session start it can pull a project's **automatic context pack** in one call; deeper history goes through **three progressive-disclosure layers** — cheap index first, full content only at the end:
 
 | Layer | Tool | Cost | What it returns |
 | --- | --- | --- | --- |
+| 0 | `vesti_get_project_context(paths?, session_limit?, brief_chars?)` | one pack per project | **Session-start context**: L0 state card + L2 brief + recent sessions (title/time/one-liner) + merged open questions + deterministic active-file timeline, per project path. Multiple paths = merge mode: a `cross_project` section adds shared files, shared topics and overlapping work windows. No paths = most recently active project. |
 | 1 | `vesti_search(query, topK=8)` | ~100 tokens/entry | Session index entries: `session_id`, title, platform, project path, time, digest `one_liner`, `key_topics`, hit snippet |
 | 2 | `vesti_timeline(session_id, around_turn?)` | ~30 tokens/turn | Turn outline of one session: seq, time, one-line user intent, tool-call count, tokens |
 | 3 | `vesti_get_turns(session_id, turn_ids \| range, max_chars=8000)` | bounded by `max_chars` | Full user/assistant message text + tool-call summaries for the selected turns; sets `truncated: true` when the budget cuts output |
-| — | `vesti_project_brief(project)` | one card + one doc | Project memory: L0 deterministic "current state card" (one-liner, most-active files, open questions) + L2 LLM-maintained project brief (state / architecture / decision log / open questions). Project name is fuzzy-matched. |
+| — | `vesti_project_brief(project)` | one card + one doc | Project memory by fuzzy name: L0 "current state card" + L2 LLM-maintained brief. Prefer `vesti_get_project_context` when you know the path. |
+| — | `vesti_get_handoff_context(path \| session_id, user_messages=8)` | one pack | Light handoff material aligned with the app's relay v2 schema: the project block + newest user messages + file anchors + `verify_first` seeds (open questions to re-confirm, last failing steps to re-run). All machine-extracted; heavy transcript compression stays in the desktop app. |
+
+The server's MCP `instructions` tell the connecting agent the behavior contract directly: call `vesti_get_project_context` with its cwd at session start, use multi-path mode for merges, `vesti_get_handoff_context` before handing off, and never call `vesti_get_turns` without narrowing through search + timeline first.
 
 Recall is FTS5-based (over `messages_fts` + `sessions_fts`, RRF-fused — the same ranking as capture-core's `SessionRecall`). Digest embeddings are only fused when an embedding service supplies a query vector; the MCP server has none, so it degrades to pure FTS exactly as `SessionRecall` does without a vector.
 
@@ -30,7 +34,7 @@ corepack pnpm --filter @vesti/vesti-mcp test
 
 ## Register in your agent
 
-Replace `<PKG>` with the absolute path to this package, e.g. `C:/Users/you/项目开发/VESTI-APP/packages/vesti-mcp`.
+The fastest route is the VESTI desktop app: **Settings → Connect to agents** detects installed agents and writes/removes the registration in one click (merge-only, backs up the original config first). Manual registration works too — replace `<PKG>` with the absolute path to this package, e.g. `C:/Users/you/项目开发/VESTI-APP/packages/vesti-mcp`.
 
 ### kimi-code
 
@@ -83,17 +87,20 @@ args = ["<PKG>/dist/cli.js"]
 ```text
 ## VESTI memory recall
 
-A `vesti` MCP server exposes my past AI-coding sessions. Use it when past
-context may help (previous decisions, "how did we solve X", older errors):
+A `vesti` MCP server exposes my past AI-coding sessions. At session start in
+a tracked project, call `vesti_get_project_context` with your cwd first —
+it returns the project's state card, brief, recent sessions, open questions
+and active-file timeline in one call (pass several project paths for merge
+work; it also reports cross-project links). Only then fill the gaps:
 
 1. `vesti_search` with a few keywords → session candidates (~100 tokens each).
 2. `vesti_timeline` on the best session_id → turn outline; locate the passage.
 3. `vesti_get_turns` with only the turn seq numbers you need → full content.
 
-When starting work in a project, `vesti_project_brief` gives its current
-state card and maintained brief in one call. Never call vesti_get_turns
-without narrowing via search + timeline first; it is the expensive layer and
-truncates at max_chars anyway. All data is local.
+Before handing work to another agent/session, `vesti_get_handoff_context`
+ships file anchors, recent user messages and verify-first seeds. Never call
+vesti_get_turns without narrowing via search + timeline first; it is the
+expensive layer and truncates at max_chars anyway. All data is local.
 ```
 
 ## Output contract (examples)
@@ -167,12 +174,73 @@ instead of quoting its snippet. Scores are RRF-fused and recency-decayed
 }
 ```
 
+`vesti_get_project_context({ paths: ["C:/work/vesti", "C:/work/blog"] })` →
+
+```json
+{
+  "generated_at": "2026-02-01T08:00:00.000Z",
+  "projects": [
+    {
+      "path": "c:/work/vesti",
+      "label": "vesti",
+      "project_keys": ["cli_0123abcd…"],
+      "platforms": ["claude-code", "kimi-code"],
+      "session_count": 12,
+      "last_active": "2026-01-31T15:04:00.000Z",
+      "state": {
+        "one_liner": "Made the sqlite migration runner transactional",
+        "active_files": [{ "path": "src/storage/migrations.ts", "touches": 7, "last_touched": "2026-01-30T…" }],
+        "open_questions": ["是否切换到 WAL2？"],
+        "updated_at": "2026-01-31T…"
+      },
+      "brief": { "content_markdown": "# vesti 项目简报…", "version": 5, "updated_at": "2026-01-31T…", "truncated": false },
+      "recent_sessions": [
+        { "session_id": "ws-aaa-001", "title": "Refactoring the sqlite storage layer", "platform": "claude-code", "host": "native", "started_at": "2026-01-10T12:00:00.000Z", "one_liner": "Made the sqlite migration runner transactional", "key_topics": ["sqlite"] }
+      ],
+      "open_questions": ["是否切换到 WAL2？"],
+      "active_files": [{ "path": "src/storage/migrations.ts", "touches": 7, "last_touched": "2026-01-30T…" }]
+    }
+  ],
+  "unmatched_paths": [],
+  "cross_project": {
+    "shared_files": [{ "file": "storage/migrations.ts", "projects": ["blog", "vesti"] }],
+    "shared_topics": [{ "topic": "sqlite", "projects": ["blog", "vesti"] }],
+    "time_overlaps": [{ "projects": ["vesti", "blog"], "overlapping_session_pairs": 3, "latest_overlap": { "start": "2026-01-10T12:30:00.000Z", "end": "2026-01-10T13:00:00.000Z" } }]
+  },
+  "hints": []
+}
+```
+
+One physical directory worked on by several agents yields several derived
+project keys (the key hashes `platform|host|path`); the tool merges those
+per-key memory layers into one project view. On pre-memory-v2 databases the
+state card degrades to a digest-based fallback, and a path with no captured
+sessions comes back in `unmatched_paths` with the known projects in `hints`.
+
+`vesti_get_handoff_context({ path: "C:/work/vesti" })` →
+
+```json
+{
+  "project": { "…": "same block as vesti_get_project_context" },
+  "recent_user_messages": [
+    { "session_id": "ws-aaa-001", "session_title": "Refactoring the sqlite storage layer", "timestamp": "2026-01-10T12:03:00.000Z", "text": "follow-up question 3" }
+  ],
+  "file_anchors": [{ "path": "src/storage/migrations.ts", "touches": 7, "last_touched": "2026-01-30T…" }],
+  "verify_first": [
+    { "check": "Confirm whether this is still unresolved: \"是否切换到 WAL2？\"", "source": "project open questions" },
+    { "check": "Re-check the last failing step: Bash — npm run deploy", "source": "Deploying a static site (2026-01-11)" }
+  ],
+  "hints": ["Assemble the actual handoff with the relay v2 schema …"]
+}
+```
+
 ## Layout
 
 - `src/db.ts` — db path resolution (`VESTI_DB_PATH` → `~/.vesti/db/vesti.db`) and database open (write policy: only digest access-count bumps)
 - `src/recall.ts` — FTS5 + RRF recall (port of capture-core `SessionRecall`, pure-FTS path)
 - `src/tools.ts` — the three layer implementations + `vesti_project_brief`
-- `src/server.ts` — MCP wiring on the official `@modelcontextprotocol/sdk` (low-level `Server`, hand-written JSON Schemas, no zod)
+- `src/projectContext.ts` — `vesti_get_project_context` / `vesti_get_handoff_context`: project key derivation (port of capture-core `projectRegistry`), per-key memory-layer merge, cross-project links
+- `src/server.ts` — MCP wiring on the official `@modelcontextprotocol/sdk` (low-level `Server`, hand-written JSON Schemas, no zod), including the session-start behavior contract in `instructions`
 - `src/cli.ts` — stdio entry (`bin: vesti-mcp`)
 - `tests/` — vitest: tool contracts against a temp fixture db + protocol handshake over in-memory transports
 

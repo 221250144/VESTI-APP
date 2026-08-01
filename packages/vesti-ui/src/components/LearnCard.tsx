@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
-import { BookOpen, ChevronDown, ChevronRight, Compass, Loader2, MessagesSquare, Sparkles } from "lucide-react";
-import type { DashboardLabels, LearnDeepenResult, LearnDomain, LearnProfile, StorageApi } from "../types";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { BookOpen, ChevronDown, ChevronRight, Compass, Loader2, MessagesSquare, RefreshCw, Sparkles } from "lucide-react";
+import type { DashboardLabels, LearnDeepenResult, LearnDomain, LearnProfile, LearnRouteSynthesis, StorageApi } from "../types";
+import { learnRouteFingerprint } from "../lib/learnSynthesis";
 import { SendToMenu } from "./SendToMenu";
 import { buildLearnMarkdown } from "../lib/exploreMarkdown";
 import {
@@ -25,6 +26,15 @@ import {
 // patterns. Without a configured LLM the gate note explains instead of
 // offering a dead button. The uncategorized bucket gets no AI 深化 — a
 // "uncategorized" recall query would ground on nothing meaningful.
+//
+// 路线级 LLM 合成 (V4): when the host implements storage.runLearnSynthesis
+// and an LLM is configured, each route gets one synthesized reading — a
+// full-sentence title + interpretation + next steps, fingerprint-cached by
+// the host. Synthesized routes render the LLM title with the deterministic
+// label as caption, plus the summary and next-step bullets; anything missing
+// (no LLM / run failed / unusable output) falls back to the deterministic
+// display with zero regression. A "重新生成" control clears the cache and
+// re-runs every route.
 
 /** Below this many analyzed summaries the map is technically available but
  * thin — say so and point at generating more (same guidance as AITI). */
@@ -83,6 +93,12 @@ export function LearnCard({
   const [llmConfigured, setLlmConfigured] = useState<boolean | undefined>(undefined);
   const [deepenByDomain, setDeepenByDomain] = useState<Record<string, DeepenState>>({});
   const [showCompactDomains, setShowCompactDomains] = useState(false);
+  // V4 route synthesis: fingerprint → reading. Routes without an entry keep
+  // the deterministic display; progress is null while idle.
+  const [synthesisByRoute, setSynthesisByRoute] = useState<Record<string, LearnRouteSynthesis>>({});
+  const [synthesisProgress, setSynthesisProgress] = useState<{ done: number; total: number } | null>(null);
+  const synthesisInFlightRef = useRef(false);
+  const synthesisRunKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -104,6 +120,51 @@ export function LearnCard({
   }, [storage]);
 
   const deepenSupported = Boolean(storage?.runLearnDeepen);
+  const synthesisSupported = Boolean(storage?.runLearnSynthesis);
+
+  // V4: run the route synthesis (sequential + fingerprint-cached host-side).
+  // The run key freezes the (lang, fingerprint set) pair a run covered, so
+  // profile recomputes that change nothing don't re-run; `force` bypasses it.
+  const runSynthesis = useCallback(
+    async (domains: LearnDomain[], force: boolean) => {
+      if (!storage?.runLearnSynthesis || synthesisInFlightRef.current) return;
+      synthesisInFlightRef.current = true;
+      synthesisRunKeyRef.current = `${lang}:${domains.map((d) => learnRouteFingerprint(d)).join("|")}`;
+      setSynthesisProgress({ done: 0, total: domains.length });
+      try {
+        const map = await storage.runLearnSynthesis(domains, {
+          lang,
+          force,
+          onProgress: (done, total) => setSynthesisProgress({ done, total }),
+        });
+        setSynthesisByRoute(map);
+      } catch {
+        // Silent fallback: the cards keep their deterministic labels.
+      } finally {
+        synthesisInFlightRef.current = false;
+        setSynthesisProgress(null);
+      }
+    },
+    [storage, lang],
+  );
+
+  // Auto-synthesize once the LLM probe cleared; cache hits make repeat runs
+  // cheap — only routes whose membership changed actually call the LLM.
+  useEffect(() => {
+    if (!profile?.available || llmConfigured !== true || !synthesisSupported) return;
+    const domains = profile.domains;
+    if (domains.length === 0) return;
+    const runKey = `${lang}:${domains.map((d) => learnRouteFingerprint(d)).join("|")}`;
+    if (synthesisRunKeyRef.current === runKey || synthesisInFlightRef.current) return;
+    void runSynthesis(domains, false);
+  }, [profile, llmConfigured, synthesisSupported, lang, runSynthesis]);
+
+  // "重新生成": clear-match re-run of every route (the host force flag
+  // ignores cached entries for this language).
+  const regenerateSynthesis = () => {
+    if (!profile?.available || synthesisProgress) return;
+    void runSynthesis(profile.domains, true);
+  };
 
   const runDeepen = async (key: string, domain: LearnDomain) => {
     if (!storage?.runLearnDeepen || deepenByDomain[key]?.status === "running") return;
@@ -189,7 +250,30 @@ export function LearnCard({
           const compactDomains = profile.domains.filter((d) => d.compact);
           return (
           <div className="mt-5">
-            <div className="mb-2 text-[12px] font-medium text-text-secondary">{labels.domainsTitle}</div>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="text-[12px] font-medium text-text-secondary">{labels.domainsTitle}</div>
+              {/* V4 synthesis controls: progressive status while running,
+               * otherwise the 重新生成 entry. Gated on LLM + host support. */}
+              {synthesisSupported && llmConfigured === true ? (
+                synthesisProgress ? (
+                  <span className="inline-flex items-center gap-1.5 text-[11px] text-text-tertiary">
+                    <Loader2 className="h-3 w-3 animate-spin" strokeWidth={1.75} />
+                    {labels.synthesisRunning
+                      .replace("{done}", String(synthesisProgress.done))
+                      .replace("{total}", String(synthesisProgress.total))}
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={regenerateSynthesis}
+                    className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-text-tertiary transition-colors hover:bg-bg-tertiary hover:text-accent-primary"
+                  >
+                    <RefreshCw className="h-3 w-3" strokeWidth={1.75} />
+                    {labels.synthesisRegenerate}
+                  </button>
+                )
+              ) : null}
+            </div>
             {/* Expanded (key) domains */}
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               {expandedDomains.map((d) => {
@@ -201,6 +285,10 @@ export function LearnCard({
                 // topicId null — the name disambiguates their keys.
                 const domainKey = d.topicId !== null ? String(d.topicId) : `synthetic:${d.name}`;
                 const deepenState = deepenByDomain[domainKey];
+                // V4: the synthesized reading for this route, if any — its
+                // full-sentence title leads, the deterministic label stays as
+                // a caption; absent → the deterministic display as before.
+                const synthesis = synthesisByRoute[learnRouteFingerprint(d)];
                 // The uncategorized bucket gets no AI 深化 (see header note).
                 const showDeepenAi =
                   deepenSupported && llmConfigured !== false && d.topicId !== null;
@@ -210,19 +298,34 @@ export function LearnCard({
                     className="rounded-xl border border-border-subtle bg-bg-surface-card p-3"
                   >
                     <div className="flex items-baseline justify-between gap-2">
-                      <span className="truncate text-[13px] font-medium text-text-primary">
-                        {domainName}
+                      <span
+                        className="truncate text-[13px] font-medium text-text-primary"
+                        title={synthesis ? synthesis.title : undefined}
+                      >
+                        {synthesis?.title ?? domainName}
                       </span>
                       <span className="shrink-0 text-[11px] text-text-tertiary">
                         {labels.domainConversations.replace("{n}", String(d.count))}
                       </span>
                     </div>
+                    {synthesis ? (
+                      <div className="mt-0.5 truncate text-[11px] text-text-tertiary">
+                        {domainName}
+                      </div>
+                    ) : null}
                     {d.deep + d.moderate + d.superficial > 0 && (
                       <div className="mt-2 flex h-1.5 overflow-hidden rounded-full bg-bg-tertiary">
                         <div className="bg-accent-primary" style={{ width: `${deepPct}%` }} />
                         <div className="bg-accent-primary/50" style={{ width: `${modPct}%` }} />
                       </div>
                     )}
+
+                    {/* V4 synthesis: the route interpretation paragraph. */}
+                    {synthesis ? (
+                      <p className="mt-2 text-[12px] leading-relaxed text-text-secondary">
+                        {synthesis.summary}
+                      </p>
+                    ) : null}
 
                     {/* Representative conversations: evidence-chain jumps into
                      * the conversations this domain is built from. */}
@@ -244,6 +347,14 @@ export function LearnCard({
                           ))}
                         </div>
                       </div>
+                    ) : null}
+
+                    {/* V4 synthesis: concrete next steps for this route. */}
+                    {synthesis && synthesis.nextSteps.length > 0 ? (
+                      <ExploreBulletSection
+                        title={labels.synthesisNextSteps}
+                        items={synthesis.nextSteps}
+                      />
                     ) : null}
 
                     <div className="mt-2.5 flex flex-wrap items-center gap-2">

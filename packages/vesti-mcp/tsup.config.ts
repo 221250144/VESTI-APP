@@ -6,7 +6,9 @@ export default defineConfig({
   dts: true,
   sourcemap: true,
   clean: true,
-  external: ['@modelcontextprotocol/sdk'],
+  // The MCP SDK is bundled so the packaged desktop app can ship dist/
+  // standalone (extraResource) without a node_modules tree alongside it.
+  noExternal: ['@modelcontextprotocol/sdk'],
   target: 'node22',
   banner: { js: '#!/usr/bin/env node' },
 });

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import type {
+  AgentMcpTargetId,
+  AgentMcpTargetStatus,
   AppSettingsUpdate,
   AppSettingsView,
   AgentOutputLanguage,
@@ -252,6 +254,18 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     saving: "保存中…",
     saved: "设置已保存。",
     savedRestart: "设置已保存。数据目录将在重启后切换。",
+    mcpTitle: "连接到 Agent",
+    mcpDesc: "把 Vesti 记忆服务（vesti-mcp）一键写入本机各 Agent 的 MCP 配置。注册后,Agent 在项目里开新会话时可自动拉取该项目的状态卡、简报与最近会话,无需重复交代背景。写入前备份原配置,不影响已有的其他 MCP server。",
+    mcpDetected: "已检测到",
+    mcpNotDetected: "未检测到",
+    mcpRegistered: "已注册",
+    mcpOutdated: "配置过旧,点注册更新",
+    mcpRegister: "一键注册",
+    mcpRemove: "移除",
+    mcpWorking: "写入中…",
+    mcpServerMissing: "未找到 vesti-mcp 构建产物,请先在仓库根目录运行 pnpm mcp:build。",
+    mcpBackupAt: "原配置已备份:",
+    mcpFailed: "写入失败:",
   },
   en: {
     loading: "Loading settings…",
@@ -432,6 +446,18 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     saving: "Saving…",
     saved: "Settings saved.",
     savedRestart: "Settings saved. The data directory changes after a restart.",
+    mcpTitle: "Connect to agents",
+    mcpDesc: "Write the Vesti memory server (vesti-mcp) into each installed agent's MCP config in one click. Once registered, an agent starting a new session in a project automatically pulls that project's state card, brief and recent sessions — no need to repeat the background. The original config is backed up before writing; other MCP servers stay untouched.",
+    mcpDetected: "Detected",
+    mcpNotDetected: "Not detected",
+    mcpRegistered: "Registered",
+    mcpOutdated: "Outdated — register to update",
+    mcpRegister: "Register",
+    mcpRemove: "Remove",
+    mcpWorking: "Writing…",
+    mcpServerMissing: "vesti-mcp build output not found — run pnpm mcp:build at the repo root first.",
+    mcpBackupAt: "Original config backed up:",
+    mcpFailed: "Write failed:",
   },
   ja: {
     loading: "設定を読み込み中…",
@@ -594,6 +620,18 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     saving: "保存中…",
     saved: "設定を保存しました。",
     savedRestart: "設定を保存しました。データ保存先は再起動後に切り替わります。",
+    mcpTitle: "エージェントに接続",
+    mcpDesc: "Vesti の記憶サーバー（vesti-mcp）を各エージェントの MCP 設定にワンクリックで書き込みます。登録後、エージェントはプロジェクトで新しいセッションを始めるときに状態カード・ブリーフ・最近のセッションを自動で取得でき、背景を説明し直す必要がありません。書き込み前に元の設定をバックアップし、既存の他の MCP サーバーには触れません。",
+    mcpDetected: "検出済み",
+    mcpNotDetected: "未検出",
+    mcpRegistered: "登録済み",
+    mcpOutdated: "設定が古い — 登録で更新",
+    mcpRegister: "ワンクリック登録",
+    mcpRemove: "削除",
+    mcpWorking: "書き込み中…",
+    mcpServerMissing: "vesti-mcp のビルド成果物が見つかりません。リポジトリのルートで pnpm mcp:build を先に実行してください。",
+    mcpBackupAt: "元の設定をバックアップ:",
+    mcpFailed: "書き込みに失敗:",
   },
   ko: {
     loading: "설정을 불러오는 중…",
@@ -756,6 +794,18 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     saving: "저장 중…",
     saved: "설정을 저장했습니다.",
     savedRestart: "설정을 저장했습니다. 데이터 폴더는 다시 시작한 뒤 변경됩니다.",
+    mcpTitle: "에이전트에 연결",
+    mcpDesc: "Vesti 메모리 서버(vesti-mcp)를 설치된 각 에이전트의 MCP 설정에 원클릭으로 등록합니다. 등록 후 에이전트가 프로젝트에서 새 세션을 시작할 때 해당 프로젝트의 상태 카드, 브리프, 최근 세션을 자동으로 가져오므로 배경을 다시 설명할 필요가 없습니다. 쓰기 전에 원본 설정을 백업하며 기존 다른 MCP 서버는 그대로 둡니다.",
+    mcpDetected: "감지됨",
+    mcpNotDetected: "감지되지 않음",
+    mcpRegistered: "등록됨",
+    mcpOutdated: "구성이 오래됨 — 등록으로 업데이트",
+    mcpRegister: "원클릭 등록",
+    mcpRemove: "제거",
+    mcpWorking: "쓰는 중…",
+    mcpServerMissing: "vesti-mcp 빌드 산출물을 찾을 수 없습니다. 저장소 루트에서 pnpm mcp:build를 먼저 실행하세요.",
+    mcpBackupAt: "원본 설정 백업:",
+    mcpFailed: "쓰기 실패:",
   },
 };
 
@@ -934,6 +984,31 @@ export function SettingsPage({
   const [upstreamStats, setUpstreamStats] = useState<UpstreamExportStats | null>(null);
   const [upstreamBusy, setUpstreamBusy] = useState<string | null>(null);
   const [upstreamNote, setUpstreamNote] = useState("");
+  // Agent MCP registration (connect vesti-mcp to installed agents).
+  const [mcpTargets, setMcpTargets] = useState<AgentMcpTargetStatus[] | null>(null);
+  const [mcpBusy, setMcpBusy] = useState<AgentMcpTargetId | null>(null);
+  const [mcpNote, setMcpNote] = useState("");
+
+  const loadMcpTargets = useCallback(async () => {
+    setMcpTargets(await window.vesti.getAgentMcpStatus().catch(() => null));
+  }, []);
+
+  async function toggleMcpRegistration(target: AgentMcpTargetStatus) {
+    setMcpBusy(target.id);
+    setMcpNote("");
+    try {
+      const result = target.registered
+        ? await window.vesti.unregisterAgentMcp(target.id)
+        : await window.vesti.registerAgentMcp(target.id);
+      if (!result.ok) setMcpNote(result.error ?? "unknown error");
+      else if (result.backupPath) setMcpNote(`${copy.mcpBackupAt} ${result.backupPath}`);
+    } catch (error) {
+      setMcpNote(errorMessage(error));
+    } finally {
+      setMcpBusy(null);
+      void loadMcpTargets();
+    }
+  }
 
   const load = useCallback(async () => {
     const [settingsValue, overviewValue, wslValue, bridgeValue, upstreamStatsValue] = await Promise.all([
@@ -953,6 +1028,7 @@ export function SettingsPage({
 
   useEffect(() => {
     void load();
+    void loadMcpTargets();
     const unsubscribeCapture = window.vesti.onCaptureChanged(() => void load());
     const unsubscribeBridge = window.vesti.onExtensionBridgeChanged(() => {
       void window.vesti.getExtensionBridgeStatus().then(setBridge);
@@ -961,7 +1037,7 @@ export function SettingsPage({
       unsubscribeCapture();
       unsubscribeBridge();
     };
-  }, [load]);
+  }, [load, loadMcpTargets]);
 
   // 1s ticker for the pair-code and pairing-window countdowns.
   const pairingWindowOpen = Boolean(
@@ -1493,6 +1569,65 @@ export function SettingsPage({
               </div>
             )}
           </div>
+        </Card>
+
+        <Card eyebrow="CONNECT" title={copy.mcpTitle} description={copy.mcpDesc}>
+          {mcpTargets && !mcpTargets.some((target) => target.serverAvailable) ? (
+            <p className="mb-4 text-[12px] font-sans text-danger">{copy.mcpServerMissing}</p>
+          ) : null}
+          <div className="flex flex-col gap-2">
+            {(mcpTargets ?? []).map((target) => {
+              const disabled = !target.serverAvailable || mcpBusy !== null;
+              return (
+                <div
+                  key={target.id}
+                  className="flex items-center gap-3 rounded-xl border border-border-subtle bg-bg-primary px-4 py-3"
+                >
+                  <span
+                    className={`inline-block h-2 w-2 shrink-0 rounded-full ${
+                      target.registered && target.upToDate
+                        ? "bg-success"
+                        : target.detected
+                          ? "bg-warning"
+                          : "bg-bg-tertiary"
+                    }`}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-baseline gap-2 text-[13px] font-sans font-medium text-text-primary">
+                      {target.label}
+                      <span className="text-[11px] font-normal text-text-tertiary">
+                        {target.registered
+                          ? target.upToDate
+                            ? copy.mcpRegistered
+                            : copy.mcpOutdated
+                          : target.detected
+                            ? copy.mcpDetected
+                            : copy.mcpNotDetected}
+                      </span>
+                    </div>
+                    <div className="truncate text-[11px] font-sans text-text-tertiary">
+                      {target.error ?? target.configPath}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className={target.registered ? buttonSecondary : buttonPrimary}
+                    disabled={disabled || (!target.detected && !target.registered)}
+                    onClick={() => void toggleMcpRegistration(target)}
+                  >
+                    {mcpBusy === target.id
+                      ? copy.mcpWorking
+                      : target.registered
+                        ? copy.mcpRemove
+                        : copy.mcpRegister}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+          {mcpNote ? (
+            <p className="mt-3 break-all text-[12px] font-sans text-text-secondary">{mcpNote}</p>
+          ) : null}
         </Card>
 
         <Card eyebrow="DATA & PRIVACY" title={copy.dataTitle} description={copy.dataDesc}>

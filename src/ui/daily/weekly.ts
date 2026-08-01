@@ -82,15 +82,60 @@ export function excerptDailyLog(markdown: string, maxChars: number): string {
   const lines = markdown
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("#") && !line.startsWith(">"));
+    .filter(
+      (line) =>
+        line &&
+        line !== "---" &&
+        !line.startsWith("#") &&
+        !line.startsWith(">") &&
+        !/^(uuid|date|month|source):/.test(line)
+    );
   return truncateText(lines.join(" "), maxChars);
+}
+
+/** Heading prefixes of the daily journal's "completed" section (both
+ * locales); the weekly report summarizes exactly this section per day. */
+const COMPLETED_SECTION_PREFIXES = ["## 今日完成", "## Completed today"];
+
+/**
+ * Pull one ## section's body out of a daily log (heading matched by prefix,
+ * body runs until the next heading). Returns null when the section is absent
+ * or empty — callers fall back to the whole-log excerpt.
+ */
+export function extractDailyLogSection(
+  markdown: string,
+  headingPrefixes: string[]
+): string | null {
+  const lines = markdown.split(/\r?\n/);
+  const start = lines.findIndex((line) =>
+    headingPrefixes.some((prefix) => line.trim().startsWith(prefix))
+  );
+  if (start === -1) return null;
+  const body: string[] = [];
+  for (let index = start + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^##\s/.test(line.trim())) break;
+    if (line.trim()) body.push(line.trim());
+  }
+  const joined = body.join("\n").trim();
+  return joined && joined !== "无" && joined.toLowerCase() !== "none" ? joined : null;
+}
+
+/** The day's accomplishments as recorded in its log: the 今日完成 section
+ * when present (new journal schema), the whole-log excerpt otherwise. */
+export function dailyLogAccomplishments(markdown: string, maxChars: number): string {
+  const section = extractDailyLogSection(markdown, COMPLETED_SECTION_PREFIXES);
+  if (section) return truncateText(section.replace(/\n+/g, " "), maxChars);
+  return excerptDailyLog(markdown, maxChars);
 }
 
 /**
  * Assemble the weekly context for the `daily` agent kind (template
- * 'weekly'): a totals header, then one block per day with its stats and a
- * daily-log excerpt. Days without a log but with activity get a stats-only
- * block; quiet days are listed as such. Fits the daily budget.
+ * 'weekly'): a totals header, then one block per day built from its STORED
+ * DAILY LOG (the 今日完成 section excerpt) — the weekly report summarizes
+ * the week's journal entries instead of re-deriving from raw sessions. Days
+ * without a log but with activity get a stats-only block; quiet days are
+ * listed as such. Fits the daily budget.
  */
 export function buildWeeklyTranscript(
   aggregate: WeeklyAggregate,
@@ -107,12 +152,14 @@ export function buildWeeklyTranscript(
   const blocks = aggregate.days.map((day) => {
     const title = `### ${day.date}（${formatDayStats(day.stats)}）`;
     if (!day.hasActivity) return `${title}\n无活动`;
-    if (day.logMarkdown) return `${title}\n${excerptDailyLog(day.logMarkdown, DAY_LOG_EXCERPT_MAX_CHARS)}`;
+    if (day.logMarkdown) {
+      return `${title}\n${dailyLogAccomplishments(day.logMarkdown, DAY_LOG_EXCERPT_MAX_CHARS)}`;
+    }
     const platforms = day.stats.platforms.join("、");
     return `${title}\n当日有活动但未生成日报${platforms ? `（平台：${platforms}）` : ""}`;
   });
 
-  const assembled = [header, "每日记录：", ...blocks].join("\n\n");
+  const assembled = [header, "每日日报条目：", ...blocks].join("\n\n");
   if (assembled.length <= budgetChars) return assembled;
   return `${assembled.slice(0, Math.max(0, budgetChars - 12))}\n[上下文已截断]`;
 }
@@ -184,7 +231,7 @@ export function buildLocalWeeklyMarkdown(
   const dayLines = aggregate.days.map((day) => {
     if (!day.hasActivity) return `- ${day.date}：${copy.quiet}`;
     const stats = formatDayStats(day.stats);
-    const excerpt = day.logMarkdown ? ` — ${excerptDailyLog(day.logMarkdown, 160)}` : "";
+    const excerpt = day.logMarkdown ? ` — ${dailyLogAccomplishments(day.logMarkdown, 160)}` : "";
     return `- ${day.date}（${stats}）${excerpt}`;
   });
   sections.push(`${copy.days}\n${dayLines.join("\n")}`);

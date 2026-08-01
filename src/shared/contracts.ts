@@ -247,7 +247,7 @@ export interface NotionExportResult {
   url: string;
 }
 
-export type AgentKind = 'summary' | 'explore' | 'digest' | 'classify' | 'relay' | 'extract' | 'distill' | 'deposit-maintain' | 'daily' | 'persona' | 'roundtable-turn' | 'roundtable-synthesis' | 'learn-deepen' | 'prompt-improve' | 'prompt-continue';
+export type AgentKind = 'summary' | 'explore' | 'digest' | 'classify' | 'relay' | 'extract' | 'distill' | 'deposit-maintain' | 'daily' | 'persona' | 'roundtable-turn' | 'roundtable-synthesis' | 'learn-deepen' | 'learn-synthesis' | 'prompt-improve' | 'prompt-continue';
 
 /** P4b deposit distillation templates ('custom' carries the user's own
  * instruction in AgentRunRequest.question). */
@@ -402,6 +402,37 @@ export interface SessionRecallHit {
   subagentSessionId?: string;
 }
 
+// ---- Agent MCP registration (one-click vesti-mcp wiring) ----
+
+export type AgentMcpTargetId = 'kimi-code' | 'claude-code' | 'codex' | 'cursor';
+
+export interface AgentMcpTargetStatus {
+  id: AgentMcpTargetId;
+  label: string;
+  /** Config file registration would touch. */
+  configPath: string;
+  /** The agent appears to be installed (config dir/file exists). */
+  detected: boolean;
+  /** A vesti entry exists in the agent's MCP config. */
+  registered: boolean;
+  /** The vesti entry matches exactly what this app would write. */
+  upToDate: boolean;
+  /** The built vesti-mcp server entry (dist/cli.js) exists on disk. */
+  serverAvailable: boolean;
+  serverEntry: string | null;
+  /** Config read problem (e.g. malformed JSON); status never throws. */
+  error?: string;
+}
+
+export interface AgentMcpWriteResult {
+  ok: boolean;
+  /** Whether the config file content actually changed (idempotency signal). */
+  changed: boolean;
+  /** Where the pre-write backup landed; null when nothing was rewritten. */
+  backupPath: string | null;
+  error?: string;
+}
+
 export const IPC = {
   windowMinimize: 'vesti:window-minimize',
   windowToggleMaximize: 'vesti:window-toggle-maximize',
@@ -475,6 +506,9 @@ export const IPC = {
   relayOutboxEnqueue: 'vesti:relay-outbox-enqueue',
   relaySessionContexts: 'vesti:relay-session-contexts',
   relayFileTouches: 'vesti:relay-file-touches',
+  agentMcpStatus: 'vesti:agent-mcp-status',
+  agentMcpRegister: 'vesti:agent-mcp-register',
+  agentMcpUnregister: 'vesti:agent-mcp-unregister',
 } as const;
 
 // ---- Desktop floating capsule ----
@@ -886,6 +920,9 @@ export interface VestiDesktopApi {
   createExtensionPairCode(): Promise<ExtensionPairCodeView>;
   openExtensionPairingWindow(): Promise<ExtensionPairingWindowView>;
   disconnectExtensionClient(clientId: string): Promise<boolean>;
+  getAgentMcpStatus(): Promise<AgentMcpTargetStatus[]>;
+  registerAgentMcp(id: AgentMcpTargetId): Promise<AgentMcpWriteResult>;
+  unregisterAgentMcp(id: AgentMcpTargetId): Promise<AgentMcpWriteResult>;
   reportExtensionImportResult(result: ExtensionImportResultPayload): Promise<void>;
   onExtensionImportRequest(listener: (payload: ExtensionImportRequestPayload) => void): () => void;
   onExtensionBridgeChanged(callback: () => void): () => void;

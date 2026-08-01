@@ -105,6 +105,9 @@ export interface DailyLogRecord {
   content_markdown: string;
   stats: DailyLogStats;
   source: "auto" | "manual";
+  /** Vault-relative path of the journal note (journal/YYYY/YYYY-MM-DD.md)
+   * when the log was mirrored into the Obsidian vault; non-indexed extra. */
+  vault_path?: string | null;
 }
 
 // Explore (RAG Chat) Records

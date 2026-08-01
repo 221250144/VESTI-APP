@@ -9,7 +9,22 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 import type { VestiDatabase } from './db.js';
+import { vestiGetHandoffContext, vestiGetProjectContext } from './projectContext.js';
 import { vestiGetTurns, vestiProjectBrief, vestiSearch, vestiTimeline } from './tools.js';
+
+/**
+ * Behavior contract for every agent that connects. Sent in the MCP
+ * initialize result; kept short and imperative so it survives system-prompt
+ * competition.
+ */
+const SERVER_INSTRUCTIONS = [
+  'VESTI exposes this machine’s captured AI-coding sessions (kimi-code, claude code, codex, cursor — all platforms, read-only).',
+  'SESSION START: when your working directory may be a tracked project, call vesti_get_project_context with your cwd as paths[0] BEFORE asking the user for background — it returns the project’s state card, maintained brief, recent sessions, open questions and active-file timeline in one call. If it reports no match, proceed without VESTI.',
+  'MERGE / CROSS-PROJECT WORK: pass every involved project path to vesti_get_project_context at once — besides per-project packs it returns cross-project links (shared files, shared topics, overlapping work windows).',
+  'HANDOFF to another agent or session: call vesti_get_handoff_context, then assemble the handoff from its file anchors, open questions and verify-first hints; the receiving side must re-verify before trusting it.',
+  'HISTORY DETAILS: vesti_search (keywords) → vesti_timeline (pick turns) → vesti_get_turns (only those turns). Never call vesti_get_turns without narrowing first — it is the expensive layer. confidence:"low" search hits are leads, not facts.',
+  'vesti_project_brief(project) fuzzy-matches a project name when you do not know its path.',
+].join('\n');
 
 const SEARCH_DESCRIPTION = [
   'Layer 1 of 3 — search VESTI’s memory of past AI-coding sessions (claude code, codex, kimi-code, …).',
@@ -38,14 +53,54 @@ const PROJECT_BRIEF_DESCRIPTION = [
   'Use this when you start working in a project and want its current state without searching individual sessions first.',
 ].join(' ');
 
+const PROJECT_CONTEXT_DESCRIPTION = [
+  'Automatic context pack for starting work in a project — call this FIRST when a session begins in a tracked project (pass your cwd as paths[0]) instead of asking the user to repeat background.',
+  'Per project path it returns: the L0 state card (one-liner, active files, open questions), the L2 maintained brief, the recent session list (title/time/one-liner), merged open questions and the deterministic active-file timeline.',
+  'Pass SEVERAL paths at once for merge / cross-project work: the response then adds a cross_project section with shared files, shared topics and overlapping work windows between the projects.',
+  'Omit paths to default to the most recently active project. Paths are normalized (Windows/POSIX, case of drive letter); unmatched paths come back in unmatched_paths with the known project list in hints.',
+  'After this pack, use vesti_search → vesti_timeline → vesti_get_turns only for the details still missing.',
+].join(' ');
+
+const HANDOFF_CONTEXT_DESCRIPTION = [
+  'Lightweight handoff material aligned with the VESTI relay v2 schema — call before handing work to another agent/session or before /compact.',
+  'Returns the project context block plus recent_user_messages (newest user intents across the project’s sessions), file_anchors (deterministic active-file timeline) and verify_first seeds (open questions to re-confirm, last failing steps to re-run) — every entry grounded in stored data, nothing invented.',
+  'Resolve the project by session_id (its project), path, or neither (most recently active project).',
+  'Then assemble the handoff yourself following the relay v2 shape (goal / state / files / decisions / verification / verifyFirst / handoffPrompt); heavy transcript compression is the VESTI app relay pipeline’s job, not this tool’s.',
+].join(' ');
+
 export function createVestiMcpServer(db: VestiDatabase): Server {
   const server = new Server(
     { name: 'vesti-mcp', version: '0.1.0' },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
+      {
+        name: 'vesti_get_project_context',
+        description: PROJECT_CONTEXT_DESCRIPTION,
+        inputSchema: {
+          type: 'object',
+          properties: {
+            paths: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                'Project paths (your cwd first). Several paths = merge/cross-project mode with a cross_project links section. Omit to use the most recently active project.',
+            },
+            session_limit: {
+              type: 'integer',
+              description: 'Recent sessions listed per project (default 8, max 25).',
+              default: 8,
+            },
+            brief_chars: {
+              type: 'integer',
+              description: 'Character budget for each L2 brief (default 4000, min 500; sets brief.truncated when cut).',
+              default: 4000,
+            },
+          },
+        },
+      },
       {
         name: 'vesti_search',
         description: SEARCH_DESCRIPTION,
@@ -135,6 +190,33 @@ export function createVestiMcpServer(db: VestiDatabase): Server {
           required: ['project'],
         },
       },
+      {
+        name: 'vesti_get_handoff_context',
+        description: HANDOFF_CONTEXT_DESCRIPTION,
+        inputSchema: {
+          type: 'object',
+          properties: {
+            session_id: {
+              type: 'string',
+              description: 'Session whose project should be handed off (wins over path).',
+            },
+            path: {
+              type: 'string',
+              description: 'Project path (e.g. your cwd). Omit both to use the most recently active project.',
+            },
+            user_messages: {
+              type: 'integer',
+              description: 'Newest user messages to include (default 8, max 20).',
+              default: 8,
+            },
+            session_limit: {
+              type: 'integer',
+              description: 'Recent sessions listed in the project block (default 8, max 25).',
+              default: 8,
+            },
+          },
+        },
+      },
     ],
   }));
 
@@ -143,6 +225,9 @@ export function createVestiMcpServer(db: VestiDatabase): Server {
     try {
       let payload: unknown;
       switch (name) {
+        case 'vesti_get_project_context':
+          payload = vestiGetProjectContext(db, (args ?? {}) as Parameters<typeof vestiGetProjectContext>[1]);
+          break;
         case 'vesti_search':
           payload = vestiSearch(db, (args ?? {}) as { query: string; topK?: number });
           break;
@@ -154,6 +239,9 @@ export function createVestiMcpServer(db: VestiDatabase): Server {
           break;
         case 'vesti_project_brief':
           payload = vestiProjectBrief(db, (args ?? {}) as { project: string });
+          break;
+        case 'vesti_get_handoff_context':
+          payload = vestiGetHandoffContext(db, (args ?? {}) as Parameters<typeof vestiGetHandoffContext>[1]);
           break;
         default:
           return {

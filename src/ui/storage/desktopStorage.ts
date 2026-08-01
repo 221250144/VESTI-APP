@@ -33,7 +33,7 @@ import type {
   StorageApi,
   WeeklyReport,
 } from "@vesti/ui";
-import { computeSummaryCoverage, serializeRelayPackMarkdown } from "@vesti/ui";
+import { computeSummaryCoverage, learnRouteFingerprint, serializeRelayPackMarkdown } from "@vesti/ui";
 import type {
   ConversationTreeSession,
   SessionRecallHit,
@@ -122,6 +122,10 @@ import {
   buildLearnDeepenTranscript,
   buildLearnRecallContext,
 } from "../learn/learnDeepen";
+import {
+  createUiPrefsLearnSynthesisStore,
+  synthesizeLearnRoutes,
+} from "../learn/learnSynthesis";
 import {
   parseConversationSummaryV2,
   renderSummaryPlainText,
@@ -1773,6 +1777,54 @@ export const desktopStorage: StorageApi = {
     }
 
     return deepen;
+  },
+
+  // 路线级 LLM 合成 (Learn V4): one synthesized reading per learning route
+  // (kind 'learn-synthesis') — full-sentence title + interpretation + next
+  // steps, fingerprint-cached in ui-prefs. The pure orchestration (sequential
+  // runner, cache hit/prune, parse quality bar) lives in
+  // src/ui/learn/learnSynthesis; this wrapper only supplies the agent runner
+  // and the store. Everything fails soft: no LLM / route errors / unusable
+  // output all yield a missing entry, and the card falls back to the
+  // deterministic computeLearn labels.
+  runLearnSynthesis: async (domains, opts) => {
+    const lang = opts?.lang ?? "zh";
+    const api = vestiApi();
+    if (!api) return {};
+    // LLM gate (same probe as runLearnDeepen): silent empty map — the card
+    // never shows an error for synthesis, only the deterministic labels.
+    const settingsView = await api.getSettings().catch(() => null);
+    const llmConfigured = settingsView
+      ? settingsView.llm.mode === "demo_proxy" || settingsView.llm.apiKeyConfigured
+      : false;
+    if (!llmConfigured) return {};
+
+    // Grounding: existing digest one-liners keyed by conversation id (no
+    // long transcript pulls).
+    const digestByConversationId = new Map<number, string>();
+    const digests = await listConversationDigests().catch(() => []);
+    for (const digest of digests) {
+      const oneLiner = digest.oneLiner?.trim();
+      if (oneLiner) digestByConversationId.set(digest.conversationId, oneLiner);
+    }
+
+    return synthesizeLearnRoutes(domains, {
+      lang,
+      digestByConversationId,
+      force: opts?.force,
+      onProgress: opts?.onProgress,
+      store: createUiPrefsLearnSynthesisStore(),
+      runner: async (domain, transcript) => {
+        const agentResult = await api.runAgent({
+          kind: "learn-synthesis",
+          sessionId: `learn-synthesis:${learnRouteFingerprint(domain)}`,
+          question: domain.name,
+          transcriptOverride: transcript,
+          persist: false,
+        });
+        return agentResult.content.trim();
+      },
+    });
   },
 
   getSummary: async (conversationId) => {

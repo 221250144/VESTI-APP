@@ -9,4 +9,19 @@ export type {
   TurnContent,
   TurnToolExecution,
 } from './tools.js';
+export {
+  normalizeProjectPath,
+  deriveProjectKey,
+  groupSessionsByProject,
+  vestiGetProjectContext,
+  vestiGetHandoffContext,
+} from './projectContext.js';
+export type {
+  ProjectActiveFile,
+  ProjectContextBlock,
+  ProjectContextResult,
+  ProjectContextSession,
+  CrossProjectLinks,
+  HandoffContextResult,
+} from './projectContext.js';
 export { createVestiMcpServer, serveStdio } from './server.js';
