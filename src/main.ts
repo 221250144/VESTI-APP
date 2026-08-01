@@ -3,6 +3,7 @@ import {
   BrowserWindow,
   clipboard,
   dialog,
+  type IpcMainInvokeEvent,
   ipcMain,
   Menu,
   safeStorage,
@@ -21,6 +22,7 @@ import { ProjectMemoryService } from './main/projectMemoryService';
 import { EmbeddingService } from './main/embeddingService';
 import { ExtensionBridgeService, MAX_OUTBOX_PROMPT_CHARS } from './main/extensionBridgeService';
 import { NotionService } from './main/notionService';
+import { MembershipError, MembershipService } from './main/membershipService';
 import { SettingsService } from './main/settingsService';
 import { UiPrefsService } from './main/uiPrefsService';
 import { writeUpstreamExportFile } from './main/vaultExportService';
@@ -52,6 +54,10 @@ import {
   type CapsuleRelaySessionView,
   type ExtensionImportRequestPayload,
   type ExtensionImportResultPayload,
+  type MembershipActionResult,
+  type MembershipCredentials,
+  type MembershipErrorCode,
+  type MembershipStatus,
   type NotionExportRequest,
   type RelayOutboxEnqueueRequest,
   type RelayPrepareCliRequest,
@@ -69,6 +75,7 @@ let tray: Tray | null = null;
 let isQuitting = false;
 const capture = new CaptureService();
 let settings: SettingsService;
+let membership: MembershipService;
 let agent: AgentService;
 let embedding: EmbeddingService;
 let digest: DigestService;
@@ -77,6 +84,10 @@ let notion: NotionService;
 const uiPrefs = new UiPrefsService();
 let capsule: CapsuleWindowService;
 let extensionBridge: ExtensionBridgeService;
+let productRuntimeActive = false;
+let productActivation: Promise<void> | null = null;
+let membershipExpiryTimer: NodeJS.Timeout | null = null;
+let membershipLockReloadTimer: NodeJS.Timeout | null = null;
 
 // Pending /v1/import requests waiting for the renderer's idempotent import to
 // finish. Resolved by the IPC.extensionImportResult handler below.
@@ -85,6 +96,166 @@ const pendingExtensionImports = new Map<string, {
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
 }>();
+
+type MemberIpcHandler = (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown;
+
+function publicMembershipStatus(): MembershipStatus {
+  const status = membership.getStatus();
+  return {
+    state: status.state,
+    plan: status.plan,
+    registered: status.registered,
+    authenticated: status.authenticated,
+    // The public `active` flag means the product is unlocked, not merely that
+    // the entitlement date is still in the future.
+    active: status.canUseApp,
+    username: status.username,
+    memberSince: status.memberSince,
+    expiresAt: status.expiresAt,
+    daysRemaining: status.daysRemaining,
+  };
+}
+
+function memberIpcHandle(channel: string, handler: MemberIpcHandler): void {
+  ipcMain.handle(channel, (event, ...args) => {
+    try {
+      membership.requireActive();
+    } catch (error) {
+      if (productRuntimeActive) {
+        void deactivateProductRuntime().finally(() => {
+          broadcastMembershipChange();
+          reloadRendererAfterMembershipLock();
+        });
+      }
+      throw error;
+    }
+    return handler(event, ...args);
+  });
+}
+
+function normalizeMembershipCredentials(value: unknown): MembershipCredentials {
+  if (!value || typeof value !== 'object') return { username: '', password: '' };
+  const input = value as Partial<MembershipCredentials>;
+  return {
+    username: typeof input.username === 'string' ? input.username : '',
+    password: typeof input.password === 'string' ? input.password : '',
+  };
+}
+
+function membershipErrorCode(error: unknown): MembershipErrorCode {
+  if (error instanceof MembershipError) return error.code;
+  return 'STORAGE_ERROR';
+}
+
+function broadcastMembershipChange(): MembershipStatus {
+  const status = publicMembershipStatus();
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send(IPC.membershipChanged, status);
+  }
+  return status;
+}
+
+function reloadRendererAfterMembershipLock(): void {
+  if (membershipLockReloadTimer) return;
+  // Unmounting Shell hides the UI immediately, while this reload tears down
+  // module-level renderer schedulers (capture mirror, auto export, daily log,
+  // prompt snapshot) that deliberately run for the lifetime of a renderer.
+  membershipLockReloadTimer = setTimeout(() => {
+    membershipLockReloadTimer = null;
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reload();
+  }, 150);
+}
+
+function scheduleMembershipExpiryCheck(): void {
+  if (membershipExpiryTimer) clearTimeout(membershipExpiryTimer);
+  membershipExpiryTimer = null;
+  const status = publicMembershipStatus();
+  if (!status.active || status.expiresAt === null) return;
+  // Node timers cap delays at ~24.8 days. Wake in bounded chunks until the
+  // exact expiry is close, then lock the product immediately.
+  const delay = Math.min(
+    Math.max(250, status.expiresAt - Date.now() + 50),
+    2_147_000_000,
+  );
+  membershipExpiryTimer = setTimeout(() => {
+    membershipExpiryTimer = null;
+    if (membership.isActive()) {
+      scheduleMembershipExpiryCheck();
+      return;
+    }
+    void deactivateProductRuntime().finally(() => {
+      broadcastMembershipChange();
+      reloadRendererAfterMembershipLock();
+    });
+  }, delay);
+  membershipExpiryTimer.unref?.();
+}
+
+async function activateProductRuntime(): Promise<void> {
+  if (productRuntimeActive) return;
+  if (productActivation) return productActivation;
+  membership.requireActive();
+  productActivation = (async () => {
+    productRuntimeActive = true;
+    digest.start();
+    projectMemory.requestScan();
+    await extensionBridge.start();
+    if (!membership.isActive()) {
+      productRuntimeActive = false;
+      await extensionBridge.stop();
+      return;
+    }
+    if (capsule.isEnabled()) await capsule.show().catch(console.error);
+    void capture.syncAll().then(broadcastChange).catch(console.error);
+    if (settings.capture.watchOnStartup) {
+      void capture.setWatching(true).then(updateTrayMenu).catch(console.error);
+    }
+    scheduleMembershipExpiryCheck();
+    updateTrayMenu();
+  })();
+  try {
+    await productActivation;
+  } finally {
+    productActivation = null;
+  }
+}
+
+async function deactivateProductRuntime(): Promise<void> {
+  if (productActivation) await productActivation.catch(() => undefined);
+  productRuntimeActive = false;
+  digest.stop();
+  projectMemory.stop();
+  await capture.setWatching(false).catch(() => false);
+  await extensionBridge.stop().catch(() => undefined);
+  await capsule.hide().catch(() => undefined);
+  for (const [requestId, pending] of pendingExtensionImports) {
+    clearTimeout(pending.timer);
+    pending.reject(new MembershipError('AUTHENTICATION_REQUIRED', 'Membership is no longer active.'));
+    pendingExtensionImports.delete(requestId);
+  }
+  if (membershipExpiryTimer) clearTimeout(membershipExpiryTimer);
+  membershipExpiryTimer = null;
+  updateTrayMenu();
+}
+
+async function finishMembershipAction(
+  action: () => Promise<unknown>,
+): Promise<MembershipActionResult> {
+  try {
+    await action();
+    if (membership.isActive()) await activateProductRuntime();
+    else await deactivateProductRuntime();
+    const status = broadcastMembershipChange();
+    scheduleMembershipExpiryCheck();
+    return { ok: true, status };
+  } catch (error) {
+    return {
+      ok: false,
+      status: publicMembershipStatus(),
+      error: membershipErrorCode(error),
+    };
+  }
+}
 
 function assetPath(fileName: string): string {
   return app.isPackaged
@@ -120,6 +291,7 @@ const associationDenials = new Map<string, number>();
 
 /** Bridge Protocol v1.2 confirm callback: native one-tap TOFU dialog. */
 async function confirmExtensionAssociation(request: { client: string; clientId: string }): Promise<boolean> {
+  membership.requireActive();
   const deniedUntil = associationDenials.get(request.clientId);
   if (deniedUntil !== undefined) {
     if (Date.now() < deniedUntil) return false;
@@ -161,6 +333,7 @@ async function ensureRendererWindow(): Promise<BrowserWindow> {
 
 function forwardExtensionImport(bundle: unknown, since: string | undefined): Promise<ExtensionImportResultPayload> {
   return (async () => {
+    membership.requireActive();
     const target = await ensureRendererWindow();
     const requestId = randomUUID();
     return new Promise<ExtensionImportResultPayload>((resolve, reject) => {
@@ -177,26 +350,36 @@ function forwardExtensionImport(bundle: unknown, since: string | undefined): Pro
 }
 
 function updateTrayMenu(): void {
-  if (!tray || !settings) return;
+  if (!tray || !settings || !membership) return;
   const visible = Boolean(mainWindow?.isVisible());
-  tray.setContextMenu(Menu.buildFromTemplate([
+  const active = publicMembershipStatus().active;
+  const template: Electron.MenuItemConstructorOptions[] = [
     { label: visible ? '隐藏 Vesti' : '打开 Vesti', click: () => visible ? mainWindow?.hide() : showMainWindow() },
-    { label: '立即同步', click: () => void capture.syncAll().then(broadcastChange).catch(console.error) },
-    {
-      label: '实时采集',
-      type: 'checkbox',
-      checked: capture.isWatching,
-      click: item => void capture.setWatching(item.checked).then(broadcastChange).catch(console.error),
-    },
-    {
-      label: '显示悬浮球',
-      type: 'checkbox',
-      checked: capsule ? capsule.isEnabled() : false,
-      click: item => void capsule.setEnabled(item.checked).catch(console.error),
-    },
+  ];
+  if (active) {
+    template.push(
+      { label: '立即同步', click: () => void capture.syncAll().then(broadcastChange).catch(console.error) },
+      {
+        label: '实时采集',
+        type: 'checkbox',
+        checked: capture.isWatching,
+        click: item => void capture.setWatching(item.checked).then(broadcastChange).catch(console.error),
+      },
+      {
+        label: '显示悬浮球',
+        type: 'checkbox',
+        checked: capsule ? capsule.isEnabled() : false,
+        click: item => void capsule.setEnabled(item.checked).catch(console.error),
+      },
+    );
+  } else {
+    template.push({ label: '登录有效会员后可使用 Vesti', enabled: false });
+  }
+  template.push(
     { type: 'separator' },
     { label: '退出 Vesti', click: () => { isQuitting = true; app.quit(); } },
-  ]));
+  );
+  tray.setContextMenu(Menu.buildFromTemplate(template));
 }
 
 function createTray(): void {
@@ -570,22 +753,41 @@ function registerIpc(): void {
   });
   ipcMain.handle(IPC.windowIsMaximized, event =>
     BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false);
-  ipcMain.handle(IPC.overview, () => capture.getOverview());
-  ipcMain.handle(IPC.sessions, () => capture.getSessions());
-  ipcMain.handle(IPC.session, (_event, id: unknown) => {
+  ipcMain.handle(IPC.membershipStatus, async () => {
+    const status = publicMembershipStatus();
+    if (!status.active && productRuntimeActive) {
+      await deactivateProductRuntime();
+      reloadRendererAfterMembershipLock();
+    }
+    return status;
+  });
+  ipcMain.handle(IPC.membershipRegister, (_event, value: unknown) =>
+    finishMembershipAction(() => membership.register(normalizeMembershipCredentials(value))));
+  ipcMain.handle(IPC.membershipLogin, (_event, value: unknown) =>
+    finishMembershipAction(() => membership.login(normalizeMembershipCredentials(value))));
+  ipcMain.handle(IPC.membershipLogout, async () => {
+    await membership.logout();
+    await deactivateProductRuntime();
+    const status = broadcastMembershipChange();
+    reloadRendererAfterMembershipLock();
+    return status;
+  });
+  memberIpcHandle(IPC.overview, () => capture.getOverview());
+  memberIpcHandle(IPC.sessions, () => capture.getSessions());
+  memberIpcHandle(IPC.session, (_event, id: unknown) => {
     if (!validSessionId(id)) throw new Error('Invalid session id');
     return capture.getSession(id);
   });
-  ipcMain.handle(IPC.sync, () => capture.syncAll());
-  ipcMain.handle(IPC.watch, async (_event, enabled: unknown) => {
+  memberIpcHandle(IPC.sync, () => capture.syncAll());
+  memberIpcHandle(IPC.watch, async (_event, enabled: unknown) => {
     const watching = await capture.setWatching(enabled === true);
     updateTrayMenu();
     return watching;
   });
-  ipcMain.handle(IPC.wslStatus, () => capture.getWslStatus());
-  ipcMain.handle(IPC.wslRedetect, () => capture.redetectWsl());
-  ipcMain.handle(IPC.settings, () => settings.getView(capture.activeDataDirectory));
-  ipcMain.handle(IPC.settingsSave, async (_event, update: unknown) => {
+  memberIpcHandle(IPC.wslStatus, () => capture.getWslStatus());
+  memberIpcHandle(IPC.wslRedetect, () => capture.redetectWsl());
+  memberIpcHandle(IPC.settings, () => settings.getView(capture.activeDataDirectory));
+  memberIpcHandle(IPC.settingsSave, async (_event, update: unknown) => {
     if (!validSettingsUpdate(update)) throw new Error('设置数据无效');
     const result = await settings.save(update, capture.activeDataDirectory);
     embedding.invalidateStatus();
@@ -595,7 +797,7 @@ function registerIpc(): void {
     updateTrayMenu();
     return result;
   });
-  ipcMain.handle(IPC.chooseDataDirectory, async () => {
+  memberIpcHandle(IPC.chooseDataDirectory, async () => {
     const options: Electron.OpenDialogOptions = {
       title: '选择 Vesti 内容数据目录',
       defaultPath: settings.dataDirectory,
@@ -606,9 +808,9 @@ function registerIpc(): void {
       : await dialog.showOpenDialog(options);
     return result.canceled ? null : result.filePaths[0] ?? null;
   });
-  ipcMain.handle(IPC.openDataDirectory, () => openDirectory(capture.activeDataDirectory));
-  ipcMain.handle(IPC.openSettingsDirectory, () => openDirectory(settings.getView(capture.activeDataDirectory).settingsDirectory));
-  ipcMain.handle(IPC.chooseDirectory, async (_event, title: unknown) => {
+  memberIpcHandle(IPC.openDataDirectory, () => openDirectory(capture.activeDataDirectory));
+  memberIpcHandle(IPC.openSettingsDirectory, () => openDirectory(settings.getView(capture.activeDataDirectory).settingsDirectory));
+  memberIpcHandle(IPC.chooseDirectory, async (_event, title: unknown) => {
     const options: Electron.OpenDialogOptions = {
       title: typeof title === 'string' && title.trim() ? title : '选择目录',
       properties: ['openDirectory', 'createDirectory'],
@@ -618,20 +820,20 @@ function registerIpc(): void {
       : await dialog.showOpenDialog(options);
     return result.canceled ? null : result.filePaths[0] ?? null;
   });
-  ipcMain.handle(IPC.upstreamWriteFile, (_event, request: unknown) => {
+  memberIpcHandle(IPC.upstreamWriteFile, (_event, request: unknown) => {
     if (!validUpstreamWriteRequest(request)) throw new Error('导出写入请求无效');
     return writeUpstreamExportFile(request);
   });
-  ipcMain.handle(IPC.notionTest, () => notion.testConnection());
-  ipcMain.handle(IPC.notionExport, (_event, request: unknown) => {
+  memberIpcHandle(IPC.notionTest, () => notion.testConnection());
+  memberIpcHandle(IPC.notionExport, (_event, request: unknown) => {
     if (!validNotionExportRequest(request)) throw new Error('Notion 导出请求无效');
     return notion.exportPage(request);
   });
-  ipcMain.handle(IPC.relayPrepareCli, (_event, request: unknown) => {
+  memberIpcHandle(IPC.relayPrepareCli, (_event, request: unknown) => {
     if (!validRelayPrepareCliRequest(request)) throw new Error('交接包写入请求无效');
     return writeRelaySharedFile(request);
   });
-  ipcMain.handle(IPC.relayOutboxEnqueue, async (_event, request: unknown) => {
+  memberIpcHandle(IPC.relayOutboxEnqueue, async (_event, request: unknown) => {
     if (!validRelayOutboxEnqueueRequest(request)) throw new Error('交接包投递请求无效');
     if (extensionBridge.getStatus().clients.length === 0) {
       throw new Error('没有已配对的浏览器扩展，请先在扩展桥设置中完成配对');
@@ -639,14 +841,14 @@ function registerIpc(): void {
     const item = await extensionBridge.enqueueOutbox(request.prompt);
     return { id: item.id };
   });
-  ipcMain.handle(IPC.relaySessionContexts, (_event, sessionIds: unknown) => {
+  memberIpcHandle(IPC.relaySessionContexts, (_event, sessionIds: unknown) => {
     if (!Array.isArray(sessionIds) || sessionIds.length > 50
       || !sessionIds.every(validSessionId)) {
       throw new Error('交接上下文请求无效');
     }
     return capture.getRelaySessionContexts(sessionIds);
   });
-  ipcMain.handle(IPC.relayFileTouches, (_event, sessionIds: unknown) => {
+  memberIpcHandle(IPC.relayFileTouches, (_event, sessionIds: unknown) => {
     // Subagent sessions ride along with selected parents, so the id list can
     // legitimately exceed the raw selection size — allow a wider fan-out.
     if (!Array.isArray(sessionIds) || sessionIds.length > 200
@@ -655,29 +857,29 @@ function registerIpc(): void {
     }
     return capture.getRelayFileTouches(sessionIds);
   });
-  ipcMain.handle(IPC.clearAgentResults, async () => {
+  memberIpcHandle(IPC.clearAgentResults, async () => {
     await agent.clearResults();
   });
-  ipcMain.handle(IPC.restart, () => {
+  memberIpcHandle(IPC.restart, () => {
     isQuitting = true;
     app.relaunch();
     app.exit(0);
   });
-  ipcMain.handle(IPC.llmTest, () => agent.test());
-  ipcMain.handle(IPC.embeddingStatus, () => embedding.getStatus());
-  ipcMain.handle(IPC.agentRun, (_event, request: unknown) => {
+  memberIpcHandle(IPC.llmTest, () => agent.test());
+  memberIpcHandle(IPC.embeddingStatus, () => embedding.getStatus());
+  memberIpcHandle(IPC.agentRun, (_event, request: unknown) => {
     if (!validAgentRequest(request)) throw new Error('Agent 请求无效');
     return agent.run(request, { persist: request.persist });
   });
-  ipcMain.handle(IPC.agentResults, () => agent.listResults());
-  ipcMain.handle(IPC.exportConversations, () => capture.exportConversations());
-  ipcMain.handle(IPC.conversationTree, () => capture.getConversationTree());
-  ipcMain.handle(IPC.projectStates, () => capture.listProjectStates());
-  ipcMain.handle(IPC.projectBrief, (_event, projectKey: unknown) => {
+  memberIpcHandle(IPC.agentResults, () => agent.listResults());
+  memberIpcHandle(IPC.exportConversations, () => capture.exportConversations());
+  memberIpcHandle(IPC.conversationTree, () => capture.getConversationTree());
+  memberIpcHandle(IPC.projectStates, () => capture.listProjectStates());
+  memberIpcHandle(IPC.projectBrief, (_event, projectKey: unknown) => {
     if (typeof projectKey !== 'string' || !projectKey.trim()) throw new Error('Invalid project key');
     return capture.getProjectBrief(projectKey.trim());
   });
-  ipcMain.handle(IPC.fileTimeline, (_event, query: unknown) => {
+  memberIpcHandle(IPC.fileTimeline, (_event, query: unknown) => {
     const input = (query ?? {}) as { projectKey?: unknown; filePath?: unknown };
     if (typeof input.filePath !== 'string' || !input.filePath.trim()) throw new Error('Invalid file path');
     return capture.getFileTimeline({
@@ -685,22 +887,27 @@ function registerIpc(): void {
       filePath: input.filePath.trim(),
     });
   });
-  ipcMain.handle(IPC.recallSessions, async (_event, query: unknown, topK: unknown) => {
+  memberIpcHandle(IPC.recallSessions, async (_event, query: unknown, topK: unknown) => {
     if (typeof query !== 'string' || !query.trim()) throw new Error('Invalid recall query');
     const limit = typeof topK === 'number' && Number.isInteger(topK) && topK >= 1 && topK <= 20 ? topK : 5;
     // The query vector is best-effort: without a reachable embedding endpoint
     // recall silently falls back to the pure-FTS path.
-    const vector = await embedding.embed([query.trim()]).then(vectors => vectors[0] ?? null).catch(() => null);
-    return capture.recallSessions(query.trim(), limit, vector);
+    const queryEmbedding = await embedding.embedWithMetadata([query.trim()]).catch(() => null);
+    return capture.recallSessions(
+      query.trim(),
+      limit,
+      queryEmbedding?.vectors[0] ?? null,
+      queryEmbedding?.metadata.version ?? null,
+    );
   });
-  ipcMain.handle(IPC.extensionBridgeStatus, () => extensionBridge.getStatus());
-  ipcMain.handle(IPC.extensionPairCodeCreate, () => extensionBridge.createPairCode());
-  ipcMain.handle(IPC.extensionPairingWindowOpen, () => extensionBridge.openPairingWindow());
-  ipcMain.handle(IPC.extensionClientDisconnect, (_event, clientId: unknown) => {
+  memberIpcHandle(IPC.extensionBridgeStatus, () => extensionBridge.getStatus());
+  memberIpcHandle(IPC.extensionPairCodeCreate, () => extensionBridge.createPairCode());
+  memberIpcHandle(IPC.extensionPairingWindowOpen, () => extensionBridge.openPairingWindow());
+  memberIpcHandle(IPC.extensionClientDisconnect, (_event, clientId: unknown) => {
     if (typeof clientId !== 'string' || !clientId) throw new Error('Invalid client id');
     return extensionBridge.disconnectClient(clientId);
   });
-  ipcMain.handle(IPC.extensionImportResult, (_event, result: unknown) => {
+  memberIpcHandle(IPC.extensionImportResult, (_event, result: unknown) => {
     if (!result || typeof result !== 'object') return;
     const payload = result as ExtensionImportResultPayload;
     if (typeof payload.requestId !== 'string') return;
@@ -713,37 +920,48 @@ function registerIpc(): void {
   });
   ipcMain.handle(IPC.uiPrefGet, (_event, key: unknown) => {
     if (typeof key !== 'string') throw new Error('Invalid preference key');
+    if (!membership.isActive() && key !== 'theme' && key !== 'language') {
+      throw new MembershipError('AUTHENTICATION_REQUIRED', 'Membership is required for this preference.');
+    }
     return uiPrefs.get(key) ?? null;
   });
   ipcMain.handle(IPC.uiPrefSet, async (_event, key: unknown, value: unknown) => {
     if (typeof key !== 'string') throw new Error('Invalid preference key');
+    if (!membership.isActive() && key !== 'theme' && key !== 'language') {
+      throw new MembershipError('AUTHENTICATION_REQUIRED', 'Membership is required for this preference.');
+    }
     await uiPrefs.set(key, value);
   });
-  ipcMain.handle(IPC.capsuleState, () => capsule.getState());
-  ipcMain.handle(IPC.capsuleSync, async () => {
+  memberIpcHandle(IPC.capsuleState, () => capsule.getState());
+  memberIpcHandle(IPC.capsuleSync, async () => {
     await capture.syncAll();
     broadcastChange();
   });
-  ipcMain.handle(IPC.capsuleToggleWatch, async () => {
+  memberIpcHandle(IPC.capsuleToggleWatch, async () => {
     const watching = await capture.setWatching(!capture.isWatching);
     broadcastChange();
     return watching;
   });
-  ipcMain.handle(IPC.capsuleOpenMain, () => showMainWindow());
-  ipcMain.handle(IPC.capsuleHide, () => capsule.setEnabled(false));
-  ipcMain.handle(IPC.capsuleSetExpanded, (_event, expanded: unknown) =>
+  memberIpcHandle(IPC.capsuleOpenMain, () => showMainWindow());
+  memberIpcHandle(IPC.capsuleHide, () => capsule.setEnabled(false));
+  memberIpcHandle(IPC.capsuleSetExpanded, (_event, expanded: unknown) =>
     capsule.setExpanded(expanded === true));
   ipcMain.on(IPC.capsuleDragStart, (_event, x: unknown, y: unknown) => {
+    if (!membership.isActive()) return;
     if (typeof x === 'number' && typeof y === 'number') capsule.handleDragStart(x, y);
   });
-  ipcMain.on(IPC.capsuleDragCancel, () => capsule.handleDragCancel());
+  ipcMain.on(IPC.capsuleDragCancel, () => {
+    if (membership.isActive()) capsule.handleDragCancel();
+  });
   ipcMain.on(IPC.capsuleDragMove, (_event, x: unknown, y: unknown) => {
+    if (!membership.isActive()) return;
     if (typeof x === 'number' && typeof y === 'number') capsule.handleDragMove(x, y);
   });
-  ipcMain.handle(IPC.capsuleDragEnd, async (_event, x: unknown, y: unknown) => {
+  memberIpcHandle(IPC.capsuleDragEnd, async (_event, x: unknown, y: unknown) => {
     if (typeof x === 'number' && typeof y === 'number') await capsule.handleDragEnd(x, y);
   });
   ipcMain.on(IPC.capsuleContextMenu, (_event, labels: unknown) => {
+    if (!membership.isActive()) return;
     // The capsule renderer sends localized labels; fall back to zh defaults.
     const fallback: CapsuleContextMenuLabels = {
       open: '打开 Vesti',
@@ -765,7 +983,7 @@ function registerIpc(): void {
   });
 
   // ---- P6 capsule dock ----
-  ipcMain.handle(IPC.capsuleDockStatus, async () => {
+  memberIpcHandle(IPC.capsuleDockStatus, async () => {
     // getOverview re-detects sources; only fetched when the panel opens.
     const overview = await capture.getOverview().catch(() => null);
     return {
@@ -776,14 +994,19 @@ function registerIpc(): void {
         : 0,
     };
   });
-  ipcMain.handle(IPC.capsuleQuickAsk, async (_event, question: unknown) => {
+  memberIpcHandle(IPC.capsuleQuickAsk, async (_event, question: unknown) => {
     if (typeof question !== 'string' || !question.trim() || question.length > CAPSULE_QUICK_ASK_MAX_CHARS) {
       throw new Error('问题内容无效');
     }
     const query = question.trim();
     // Query vector is best-effort, mirroring the recall IPC above.
-    const vector = await embedding.embed([query]).then(vectors => vectors[0] ?? null).catch(() => null);
-    const hits = capture.recallSessions(query, 5, vector);
+    const queryEmbedding = await embedding.embedWithMetadata([query]).catch(() => null);
+    const hits = capture.recallSessions(
+      query,
+      5,
+      queryEmbedding?.vectors[0] ?? null,
+      queryEmbedding?.metadata.version ?? null,
+    );
     const transcript = buildQuickAskTranscript(
       hits.map(hit => ({ title: hit.title, oneLiner: hit.oneLiner, snippet: hit.snippet })),
       { language: capsuleDraftLanguage() },
@@ -797,9 +1020,9 @@ function registerIpc(): void {
     }, { persist: false });
     return { answer: result.content, recalled: hits.length };
   });
-  ipcMain.handle(IPC.capsuleProjects, () => capsuleProjectViews());
-  ipcMain.handle(IPC.capsuleRelayDraft, (_event, request: unknown) => buildCapsuleRelayDraft(request));
-  ipcMain.handle(IPC.capsuleRelayPolish, async (_event, draft: unknown) => {
+  memberIpcHandle(IPC.capsuleProjects, () => capsuleProjectViews());
+  memberIpcHandle(IPC.capsuleRelayDraft, (_event, request: unknown) => buildCapsuleRelayDraft(request));
+  memberIpcHandle(IPC.capsuleRelayPolish, async (_event, draft: unknown) => {
     if (typeof draft !== 'string' || !draft.trim() || draft.length > 30_000) {
       throw new Error('交接草稿无效');
     }
@@ -812,7 +1035,7 @@ function registerIpc(): void {
     const payload = JSON.parse(result.content) as RelayPackPayload;
     return { title: payload.title, suggestedPrompt: payload.suggested_prompt };
   });
-  ipcMain.handle(IPC.capsuleSearchPrompts, async (_event, query: unknown) => {
+  memberIpcHandle(IPC.capsuleSearchPrompts, async (_event, query: unknown) => {
     const normalized = typeof query === 'string' ? query.slice(0, 200) : '';
     const snapshot = await readPromptSnapshot();
     return searchCapsulePrompts({
@@ -824,7 +1047,7 @@ function registerIpc(): void {
   });
   // Capsule prompt assistant: AI refine / continue for the picked prompt.
   // Both run through agentService with persist:false — nothing is logged.
-  ipcMain.handle(IPC.capsulePromptImprove, async (_event, body: unknown) => {
+  memberIpcHandle(IPC.capsulePromptImprove, async (_event, body: unknown) => {
     if (typeof body !== 'string' || !body.trim() || body.length > 8_000) {
       throw new Error('提示词内容无效');
     }
@@ -837,7 +1060,7 @@ function registerIpc(): void {
     // parse() in the kind definition already validated the strict JSON shape.
     return JSON.parse(result.content) as CapsulePromptImproveResult;
   });
-  ipcMain.handle(IPC.capsulePromptContinue, async (_event, body: unknown) => {
+  memberIpcHandle(IPC.capsulePromptContinue, async (_event, body: unknown) => {
     if (typeof body !== 'string' || !body.trim() || body.length > 8_000) {
       throw new Error('提示词内容无效');
     }
@@ -849,13 +1072,13 @@ function registerIpc(): void {
     }, { persist: false });
     return { continued: result.content } satisfies CapsulePromptContinueResult;
   });
-  ipcMain.handle(IPC.capsulePromptSnapshotGet, () => readPromptSnapshot());
-  ipcMain.handle(IPC.capsulePromptSnapshotSave, (_event, value: unknown) => writePromptSnapshot(value));
-  ipcMain.handle(IPC.capsuleCopyText, (_event, text: unknown) => {
+  memberIpcHandle(IPC.capsulePromptSnapshotGet, () => readPromptSnapshot());
+  memberIpcHandle(IPC.capsulePromptSnapshotSave, (_event, value: unknown) => writePromptSnapshot(value));
+  memberIpcHandle(IPC.capsuleCopyText, (_event, text: unknown) => {
     if (typeof text !== 'string' || text.length > 200_000) throw new Error('复制内容无效');
     clipboard.writeText(text);
   });
-  ipcMain.handle(IPC.capsulePanelHeight, (_event, height: unknown) =>
+  memberIpcHandle(IPC.capsulePanelHeight, (_event, height: unknown) =>
     capsule.setPanelHeight(typeof height === 'number' && Number.isFinite(height) ? height : null));
 }
 
@@ -866,7 +1089,9 @@ async function createWindow(): Promise<void> {
     height: 860,
     minWidth: 1040,
     minHeight: 680,
-    show: !(startedFromLogin && settings.general.startMinimized),
+    // A locked app must always show its login/registration gate even when the
+    // process was launched with --hidden at OS sign-in.
+    show: !membership.isActive() || !(startedFromLogin && settings.general.startMinimized),
     backgroundColor: uiPrefs.get('theme') === 'dark' ? WINDOW_BACKGROUND_DARK : WINDOW_BACKGROUND_LIGHT,
     icon: assetPath(process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
     // Windows/Linux use a fully custom in-page title bar; macOS keeps the
@@ -924,6 +1149,19 @@ app.whenReady().then(async () => {
   app.setAppUserModelId('com.vesti.desktop');
   settings = new SettingsService(app.getPath('userData'), app.getVersion());
   await settings.initialize();
+  membership = new MembershipService(app.getPath('userData'));
+  try {
+    await membership.initialize();
+  } catch (error) {
+    dialog.showErrorBox(
+      'Vesti membership data error',
+      error instanceof Error
+        ? `${error.message}\n\nPlease restore or remove the damaged membership.json file in the Vesti settings directory.`
+        : 'The local membership file could not be read.',
+    );
+    app.quit();
+    return;
+  }
   await uiPrefs.initialize(app.getPath('userData'), (key, value) => {
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed()) window.webContents.send(IPC.uiPrefChanged, key, value);
@@ -955,13 +1193,13 @@ app.whenReady().then(async () => {
   notion = new NotionService(settings);
   projectMemory = new ProjectMemoryService(capture, agent);
   capture.setSyncCompletedListener(() => {
+    if (!productRuntimeActive) return;
     digest.requestScan();
     projectMemory.requestScan();
   });
-  digest.start();
-  projectMemory.requestScan();
   extensionBridge = new ExtensionBridgeService({
     appVersion: app.getVersion(),
+    isAuthorized: () => membership.isActive(),
     port: settings.getBridgePort(),
     encrypt: plain => {
       if (!safeStorage.isEncryptionAvailable()) throw new Error('safe storage unavailable');
@@ -986,13 +1224,10 @@ app.whenReady().then(async () => {
   });
   registerIpc();
   await createWindow();
-  // Loopback bridge for the browser extension; failure (e.g. port taken) only
-  // degrades the bridge, never app startup.
-  void extensionBridge.start();
-  if (capsule.isEnabled()) void capsule.show().catch(console.error);
   createTray();
-  void capture.syncAll().then(broadcastChange).catch(console.error);
-  if (settings.capture.watchOnStartup) void capture.setWatching(true).then(updateTrayMenu).catch(console.error);
+  // Product background services stay completely idle until a signed-in,
+  // unexpired member unlocks the app.
+  if (membership.isActive()) await activateProductRuntime();
   app.on('activate', showMainWindow);
 });
 
@@ -1001,8 +1236,14 @@ app.on('window-all-closed', () => {
 });
 app.on('before-quit', () => {
   isQuitting = true;
+  if (membershipExpiryTimer) clearTimeout(membershipExpiryTimer);
+  membershipExpiryTimer = null;
+  if (membershipLockReloadTimer) clearTimeout(membershipLockReloadTimer);
+  membershipLockReloadTimer = null;
   tray?.destroy();
   tray = null;
   if (extensionBridge) void extensionBridge.stop().catch(console.error);
+  digest?.stop();
+  projectMemory?.stop();
   if (agent) void capture.close().catch(console.error);
 });

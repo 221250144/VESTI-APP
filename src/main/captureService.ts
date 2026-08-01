@@ -273,8 +273,13 @@ export class CaptureService {
     return this.db.buildConversationTree();
   }
 
-  recallSessions(query: string, topK: number, queryVector: Float32Array | null): SessionRecallHit[] {
-    return this.db.recallSessions(query, { topK, queryVector });
+  recallSessions(
+    query: string,
+    topK: number,
+    queryVector: Float32Array | null,
+    queryEmbeddingVersion?: string | null,
+  ): SessionRecallHit[] {
+    return this.db.recallSessions(query, { topK, queryVector, queryEmbeddingVersion });
   }
 
   // ---- Memory v2: fork lineage + L0 project_state + L2 project_briefs ----

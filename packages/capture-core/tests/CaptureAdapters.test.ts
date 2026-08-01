@@ -47,6 +47,199 @@ describe('capture adapters', () => {
     expect(session.messages).toHaveLength(4);
     expect(session.toolExecutions[0]).toMatchObject({ toolName: 'shell_command', outputSummary: 'README.md' });
     expect(session.tokenUsage).toMatchObject({ totalInputTokens: 21, totalOutputTokens: 5, totalCacheReadTokens: 8 });
+    expect(session.tokenUsageEvents).toEqual([
+      expect.objectContaining({
+        timestamp: Date.parse('2026-07-15T01:00:06Z'),
+        inputTokens: 21,
+        outputTokens: 5,
+        cacheReadTokens: 8,
+        model: 'gpt-test',
+        source: 'codex:token_count:total_token_usage',
+      }),
+    ]);
+  });
+
+  it('allocates Codex cumulative token deltas to their real dates and ignores duplicate counters', async () => {
+    const dir = await makeTempDir('vesti-codex-token-dates-');
+    const file = path.join(dir, 'rollout-33333333-3333-3333-3333-333333333333.jsonl');
+    const rows = [
+      { timestamp: '2026-07-01T01:00:00Z', type: 'session_meta', payload: { id: 'codex-token-dates', cwd: 'C:/work/demo' } },
+      { timestamp: '2026-07-01T01:00:01Z', type: 'turn_context', payload: { model: 'gpt-test' } },
+      { timestamp: '2026-07-01T01:10:00Z', type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 100, cached_input_tokens: 20, output_tokens: 10, reasoning_output_tokens: 2 }, last_token_usage: { input_tokens: 100, cached_input_tokens: 20, output_tokens: 10, reasoning_output_tokens: 2 } } } },
+      // Codex can re-emit an unchanged total (and last usage) on a later day.
+      { timestamp: '2026-07-02T09:00:00Z', type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 100, cached_input_tokens: 20, output_tokens: 10, reasoning_output_tokens: 2 }, last_token_usage: { input_tokens: 100, cached_input_tokens: 20, output_tokens: 10, reasoning_output_tokens: 2 } } } },
+      { timestamp: '2026-07-03T12:00:00Z', type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 160, cached_input_tokens: 30, output_tokens: 18, reasoning_output_tokens: 5 }, last_token_usage: { input_tokens: 60, cached_input_tokens: 10, output_tokens: 8, reasoning_output_tokens: 3 } } } },
+    ];
+    await fs.writeFile(file, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`);
+
+    const session = await new CodexParser().parseFile(file);
+
+    expect(session.tokenUsage).toMatchObject({
+      totalInputTokens: 160,
+      totalOutputTokens: 18,
+      totalCacheReadTokens: 30,
+    });
+    expect(session.tokenUsageEvents?.map(event => ({
+      timestamp: event.timestamp,
+      input: event.inputTokens,
+      output: event.outputTokens,
+      cacheRead: event.cacheReadTokens,
+      reasoning: event.reasoningTokens,
+    }))).toEqual([
+      { timestamp: Date.parse('2026-07-01T01:10:00Z'), input: 100, output: 10, cacheRead: 20, reasoning: 2 },
+      { timestamp: Date.parse('2026-07-03T12:00:00Z'), input: 60, output: 8, cacheRead: 10, reasoning: 3 },
+    ]);
+    expect(session.tokenUsageEvents?.reduce((sum, event) => sum + event.inputTokens, 0)).toBe(session.tokenUsage.totalInputTokens);
+    expect(session.tokenUsageEvents?.reduce((sum, event) => sum + event.outputTokens, 0)).toBe(session.tokenUsage.totalOutputTokens);
+  });
+
+  it('starts a new Codex token segment when a cumulative counter resets', async () => {
+    const dir = await makeTempDir('vesti-codex-token-reset-');
+    const file = path.join(dir, 'rollout-44444444-4444-4444-4444-444444444444.jsonl');
+    const rows = [
+      { timestamp: '2026-07-01T00:00:00Z', type: 'session_meta', payload: { id: 'codex-token-reset' } },
+      { timestamp: '2026-07-01T01:00:00Z', type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 100, cached_input_tokens: 20, output_tokens: 10 } } } },
+      { timestamp: '2026-07-02T01:00:00Z', type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 25, cached_input_tokens: 5, output_tokens: 3 } } } },
+      { timestamp: '2026-07-03T01:00:00Z', type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 40, cached_input_tokens: 8, output_tokens: 5 } } } },
+    ];
+    await fs.writeFile(file, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`);
+
+    const session = await new CodexParser().parseFile(file);
+
+    expect(session.tokenUsageEvents?.map(event => [event.inputTokens, event.outputTokens, event.cacheReadTokens])).toEqual([
+      [100, 10, 20],
+      [25, 3, 5],
+      [15, 2, 3],
+    ]);
+    expect(session.tokenUsage).toMatchObject({
+      totalInputTokens: 140,
+      totalOutputTokens: 15,
+      totalCacheReadTokens: 28,
+    });
+  });
+
+  it('preserves omitted Codex cumulative fields instead of treating them as zero', async () => {
+    const dir = await makeTempDir('vesti-codex-token-missing-fields-');
+    const file = path.join(dir, 'rollout-66666666-6666-6666-6666-666666666666.jsonl');
+    const rows = [
+      { timestamp: '2026-07-01T00:00:00Z', type: 'session_meta', payload: { id: 'codex-token-missing-fields' } },
+      { timestamp: '2026-07-01T01:00:00Z', type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 100, cached_input_tokens: 20, output_tokens: 10, reasoning_output_tokens: 5 } } } },
+      { timestamp: '2026-07-02T01:00:00Z', type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 160, output_tokens: 18 } } } },
+      { timestamp: '2026-07-03T01:00:00Z', type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 200, cached_input_tokens: 25, output_tokens: 20, reasoning_output_tokens: 7 } } } },
+    ];
+    await fs.writeFile(file, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`);
+
+    const session = await new CodexParser().parseFile(file);
+
+    expect(session.tokenUsageEvents?.map(event => [event.inputTokens, event.outputTokens, event.cacheReadTokens, event.reasoningTokens ?? 0])).toEqual([
+      [100, 10, 20, 5],
+      [60, 8, 0, 0],
+      [40, 2, 5, 2],
+    ]);
+    expect(session.tokenUsage).toMatchObject({ totalInputTokens: 200, totalOutputTokens: 20, totalCacheReadTokens: 25 });
+  });
+
+  it('resets Codex cumulative fields independently', async () => {
+    const dir = await makeTempDir('vesti-codex-token-field-reset-');
+    const file = path.join(dir, 'rollout-77777777-7777-7777-7777-777777777777.jsonl');
+    const rows = [
+      { timestamp: '2026-07-01T00:00:00Z', type: 'session_meta', payload: { id: 'codex-token-field-reset' } },
+      { timestamp: '2026-07-01T01:00:00Z', type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 100, cached_input_tokens: 20, output_tokens: 10, reasoning_output_tokens: 5 } } } },
+      { timestamp: '2026-07-02T01:00:00Z', type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 130, cached_input_tokens: 25, output_tokens: 2, reasoning_output_tokens: 7 } } } },
+      { timestamp: '2026-07-03T01:00:00Z', type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 150, cached_input_tokens: 28, output_tokens: 5, reasoning_output_tokens: 8 } } } },
+    ];
+    await fs.writeFile(file, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`);
+
+    const session = await new CodexParser().parseFile(file);
+
+    expect(session.tokenUsageEvents?.map(event => [event.inputTokens, event.outputTokens, event.cacheReadTokens, event.reasoningTokens ?? 0])).toEqual([
+      [100, 10, 20, 5],
+      [30, 2, 5, 2],
+      [20, 3, 3, 1],
+    ]);
+    expect(session.tokenUsage).toMatchObject({ totalInputTokens: 150, totalOutputTokens: 15, totalCacheReadTokens: 28 });
+  });
+
+  it('keeps Codex token event IDs stable when unrelated rows are inserted', async () => {
+    const dir = await makeTempDir('vesti-codex-token-event-ids-');
+    const file = path.join(dir, 'rollout-88888888-8888-8888-8888-888888888888.jsonl');
+    const tokenRows = [
+      { timestamp: '2026-07-01T00:00:00Z', type: 'session_meta', payload: { id: 'codex-token-event-ids' } },
+      { timestamp: '2026-07-01T01:00:00Z', type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 100, output_tokens: 10 } } } },
+      { timestamp: '2026-07-01T01:00:01Z', type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 100, output_tokens: 10 } } } },
+      { timestamp: '2026-07-02T01:00:00Z', type: 'event_msg', payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 140, output_tokens: 15 } } } },
+    ];
+    await fs.writeFile(file, `${tokenRows.map(row => JSON.stringify(row)).join('\n')}\n`);
+    const before = await new CodexParser().parseFile(file);
+
+    const withInsertedRow = [
+      tokenRows[0],
+      { timestamp: '2026-07-01T00:30:00Z', type: 'event_msg', payload: { type: 'agent_message', message: 'unrelated' } },
+      ...tokenRows.slice(1),
+    ];
+    await fs.writeFile(file, `${withInsertedRow.map(row => JSON.stringify(row)).join('\n')}\n`);
+    const after = await new CodexParser().parseFile(file);
+
+    expect(after.tokenUsageEvents).toHaveLength(2);
+    expect(after.tokenUsageEvents?.map(event => event.id)).toEqual(before.tokenUsageEvents?.map(event => event.id));
+    expect(after.tokenUsageEvents?.map(event => (event as typeof event & { sourceScope: string }).sourceScope)).toEqual([
+      'codex:rollout-88888888-8888-8888-8888-888888888888',
+      'codex:rollout-88888888-8888-8888-8888-888888888888',
+    ]);
+  });
+
+  it('gives replayed Codex fork history the same semantic transition keys', async () => {
+    const dir = await makeTempDir('vesti-codex-token-fork-dedupe-');
+    const mainFile = path.join(dir, 'rollout-main.jsonl');
+    const forkFile = path.join(dir, 'rollout-fork.jsonl');
+    const usage = (input: number, output: number) => ({
+      type: 'token_count',
+      info: { total_token_usage: { input_tokens: input, output_tokens: output } },
+    });
+    const mainRows = [
+      { timestamp: '2026-07-01T00:00:00Z', type: 'session_meta', payload: { id: 'logical-session', session_id: 'logical-session' } },
+      { timestamp: '2026-07-01T01:00:00Z', type: 'event_msg', payload: usage(100, 10) },
+      { timestamp: '2026-07-02T01:00:00Z', type: 'event_msg', payload: usage(150, 15) },
+    ];
+    const forkRows = [
+      { timestamp: '2026-07-03T00:00:00Z', type: 'session_meta', payload: { id: 'child-rollout', session_id: 'logical-session' } },
+      // The fork replays the main rollout's history with later timestamps.
+      { timestamp: '2026-07-03T01:00:00Z', type: 'event_msg', payload: usage(100, 10) },
+      { timestamp: '2026-07-03T01:00:01Z', type: 'event_msg', payload: usage(150, 15) },
+      // This transition exists only in the child and must remain countable.
+      { timestamp: '2026-07-03T01:00:02Z', type: 'event_msg', payload: usage(180, 19) },
+    ];
+    await fs.writeFile(mainFile, `${mainRows.map(row => JSON.stringify(row)).join('\n')}\n`);
+    await fs.writeFile(forkFile, `${forkRows.map(row => JSON.stringify(row)).join('\n')}\n`);
+
+    const parser = new CodexParser();
+    const main = await parser.parseFile(mainFile);
+    const fork = await parser.parseFile(forkFile);
+
+    expect(fork.tokenUsageEvents?.slice(0, 2).map(event => event.dedupeKey))
+      .toEqual(main.tokenUsageEvents?.map(event => event.dedupeKey));
+    expect(fork.tokenUsageEvents?.[2].dedupeKey)
+      .not.toBe(main.tokenUsageEvents?.[1].dedupeKey);
+    expect(fork.tokenUsageEvents?.map(event => event.inputTokens)).toEqual([100, 50, 30]);
+  });
+
+  it('uses Codex last_token_usage only when cumulative totals are unavailable', async () => {
+    const dir = await makeTempDir('vesti-codex-last-token-');
+    const file = path.join(dir, 'rollout-55555555-5555-5555-5555-555555555555.jsonl');
+    const rows = [
+      { timestamp: '2026-07-01T00:00:00Z', type: 'session_meta', payload: { id: 'codex-last-token' } },
+      { timestamp: '2026-07-01T01:00:00Z', type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 30, cached_input_tokens: 5, output_tokens: 4 } } } },
+      { timestamp: '2026-07-02T01:00:00Z', type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: 40, cached_input_tokens: 6, output_tokens: 5 } } } },
+    ];
+    await fs.writeFile(file, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`);
+
+    const session = await new CodexParser().parseFile(file);
+
+    expect(session.tokenUsage).toMatchObject({ totalInputTokens: 70, totalOutputTokens: 9, totalCacheReadTokens: 11 });
+    expect(session.tokenUsageEvents?.map(event => event.source)).toEqual([
+      'codex:token_count:last_token_usage',
+      'codex:token_count:last_token_usage',
+    ]);
   });
 
   it('strips environment_context from Codex titles but keeps the message record', async () => {
@@ -202,6 +395,36 @@ describe('capture adapters', () => {
     expect(session.toolExecutions[0]).toMatchObject({ toolName: 'Shell', outputSummary: 'README.md' });
   });
 
+  it('keeps timestamps for legacy Kimi main and subagent token updates', () => {
+    const day1 = Date.parse('2026-07-01T10:00:00Z');
+    const day2 = Date.parse('2026-07-02T11:00:00Z');
+    const wire = [
+      { timestamp: day1 / 1000, message: { type: 'StatusUpdate', payload: { token_usage: { input_other: 50, input_cache_read: 10, input_cache_creation: 2, output: 7 } } } },
+      { timestamp: day2 / 1000, message: { type: 'SubagentEvent', payload: { task_tool_call_id: 'sub-task-1', event: { type: 'StatusUpdate', payload: { token_usage: { input_other: 30, input_cache_read: 5, input_cache_creation: 1, output: 4 } } } } } },
+    ];
+
+    const session = new KimiCodeParser().parseWireContent(
+      `${wire.map(row => JSON.stringify(row)).join('\n')}\n`,
+      { sessionId: 'kimi-legacy-usage', projectPath: 'C:/work/demo' },
+    );
+
+    expect(session.tokenUsage).toMatchObject({
+      totalInputTokens: 98,
+      totalOutputTokens: 11,
+      totalCacheCreationTokens: 3,
+      totalCacheReadTokens: 15,
+    });
+    expect(session.tokenUsageEvents?.map(event => ({
+      timestamp: event.timestamp,
+      input: event.inputTokens,
+      output: event.outputTokens,
+      source: event.source,
+    }))).toEqual([
+      { timestamp: day1, input: 62, output: 7, source: 'kimi-code:StatusUpdate' },
+      { timestamp: day2, input: 36, output: 4, source: 'kimi-code:SubagentEvent.StatusUpdate' },
+    ]);
+  });
+
   it('parses Kimi Code protocol 1.4 wire events (desensitized from real wire.jsonl)', async () => {
     // Structure mirrors real protocol-1.4 events; all text is synthetic.
     const wire = [
@@ -251,11 +474,96 @@ describe('capture adapters', () => {
       totalOutputTokens: 20,
       totalCacheReadTokens: 40,
     });
+    expect(session.tokenUsageEvents).toEqual([
+      expect.objectContaining({
+        timestamp: 1_784_370_960_802,
+        inputTokens: 140,
+        outputTokens: 20,
+        cacheReadTokens: 40,
+        model: 'kimi-code/k3',
+        source: 'kimi-code:usage.record',
+      }),
+    ]);
+    expect(session.tokenUsageEvents?.some(event => event.source === 'kimi-code:step.end')).toBe(false);
     expect(session.warnings).toBeUndefined();
     expect(session.meta?.protocol_version).toBe('1.4');
 
     const converted = MessageConverter.convertV2(session);
     expect(converted.session.title).toBe('整理一下这个仓库的结构');
+  });
+
+  it('deduplicates Kimi usage per turn while retaining a later step.end-only turn', () => {
+    const wire = [
+      { type: 'metadata', protocol_version: '1.4', created_at: 1_783_000_000_000 },
+      { type: 'llm.request', modelAlias: 'kimi-code/k3', time: 1_783_000_000_100 },
+      { type: 'context.append_loop_event', event: { type: 'step.end', uuid: 'step-day-1', usage: { inputOther: 80, inputCacheRead: 20, inputCacheCreation: 5, output: 10 } }, time: Date.parse('2026-07-01T10:00:00Z') },
+      { type: 'usage.record', model: 'kimi-code/k3', usage: { inputOther: 80, inputCacheRead: 20, inputCacheCreation: 5, output: 10 }, usageScope: 'turn', time: Date.parse('2026-07-01T10:00:00Z') + 1 },
+      { type: 'context.append_loop_event', event: { type: 'step.end', uuid: 'step-day-2', usage: { inputOther: 40, inputCacheRead: 10, inputCacheCreation: 0, output: 6 } }, time: Date.parse('2026-07-02T11:00:00Z') },
+    ];
+
+    const session = new KimiCodeParser().parseWireContent(
+      `${wire.map(row => JSON.stringify(row)).join('\n')}\n`,
+      { sessionId: 'kimi-step-fallback', projectPath: 'C:/work/demo', agentName: 'main' },
+    );
+
+    expect(session.tokenUsage).toMatchObject({
+      totalInputTokens: 155,
+      totalOutputTokens: 16,
+      totalCacheCreationTokens: 5,
+      totalCacheReadTokens: 30,
+    });
+    expect(session.tokenUsageEvents?.map(event => ({
+      timestamp: event.timestamp,
+      input: event.inputTokens,
+      output: event.outputTokens,
+      source: event.source,
+    }))).toEqual([
+      { timestamp: Date.parse('2026-07-01T10:00:00Z') + 1, input: 105, output: 10, source: 'kimi-code:usage.record' },
+      { timestamp: Date.parse('2026-07-02T11:00:00Z'), input: 50, output: 6, source: 'kimi-code:step.end' },
+    ]);
+  });
+
+  it('pairs adjacent Kimi usage deterministically across midnight and repeated equal calls', () => {
+    const firstStepTime = Date.parse('2026-07-01T23:59:00Z');
+    const firstRecordTime = Date.parse('2026-07-02T00:01:00Z');
+    const secondStepTime = Date.parse('2026-07-02T00:02:00Z');
+    const secondRecordTime = Date.parse('2026-07-02T00:02:01Z');
+    const usage = { inputOther: 70, inputCacheRead: 20, inputCacheCreation: 5, output: 9 };
+    const wire = [
+      { type: 'metadata', protocol_version: '1.4', created_at: firstStepTime - 1 },
+      { type: 'context.append_loop_event', event: { type: 'step.end', uuid: 'step-a', turnId: 'turn-a', step: 1, usage }, time: firstStepTime },
+      // Unrelated lines do not break adjacency in the token-bearing stream.
+      { type: 'config.update', profileName: 'agent', time: firstStepTime + 1 },
+      { type: 'usage.record', turnId: 'turn-a', step: 1, model: 'kimi-code/k3', usage, usageScope: 'turn', time: firstRecordTime },
+      { type: 'context.append_loop_event', event: { type: 'step.end', uuid: 'step-b', turnId: 'turn-b', step: 1, usage }, time: secondStepTime },
+      { type: 'tools.update_store', time: secondStepTime + 1 },
+      { type: 'usage.record', turnId: 'turn-b', step: 1, model: 'kimi-code/k3', usage, usageScope: 'turn', time: secondRecordTime },
+    ];
+    const parse = (rows: unknown[]) => new KimiCodeParser().parseWireContent(
+      `${rows.map(row => JSON.stringify(row)).join('\n')}\n`,
+      { sessionId: 'kimi-adjacent-usage', projectPath: 'C:/work/demo', agentName: 'main' },
+    );
+
+    const session = parse(wire);
+    expect(session.tokenUsage).toMatchObject({
+      totalInputTokens: 190,
+      totalOutputTokens: 18,
+      totalCacheCreationTokens: 10,
+      totalCacheReadTokens: 40,
+    });
+    expect(session.tokenUsageEvents?.map(event => ({
+      timestamp: event.timestamp,
+      source: event.source,
+    }))).toEqual([
+      { timestamp: firstRecordTime, source: 'kimi-code:usage.record' },
+      { timestamp: secondRecordTime, source: 'kimi-code:usage.record' },
+    ]);
+    expect(new Set(session.tokenUsageEvents?.map(event => event.id)).size).toBe(2);
+
+    const withInsertedUnrelatedLine = [...wire];
+    withInsertedUnrelatedLine.splice(1, 0, { type: 'permission.set_mode', mode: 'ask', time: firstStepTime - 1 });
+    expect(parse(withInsertedUnrelatedLine).tokenUsageEvents?.map(event => event.id))
+      .toEqual(session.tokenUsageEvents?.map(event => event.id));
   });
 
   it('warns instead of failing silently on unrecognized Kimi wire protocols', async () => {

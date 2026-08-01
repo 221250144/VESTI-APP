@@ -102,6 +102,12 @@ export class ProjectMemoryService {
     this.scanTimer.unref?.();
   }
 
+  /** Cancel a scheduled maintenance pass when product access is locked. */
+  stop(): void {
+    if (this.scanTimer) clearTimeout(this.scanTimer);
+    this.scanTimer = null;
+  }
+
   /** One full pass; re-entrant calls share the in-flight scan. */
   async runOnce(): Promise<void> {
     if (this.scanning) return this.scanning;

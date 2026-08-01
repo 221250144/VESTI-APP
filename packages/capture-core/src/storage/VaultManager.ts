@@ -6,12 +6,28 @@
 
 import fs from 'fs-extra';
 import path from 'path';
+import { createHash, randomUUID } from 'node:crypto';
 import { createGzip, createGunzip } from 'zlib';
 import { pipeline } from 'stream/promises';
 import { createReadStream, createWriteStream } from 'fs';
+import { open } from 'node:fs/promises';
+
+interface BackupRequest {
+  filePath: string;
+  platform: string;
+  sessionId?: string;
+  host?: string;
+}
 
 export class VaultManager {
   private vaultPath: string;
+  /**
+   * Raw-session compression is deliberately serialized. Several watched
+   * rollout files can change together (and Codex forks can even resolve to
+   * the same logical session), so running levelled gzip streams in parallel
+   * used to starve the capture path.
+   */
+  private backupTail: Promise<void> = Promise.resolve();
 
   constructor(vaultPath: string) {
     this.vaultPath = vaultPath;
@@ -27,30 +43,92 @@ export class VaultManager {
    * distros (or from the native host) never overwrite each other.
    */
   async backup(filePath: string, platform: string, sessionId?: string, host?: string): Promise<string> {
-    const platformDir = host && host !== 'native'
-      ? path.join(this.vaultPath, platform, 'raw', host.replace(':', '-'))
-      : path.join(this.vaultPath, platform, 'raw');
-    await fs.ensureDir(platformDir);
+    const request: BackupRequest = { filePath, platform, sessionId, host };
+    // Chaining both the fulfilled and rejected branches means one failed
+    // archive never poisons the global queue.
+    const task = this.backupTail.then(
+      () => this.performBackup(request),
+      () => this.performBackup(request),
+    );
+    this.backupTail = task.then(() => undefined, () => undefined);
+    return task;
+  }
 
-    const basename = sessionId ? `${sessionId}.jsonl` : path.basename(filePath);
-    const destPath = path.join(platformDir, `${basename}.gz`);
+  /** Resolve after all backups queued so far have completed. */
+  async waitForIdle(): Promise<void> {
+    await this.backupTail;
+  }
 
-    // Skip if already backed up and source hasn't changed
-    if (await fs.pathExists(destPath)) {
-      const srcStat = await fs.stat(filePath);
-      const dstStat = await fs.stat(destPath);
-      if (dstStat.mtimeMs >= srcStat.mtimeMs) {
-        return destPath;
-      }
+  private destinationPath(request: BackupRequest): string {
+    const platformDir = request.host && request.host !== 'native'
+      ? path.join(this.vaultPath, request.platform, 'raw', request.host.replace(/[:\\/]/g, '-'))
+      : path.join(this.vaultPath, request.platform, 'raw');
+    const sourcePath = path.resolve(request.filePath);
+    const normalizedSource = process.platform === 'win32' ? sourcePath.toLowerCase() : sourcePath;
+    const sourceHash = createHash('sha256').update(normalizedSource).digest('hex').slice(0, 12);
+    const fallback = path.basename(request.filePath).replace(/\.jsonl$/i, '');
+    const label = (request.sessionId || fallback || 'session')
+      .replace(/[^a-zA-Z0-9._-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 100) || 'session';
+    return path.join(platformDir, `${label}-${sourceHash}.jsonl.gz`);
+  }
+
+  private async isCurrentSnapshot(
+    filePath: string,
+    destPath: string,
+    sourceSnapshot?: { mtimeMs: number; size: number },
+  ): Promise<boolean> {
+    if (!await fs.pathExists(destPath)) return false;
+    const [source, destination] = await Promise.all([
+      sourceSnapshot ?? fs.stat(filePath),
+      fs.stat(destPath),
+    ]);
+    if (destination.size < 4 || destination.mtimeMs < source.mtimeMs) return false;
+
+    // The final four bytes of a gzip member contain the uncompressed size
+    // modulo 2^32. Comparing it as well as mtime avoids missing an append on
+    // filesystems whose timestamp resolution is coarser than the watcher.
+    const trailer = Buffer.allocUnsafe(4);
+    const handle = await open(destPath, 'r');
+    try {
+      const { bytesRead } = await handle.read(trailer, 0, trailer.length, destination.size - trailer.length);
+      return bytesRead === trailer.length
+        && trailer.readUInt32LE(0) === source.size % 0x1_0000_0000;
+    } finally {
+      await handle.close();
     }
+  }
 
-    // Compress and copy
-    const gzip = createGzip({ level: 9 });
-    const source = createReadStream(filePath);
-    const dest = createWriteStream(destPath);
-    await pipeline(source, gzip, dest);
+  private async performBackup(request: BackupRequest): Promise<string> {
+    const destPath = this.destinationPath(request);
+    await fs.ensureDir(path.dirname(destPath));
 
-    return destPath;
+    // Capture size and mtime once. The explicit read-stream end prevents a
+    // continuously appended JSONL from extending this compression forever.
+    const snapshot = await fs.stat(request.filePath);
+    if (snapshot.size === 0) return destPath;
+    if (await this.isCurrentSnapshot(request.filePath, destPath, snapshot)) return destPath;
+
+    const tempPath = `${destPath}.${process.pid}-${randomUUID()}.tmp`;
+    try {
+      await pipeline(
+        createReadStream(request.filePath, { start: 0, end: snapshot.size - 1 }),
+        // Fast compression keeps archival work from competing with capture.
+        createGzip({ level: 3 }),
+        createWriteStream(tempPath, { flags: 'wx' }),
+      );
+      // Stamp the bounded snapshot's source time before the atomic rename.
+      // If the source grew while gzip was running, its newer mtime will force
+      // a follow-up backup instead of treating this older snapshot as current.
+      await fs.utimes(tempPath, snapshot.atime, snapshot.mtime);
+      await fs.rename(tempPath, destPath);
+      return destPath;
+    } finally {
+      // rename removes the temp path on success; on any failure it must not
+      // linger and must never replace the last known-good archive.
+      await fs.remove(tempPath).catch(() => undefined);
+    }
   }
 
   /**
@@ -61,16 +139,11 @@ export class VaultManager {
 
     for (const file of files) {
       try {
-        const platformDir = path.join(this.vaultPath, platform, 'raw');
-        const destPath = path.join(platformDir, `${path.basename(file)}.gz`);
-
-        if (await fs.pathExists(destPath)) {
-          const srcStat = await fs.stat(file);
-          const dstStat = await fs.stat(destPath);
-          if (dstStat.mtimeMs >= srcStat.mtimeMs) {
-            skipped++;
-            continue;
-          }
+        const request: BackupRequest = { filePath: file, platform };
+        const destPath = this.destinationPath(request);
+        if (await this.isCurrentSnapshot(file, destPath)) {
+          skipped++;
+          continue;
         }
 
         await this.backup(file, platform);

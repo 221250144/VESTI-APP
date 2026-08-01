@@ -67,6 +67,91 @@ function recomputeTopicCounts(
   return currentTopics.map(withCounts);
 }
 
+type LibraryDataStateSetters = {
+  setTopics: (value: Topic[]) => void;
+  setConversations: (value: Conversation[]) => void;
+  setDigestByConversationId: (
+    value: Map<number, ConversationDigest>
+  ) => void;
+  setConversationTree: (value: ConversationTree | null) => void;
+  setProjectStateByKey: (value: Map<string, ProjectStateView>) => void;
+};
+
+/**
+ * Refreshes the library without letting optional desktop-memory APIs block the
+ * core conversation list. Kept as a small state adapter so the failure mode is
+ * covered without needing a browser renderer in unit tests.
+ */
+export async function refreshLibraryDataState(
+  storage: StorageApi,
+  setters: LibraryDataStateSetters
+): Promise<void> {
+  const coreLoad = (async () => {
+    const [topicResult, conversationResult] = await Promise.allSettled([
+      storage.getTopics(),
+      storage.getConversations(),
+    ]);
+
+    if (topicResult.status === "fulfilled") {
+      setters.setTopics(topicResult.value);
+    } else {
+      console.error("[library] Failed to load topics", topicResult.reason);
+    }
+    if (conversationResult.status === "fulfilled") {
+      setters.setConversations(conversationResult.value);
+    } else {
+      console.error(
+        "[library] Failed to load conversations",
+        conversationResult.reason
+      );
+    }
+  })();
+
+  const auxiliaryLoad = (async () => {
+    const [digestResult, treeResult, projectStatesResult] =
+      await Promise.allSettled([
+        storage.getConversationDigests?.() ?? Promise.resolve([]),
+        storage.getConversationTree?.() ?? Promise.resolve(null),
+        storage.getProjectStates?.() ?? Promise.resolve([]),
+      ]);
+
+    if (digestResult.status === "fulfilled") {
+      setters.setDigestByConversationId(
+        new Map(
+          digestResult.value.map((digest) => [digest.conversationId, digest])
+        )
+      );
+    } else {
+      console.error(
+        "[library] Failed to load conversation digests",
+        digestResult.reason
+      );
+    }
+    if (treeResult.status === "fulfilled") {
+      setters.setConversationTree(treeResult.value);
+    } else {
+      console.error(
+        "[library] Failed to load conversation tree",
+        treeResult.reason
+      );
+    }
+    if (projectStatesResult.status === "fulfilled") {
+      setters.setProjectStateByKey(
+        new Map(
+          projectStatesResult.value.map((state) => [state.projectKey, state])
+        )
+      );
+    } else {
+      console.error(
+        "[library] Failed to load project states",
+        projectStatesResult.reason
+      );
+    }
+  })();
+
+  await Promise.all([coreLoad, auxiliaryLoad]);
+}
+
 export function LibraryDataProvider({
   storage,
   children,
@@ -86,27 +171,13 @@ export function LibraryDataProvider({
   >(new Map());
 
   const refresh = useCallback(async () => {
-    try {
-      const [topicData, conversationData, digestData, treeData, projectStates] =
-        await Promise.all([
-          storage.getTopics(),
-          storage.getConversations(),
-          storage.getConversationDigests?.() ?? Promise.resolve([]),
-          storage.getConversationTree?.() ?? Promise.resolve(null),
-          storage.getProjectStates?.() ?? Promise.resolve([]),
-        ]);
-      setTopics(topicData);
-      setConversations(conversationData);
-      setDigestByConversationId(
-        new Map(digestData.map((digest) => [digest.conversationId, digest]))
-      );
-      setConversationTree(treeData);
-      setProjectStateByKey(
-        new Map(projectStates.map((state) => [state.projectKey, state]))
-      );
-    } catch (error) {
-      console.error("[dashboard] Failed to load library data", error);
-    }
+    await refreshLibraryDataState(storage, {
+      setTopics,
+      setConversations,
+      setDigestByConversationId,
+      setConversationTree,
+      setProjectStateByKey,
+    });
   }, [storage]);
 
   // Event-driven refresh scheduler. Data-update events arrive in storms

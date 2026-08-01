@@ -9,6 +9,7 @@ import path from 'path';
 import type {
   ParsedMessage,
   ParsedSession,
+  ParsedTokenUsageEvent,
   SessionTokenUsage,
   ToolCallBlock,
   ToolResultBlock,
@@ -30,6 +31,13 @@ interface ActiveTool {
   timestamp: number;
 }
 
+interface CodexTokenSnapshot {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  reasoning?: number;
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -47,6 +55,59 @@ function asTimestamp(value: unknown, fallback = 0): number {
     if (Number.isFinite(parsed)) return parsed;
   }
   return fallback;
+}
+
+function tokenValue(record: Record<string, unknown>, key: string): number | undefined {
+  if (!Object.prototype.hasOwnProperty.call(record, key) || record[key] === undefined) {
+    return undefined;
+  }
+  const value = Number(record[key]);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function tokenSnapshot(value: unknown): CodexTokenSnapshot | undefined {
+  const record = asRecord(value);
+  const snapshot: CodexTokenSnapshot = {
+    input: tokenValue(record, 'input_tokens'),
+    output: tokenValue(record, 'output_tokens'),
+    cacheRead: tokenValue(record, 'cached_input_tokens'),
+    reasoning: tokenValue(record, 'reasoning_output_tokens'),
+  };
+  return Object.values(snapshot).some(value => value !== undefined) ? snapshot : undefined;
+}
+
+function tokenSnapshotFingerprint(snapshot?: CodexTokenSnapshot): string {
+  return [snapshot?.input, snapshot?.output, snapshot?.cacheRead, snapshot?.reasoning]
+    .map(value => value === undefined ? 'missing' : String(value))
+    .join('-');
+}
+
+function tokenDelta(current: CodexTokenSnapshot, previous?: CodexTokenSnapshot): CodexTokenSnapshot {
+  const delta: CodexTokenSnapshot = {};
+  for (const field of ['input', 'output', 'cacheRead', 'reasoning'] as const) {
+    const currentValue = current[field];
+    if (currentValue === undefined) continue;
+    const previousValue = previous?.[field];
+    // Counters are independent: one field can be omitted or reset while the
+    // remaining fields continue monotonically. A newly observed/reset field
+    // begins its own cumulative segment at the reported value.
+    delta[field] = previousValue === undefined || currentValue < previousValue
+      ? currentValue
+      : currentValue - previousValue;
+  }
+  return delta;
+}
+
+function mergeTokenSnapshot(
+  previous: CodexTokenSnapshot | undefined,
+  current: CodexTokenSnapshot,
+): CodexTokenSnapshot {
+  return {
+    input: current.input ?? previous?.input,
+    output: current.output ?? previous?.output,
+    cacheRead: current.cacheRead ?? previous?.cacheRead,
+    reasoning: current.reasoning ?? previous?.reasoning,
+  };
 }
 
 function jsonish(value: unknown): unknown {
@@ -123,6 +184,22 @@ export class CodexParser {
       totalCacheReadTokens: 0,
       models: new Set<string>(),
     };
+    const tokenUsageEvents: ParsedTokenUsageEvent[] = [];
+    const rolloutScope = path.basename(filePath, path.extname(filePath));
+    const sourceScope = `codex:${rolloutScope}`;
+    const tokenEventOccurrences = new Map<string, number>();
+    const tokenDedupeOccurrences = new Map<string, number>();
+    const tokenEventId = (kind: string, timestamp: number, snapshot: CodexTokenSnapshot): string => {
+      const key = `${kind}-${timestamp}-${tokenSnapshotFingerprint(snapshot)}`;
+      const occurrence = tokenEventOccurrences.get(key) ?? 0;
+      tokenEventOccurrences.set(key, occurrence + 1);
+      return `codex-${sessionId}-${rolloutScope}-token-${key}-${occurrence}`;
+    };
+    const hasCumulativeTokenRows = rows.some(row => {
+      if (row.type !== 'event_msg' || row.payload?.type !== 'token_count') return false;
+      return tokenSnapshot(asRecord(row.payload.info).total_token_usage) !== undefined;
+    });
+    let previousCumulativeTokens: CodexTokenSnapshot | undefined;
     const contextCompactions: Array<{ sequence: number; compactedAt: number; summary?: string }> = [];
 
     let index = 0;
@@ -267,10 +344,58 @@ export class CodexParser {
         const eventType = String(payload.type ?? '');
         if (eventType === 'token_count') {
           const info = asRecord(payload.info);
-          const totals = asRecord(info.total_token_usage);
-          tokenUsage.totalInputTokens = Number(totals.input_tokens ?? 0) || 0;
-          tokenUsage.totalOutputTokens = Number(totals.output_tokens ?? 0) || 0;
-          tokenUsage.totalCacheReadTokens = Number(totals.cached_input_tokens ?? 0) || 0;
+          const cumulative = tokenSnapshot(info.total_token_usage);
+          // total_token_usage is authoritative. Codex may emit the exact same
+          // token_count row repeatedly, so last_token_usage cannot be summed
+          // when a cumulative counter is available.
+          if (cumulative) {
+            const delta = tokenDelta(cumulative, previousCumulativeTokens);
+            const mergedCumulative = mergeTokenSnapshot(previousCumulativeTokens, cumulative);
+            if (delta.input || delta.output || delta.cacheRead || delta.reasoning) {
+              // Forked Codex rollouts replay the complete cumulative history.
+              // Keep a physical event id for source replacement, but give the
+              // same logical before->after transition the same analytics key.
+              const transition = `codex:cumulative:${tokenSnapshotFingerprint(previousCumulativeTokens)}->${tokenSnapshotFingerprint(mergedCumulative)}`;
+              const transitionOccurrence = tokenDedupeOccurrences.get(transition) ?? 0;
+              tokenDedupeOccurrences.set(transition, transitionOccurrence + 1);
+              const event: ParsedTokenUsageEvent & { sourceScope: string } = {
+                id: tokenEventId('cumulative', asTimestamp(row.timestamp, 0), cumulative),
+                dedupeKey: `${transition}:${transitionOccurrence}`,
+                timestamp: ts,
+                inputTokens: delta.input ?? 0,
+                outputTokens: delta.output ?? 0,
+                cacheCreationTokens: 0,
+                cacheReadTokens: delta.cacheRead ?? 0,
+                reasoningTokens: delta.reasoning || undefined,
+                model: model || undefined,
+                source: 'codex:token_count:total_token_usage',
+                sourceScope,
+              };
+              tokenUsageEvents.push(event);
+            }
+            // Missing fields mean "not reported", not zero. Preserve their
+            // last cumulative values for the next snapshot that includes them.
+            previousCumulativeTokens = mergedCumulative;
+          } else if (!hasCumulativeTokenRows) {
+            // Older rollouts can omit total_token_usage entirely. Only in that
+            // format is last_token_usage safe to use as a per-request event.
+            const last = tokenSnapshot(info.last_token_usage);
+            if (last && (last.input || last.output || last.cacheRead || last.reasoning)) {
+              const event: ParsedTokenUsageEvent & { sourceScope: string } = {
+                id: tokenEventId('last', asTimestamp(row.timestamp, 0), last),
+                timestamp: ts,
+                inputTokens: last.input ?? 0,
+                outputTokens: last.output ?? 0,
+                cacheCreationTokens: 0,
+                cacheReadTokens: last.cacheRead ?? 0,
+                reasoningTokens: last.reasoning || undefined,
+                model: model || undefined,
+                source: 'codex:token_count:last_token_usage',
+                sourceScope,
+              };
+              tokenUsageEvents.push(event);
+            }
+          }
           continue;
         }
 
@@ -334,6 +459,14 @@ export class CodexParser {
     if (!model && typeof meta.model === 'string') model = meta.model;
     if (model) tokenUsage.models.add(model);
 
+    // Derive the session total from the same non-cumulative events used by
+    // analytics. For normal monotonic counters this is exactly the final
+    // total_token_usage snapshot; it also remains correct across resets.
+    tokenUsage.totalInputTokens = tokenUsageEvents.reduce((sum, event) => sum + event.inputTokens, 0);
+    tokenUsage.totalOutputTokens = tokenUsageEvents.reduce((sum, event) => sum + event.outputTokens, 0);
+    tokenUsage.totalCacheCreationTokens = tokenUsageEvents.reduce((sum, event) => sum + event.cacheCreationTokens, 0);
+    tokenUsage.totalCacheReadTokens = tokenUsageEvents.reduce((sum, event) => sum + event.cacheReadTokens, 0);
+
     return {
       sessionId,
       platform: 'codex',
@@ -345,6 +478,7 @@ export class CodexParser {
       toolExecutions,
       subagents: [],
       tokenUsage,
+      tokenUsageEvents: tokenUsageEvents.length ? tokenUsageEvents : undefined,
       startTime,
       endTime,
       contextCompactions: contextCompactions.length ? contextCompactions : undefined,
@@ -354,11 +488,10 @@ export class CodexParser {
         model_provider: meta.model_provider,
         source: meta.source,
         archived: filePath.includes(`${path.sep}archived_sessions${path.sep}`),
-        reasoning_output_tokens: (() => {
-          const tokenRow = [...rows].reverse().find(row => row.type === 'event_msg' && row.payload?.type === 'token_count');
-          const totals = asRecord(asRecord(tokenRow?.payload?.info).total_token_usage);
-          return Number(totals.reasoning_output_tokens ?? 0) || 0;
-        })(),
+        reasoning_output_tokens: tokenUsageEvents.reduce(
+          (sum, event) => sum + (event.reasoningTokens ?? 0),
+          0,
+        ),
       },
     };
   }

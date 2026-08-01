@@ -264,4 +264,179 @@ export const MIGRATIONS: Migration[] = [
       db.prepare("DELETE FROM sync_state WHERE platform = 'cursor'").run();
     },
   },
+  {
+    version: 7,
+    name: 'version_session_digest_embeddings',
+    up(db) {
+      if (!hasColumn(db, 'session_digests', 'embedding_provider')) {
+        db.exec(`ALTER TABLE session_digests ADD COLUMN embedding_provider TEXT`);
+      }
+      if (!hasColumn(db, 'session_digests', 'embedding_model')) {
+        db.exec(`ALTER TABLE session_digests ADD COLUMN embedding_model TEXT`);
+      }
+      if (!hasColumn(db, 'session_digests', 'embedding_dimensions')) {
+        db.exec(`ALTER TABLE session_digests ADD COLUMN embedding_dimensions INTEGER`);
+      }
+      if (!hasColumn(db, 'session_digests', 'embedding_version')) {
+        db.exec(`ALTER TABLE session_digests ADD COLUMN embedding_version TEXT`);
+      }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS session_digest_embeddings (
+          session_id TEXT NOT NULL,
+          provider TEXT NOT NULL,
+          model TEXT NOT NULL,
+          dimensions INTEGER NOT NULL,
+          index_version TEXT NOT NULL,
+          embedding BLOB NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (session_id, index_version),
+          FOREIGN KEY (session_id) REFERENCES session_digests(session_id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_digest_embeddings_version
+          ON session_digest_embeddings(index_version);
+      `);
+      // Preserve pre-upgrade vectors as an explicitly isolated legacy index.
+      db.exec(`
+        UPDATE session_digests
+        SET embedding_provider = COALESCE(embedding_provider, 'legacy'),
+            embedding_model = COALESCE(embedding_model, 'unknown'),
+            embedding_dimensions = COALESCE(embedding_dimensions, length(embedding) / 4),
+            embedding_version = COALESCE(
+              embedding_version,
+              'legacy:unknown:' || CAST(length(embedding) / 4 AS TEXT)
+            )
+        WHERE embedding IS NOT NULL;
+
+        INSERT OR IGNORE INTO session_digest_embeddings (
+          session_id, provider, model, dimensions, index_version, embedding, created_at
+        )
+        SELECT session_id, embedding_provider, embedding_model,
+               embedding_dimensions, embedding_version, embedding,
+               COALESCE(updated_at, datetime('now'))
+        FROM session_digests
+        WHERE embedding IS NOT NULL AND embedding_version IS NOT NULL;
+
+        -- Force the digest pipeline to regenerate embeddings with the new
+        -- gateway on its next sync. The versioned table above keeps the old
+        -- vectors available for rollback while active recall refuses to mix
+        -- them with the new index.
+        UPDATE session_digests
+        SET digest_version = 0
+        WHERE embedding IS NOT NULL;
+      `);
+    },
+  },
+  {
+    version: 8,
+    name: 'repair_memory_v2_schema_after_legacy_v4_collision',
+    up(db) {
+      // Some beta databases shipped with version 4 already occupied by the
+      // old Cursor token-rescan migration. Migration tracking is keyed by
+      // version, so those databases skipped the later Memory v2 migration
+      // that reused version 4 and were left without the columns/tables below.
+      // Keep the published v4 entry untouched and repair the schema under a
+      // new version. Every operation is deliberately idempotent so this is
+      // also harmless for databases where Memory v2 was applied correctly.
+      if (!hasColumn(db, 'work_sessions', 'forked_from')) {
+        db.exec(`ALTER TABLE work_sessions ADD COLUMN forked_from TEXT`);
+      }
+      if (!hasColumn(db, 'session_digests', 'valid_from')) {
+        db.exec(`ALTER TABLE session_digests ADD COLUMN valid_from TEXT`);
+      }
+      if (!hasColumn(db, 'session_digests', 'valid_to')) {
+        db.exec(`ALTER TABLE session_digests ADD COLUMN valid_to TEXT`);
+      }
+      if (!hasColumn(db, 'session_digests', 'superseded_by')) {
+        db.exec(`ALTER TABLE session_digests ADD COLUMN superseded_by TEXT`);
+      }
+      if (!hasColumn(db, 'session_digests', 'access_count')) {
+        db.exec(`ALTER TABLE session_digests ADD COLUMN access_count INTEGER NOT NULL DEFAULT 0`);
+      }
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS project_state (
+          project_key TEXT PRIMARY KEY,
+          one_liner TEXT,
+          active_files TEXT,
+          open_questions TEXT,
+          session_count INTEGER,
+          last_active TEXT,
+          updated_at TEXT
+        )
+      `);
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS project_briefs (
+          project_key TEXT PRIMARY KEY,
+          content_markdown TEXT,
+          version INTEGER NOT NULL DEFAULT 0,
+          last_ops TEXT,
+          updated_at TEXT
+        )
+      `);
+    },
+  },
+  {
+    version: 9,
+    name: 'add_token_usage_events_and_rescan_sources',
+    up(db) {
+      // Session totals remain the authoritative all-time counters, but they
+      // cannot describe *when* usage happened for conversations spanning
+      // multiple days. Keep each adapter's stable usage records separately so
+      // the dashboard can group them by their real timestamp. The primary key
+      // makes a full or incremental rescan idempotent.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS token_usage_events (
+          id TEXT PRIMARY KEY,
+          session_id TEXT NOT NULL,
+          dedupe_key TEXT NOT NULL,
+          source_scope TEXT NOT NULL,
+          timestamp INTEGER NOT NULL,
+          input_tokens INTEGER NOT NULL DEFAULT 0,
+          output_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+          cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+          reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+          model TEXT,
+          source TEXT NOT NULL,
+          FOREIGN KEY (session_id) REFERENCES work_sessions(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_token_usage_events_timestamp
+          ON token_usage_events(timestamp);
+        CREATE INDEX IF NOT EXISTS idx_token_usage_events_session
+          ON token_usage_events(session_id);
+        CREATE INDEX IF NOT EXISTS idx_token_usage_events_dedupe
+          ON token_usage_events(session_id, dedupe_key, timestamp);
+        CREATE INDEX IF NOT EXISTS idx_token_usage_events_source_scope
+          ON token_usage_events(source_scope);
+      `);
+
+      // Existing installations only have per-session cumulative totals.
+      // Invalidate source checkpoints once so adapters replay the original
+      // files and backfill timestamped usage events without touching sessions.
+      db.exec('DELETE FROM sync_state');
+    },
+  },
+  {
+    version: 10,
+    name: 'repair_token_usage_event_dedupe_key',
+    up(db) {
+      // A development build briefly shipped migration 9 without dedupe_key.
+      // Migration tracking prevents v9 from running twice, so repair those
+      // databases under a new version before any event INSERT or stats query.
+      if (!hasColumn(db, 'token_usage_events', 'dedupe_key')) {
+        db.exec(`
+          ALTER TABLE token_usage_events
+          ADD COLUMN dedupe_key TEXT NOT NULL DEFAULT ''
+        `);
+      }
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_token_usage_events_dedupe
+          ON token_usage_events(session_id, dedupe_key, timestamp);
+
+        -- Old rows lack semantic transition keys. Rebuild them from source
+        -- instead of displaying a transient, inflated fork total.
+        DELETE FROM token_usage_events;
+        DELETE FROM sync_state;
+      `);
+    },
+  },
 ];

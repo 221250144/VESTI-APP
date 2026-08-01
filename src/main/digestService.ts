@@ -126,6 +126,15 @@ export interface DigestAgentRunner {
 
 export interface DigestEmbedder {
   embed(texts: string[]): Promise<Float32Array[]>;
+  embedWithMetadata?(texts: string[]): Promise<{
+    vectors: Float32Array[];
+    metadata: {
+      provider: string;
+      model: string;
+      dimensions: number;
+      version: string;
+    };
+  }>;
 }
 
 function firstUserText(messages: SessionMessage[]): string {
@@ -154,6 +163,18 @@ export class DigestService {
   /** Initial backfill scan at startup. */
   start(): void {
     void this.enqueuePending().catch(() => undefined);
+  }
+
+  /** Stop pending background work when the member signs out or expires.
+   * An already-running network request is allowed to finish, but no queued
+   * session is started afterwards. */
+  stop(): void {
+    if (this.scanTimer) clearTimeout(this.scanTimer);
+    this.scanTimer = null;
+    this.queue.length = 0;
+    this.queued.clear();
+    this.retryCounts.clear();
+    this.degradedRetries.clear();
   }
 
   /** Capture-sync hook: debounced re-scan for new or grown sessions. */
@@ -317,12 +338,21 @@ export class DigestService {
     // Embed the digest text (one_liner + topics); outages mark 'skipped'.
     let embedding: Buffer | null = null;
     let embeddingStatus: SessionDigest['embeddingStatus'] = 'skipped';
+    let embeddingMetadata: {
+      provider: string;
+      model: string;
+      dimensions: number;
+      version: string;
+    } | null = null;
     try {
-      const [vector] = await this.embedding.embed([
-        [payload.one_liner, ...payload.key_topics].join('\n'),
-      ]);
+      const texts = [[payload.one_liner, ...payload.key_topics].join('\n')];
+      const result = this.embedding.embedWithMetadata
+        ? await this.embedding.embedWithMetadata(texts)
+        : { vectors: await this.embedding.embed(texts), metadata: null };
+      const [vector] = result.vectors;
       if (vector) {
         embedding = serializeVector(vector);
+        embeddingMetadata = result.metadata;
         embeddingStatus = 'ok';
       }
     } catch {
@@ -337,6 +367,10 @@ export class DigestService {
       decisions: payload.decisions,
       openQuestions: payload.open_questions,
       embedding,
+      embeddingProvider: embeddingMetadata?.provider ?? null,
+      embeddingModel: embeddingMetadata?.model ?? null,
+      embeddingDimensions: embeddingMetadata?.dimensions ?? null,
+      embeddingVersion: embeddingMetadata?.version ?? null,
       embeddingStatus,
     });
   }

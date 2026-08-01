@@ -1,8 +1,15 @@
-import type { VestiCapsuleApi, VestiDesktopApi, VestiUiPrefsApi, VestiWindowApi } from './shared/contracts';
+import type {
+  VestiCapsuleApi,
+  VestiDesktopApi,
+  VestiMembershipApi,
+  VestiUiPrefsApi,
+  VestiWindowApi,
+} from './shared/contracts';
 
 declare global {
   interface Window {
     vesti: VestiDesktopApi;
+    vestiMembership: VestiMembershipApi;
     vestiUi?: VestiUiPrefsApi;
     vestiCapsule?: VestiCapsuleApi;
     vestiWindow?: VestiWindowApi;

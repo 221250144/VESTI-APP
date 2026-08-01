@@ -20,10 +20,11 @@ import {
   PRIMARY_CAPTURE_PLATFORMS,
 } from './settingsMigration';
 
-const DEMO_BASE_URL = 'https://vesti-gate.vercel.app/api';
+export const DEMO_BASE_URL = 'https://api.ccvg1218.online/api';
+export const LEGACY_DEMO_BASE_URL = 'https://vesti-gate.vercel.app/api';
 const CUSTOM_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 const DEMO_SERVICE_TOKEN = 'vesti-kcq-default-d850d4dcd610a0e2e919eb610f42066faff1e1c57c0c047c';
-export const DEFAULT_EMBEDDING_MODEL = 'text-embedding-3-small';
+export const DEFAULT_EMBEDDING_MODEL = 'text-embedding-v1';
 
 export interface StoredBridgeClient {
   clientId: string;
@@ -82,6 +83,7 @@ interface StoredSettings {
 export interface RuntimeLlmSettings {
   mode: LlmAccessMode;
   baseUrl: string;
+  fallbackBaseUrl: string;
   modelId: string;
   temperature: number;
   maxTokens: number;
@@ -199,7 +201,7 @@ export class SettingsService {
       llm: {
         mode,
         baseUrl: mode === 'demo_proxy' ? DEMO_BASE_URL : this.settings.llm.customBaseUrl,
-        modelId: this.settings.llm.modelId,
+        modelId: mode === 'demo_proxy' ? 'qwen-plus' : this.settings.llm.modelId,
         temperature: this.settings.llm.temperature,
         maxTokens: this.settings.llm.maxTokens,
         apiKeyConfigured: Boolean(this.settings.llm.encryptedApiKey),
@@ -266,7 +268,8 @@ export class SettingsService {
     return {
       mode: this.settings.llm.mode,
       baseUrl: this.settings.llm.mode === 'demo_proxy' ? DEMO_BASE_URL : this.settings.llm.customBaseUrl,
-      modelId: this.settings.llm.modelId,
+      fallbackBaseUrl: LEGACY_DEMO_BASE_URL,
+      modelId: this.settings.llm.mode === 'demo_proxy' ? 'qwen-plus' : this.settings.llm.modelId,
       temperature: this.settings.llm.temperature,
       maxTokens: this.settings.llm.maxTokens,
       apiKey,

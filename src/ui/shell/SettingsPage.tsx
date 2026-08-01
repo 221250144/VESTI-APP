@@ -6,11 +6,13 @@ import type {
   CapturePlatform,
   ExtensionBridgeStatusView,
   ExtensionPairCodeView,
+  MembershipStatus,
   Overview,
   WslStatusView,
 } from "../../shared/contracts";
 import { useI18n } from "../i18n";
 import type { SupportedLocale } from "../i18n/locales";
+import { MembershipAccountCard } from "../membership/MembershipAccountCard";
 import { useUiPreference } from "./useUiPreference";
 import { DEFAULT_SKIN_ID, SKINS, resolveSkin } from "../../capsule/skins";
 import {
@@ -69,6 +71,17 @@ const PLATFORM_TONES: Record<string, string> = {
   "kimi-code": "#8459c8",
   "claude-code": "#c7663b",
 };
+
+const DEMO_PROXY_BASE_URL = "https://api.ccvg1218.online/api";
+const LEGACY_DEMO_PROXY_BASE_URL = "https://vesti-gate.vercel.app/api";
+const DEFAULT_BYOK_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+
+function isManagedDemoProxyBaseUrl(value: string): boolean {
+  const normalized = value.trim().replace(/\/+$/, "").toLowerCase();
+  return [DEMO_PROXY_BASE_URL, LEGACY_DEMO_PROXY_BASE_URL].some(
+    (url) => normalized === url.toLowerCase(),
+  );
+}
 
 // Desktop-only settings copy. Keep every supported locale complete so this
 // page never falls back to a different language than the rest of the shell.
@@ -916,9 +929,13 @@ const buttonDanger =
 export function SettingsPage({
   themeMode,
   onToggleTheme,
+  membership,
+  onLogout,
 }: {
   themeMode: "light" | "dark";
   onToggleTheme: () => void;
+  membership: MembershipStatus;
+  onLogout: () => Promise<void>;
 }) {
   const { locale, setLocale } = useI18n();
   const copy = { ...COPY.en, ...COPY[locale] };
@@ -1303,9 +1320,9 @@ export function SettingsPage({
               mode,
               baseUrl:
                 mode === "demo_proxy"
-                  ? "https://vesti-gate.vercel.app/api"
-                  : current.llm.baseUrl.includes("vesti-gate.vercel.app")
-                    ? "https://dashscope.aliyuncs.com/compatible-mode/v1"
+                  ? DEMO_PROXY_BASE_URL
+                  : isManagedDemoProxyBaseUrl(current.llm.baseUrl)
+                    ? DEFAULT_BYOK_BASE_URL
                     : current.llm.baseUrl,
             },
           }
@@ -1327,6 +1344,8 @@ export function SettingsPage({
   return (
     <div className="h-full overflow-y-auto overflow-x-hidden bg-bg-app px-8 py-8">
       <div className="mx-auto flex max-w-[880px] flex-col gap-6 pb-8">
+        <MembershipAccountCard status={membership} onLogout={onLogout} locale={locale} />
+
         <Card eyebrow="GENERAL" title={copy.generalTitle} description={copy.generalDesc}>
           <div className="-mx-3 flex flex-col">
             <Toggle

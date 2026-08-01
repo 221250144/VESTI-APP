@@ -174,6 +174,76 @@ describe("planImport", () => {
     expect(merged.auto_classified).toBe(1);
   });
 
+  it("keeps the legacy Dexie key when the stable CLI id matches", () => {
+    const legacyId = 42_000_001;
+    const currentHashId = 8_500_000_000_001;
+    const bundle = makeBundle(currentHashId, ["new user turn", "new answer"], {
+      _cli_id: "codex:stable-session-id",
+      _cli_platform: "codex",
+    });
+    const previous = [
+      {
+        ...makeConversation(legacyId, {
+          _cli_id: "codex:stable-session-id",
+          _cli_platform: "codex",
+        }),
+        topic_id: 17,
+        is_starred: true,
+        tags: ["preserve-me"],
+        _sync_fingerprint: 1,
+      },
+    ];
+
+    const plan = planImport([bundle], previous as never);
+
+    expect(plan.staleIds).toEqual([]);
+    expect(plan.changedIds).toEqual([legacyId]);
+    expect(plan.toPut).toHaveLength(1);
+    expect(plan.toPut[0]).toMatchObject({
+      id: legacyId,
+      _cli_id: "codex:stable-session-id",
+      topic_id: 17,
+      is_starred: true,
+      tags: ["preserve-me"],
+    });
+    expect(plan.changedMessages).toHaveLength(2);
+    expect(
+      plan.changedMessages.every(
+        (message) => message.conversation_id === legacyId
+      )
+    ).toBe(true);
+  });
+
+  it("does not mark a stable-id match stale when its numeric hash changed", () => {
+    const legacyId = 55_000_001;
+    const currentHashId = 8_700_000_000_001;
+    const bundle = makeBundle(currentHashId, ["same content"], {
+      _cli_id: "kimi:stable-session-id",
+    });
+    const previous = [
+      {
+        ...bundle.conversation,
+        id: legacyId,
+        _sync_fingerprint: computeBundleFingerprint(
+          bundle.conversation,
+          bundle.messages
+        ),
+      },
+      {
+        ...makeConversation(66_000_001),
+        _cli_id: "removed-session",
+        _sync_fingerprint: 1,
+      },
+    ];
+
+    const plan = planImport([bundle], previous as never);
+
+    expect(plan.toPut).toEqual([]);
+    expect(plan.changedIds).toEqual([]);
+    expect(plan.changedMessages).toEqual([]);
+    expect(plan.staleIds).toEqual([66_000_001]);
+  });
+
   it("reconciles only local_terminal records absent from the snapshot", () => {
     const bundle = makeBundle(1, ["a"]);
     const fingerprint = computeBundleFingerprint(
@@ -190,5 +260,19 @@ describe("planImport", () => {
     const plan = planImport([bundle], previous as never);
     expect(plan.staleIds).toEqual([2]);
     expect(plan.toPut).toHaveLength(0);
+  });
+
+  it("does not wipe the local mirror when an export is transiently empty", () => {
+    const previous = [
+      { ...makeConversation(1), _cli_id: "codex:session-1" },
+      { ...makeConversation(2), _cli_id: "cursor:session-2" },
+    ];
+
+    const plan = planImport([], previous as never);
+
+    expect(plan.toPut).toEqual([]);
+    expect(plan.changedIds).toEqual([]);
+    expect(plan.changedMessages).toEqual([]);
+    expect(plan.staleIds).toEqual([]);
   });
 });

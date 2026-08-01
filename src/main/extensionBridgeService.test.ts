@@ -42,6 +42,7 @@ async function startHarness(overrides?: {
   associateConfirmTimeoutMs?: number;
   startupPairingWindowMs?: number;
   loadOriginAllowlist?: () => string[];
+  isAuthorized?: () => boolean;
 }): Promise<Harness> {
   const clients = [...(overrides?.seedClients ?? [])];
   const savedSnapshots: BridgeClientRecord[][] = [];
@@ -68,6 +69,7 @@ async function startHarness(overrides?: {
     associateConfirmTimeoutMs: overrides?.associateConfirmTimeoutMs,
     confirmAssociation: overrides?.confirmAssociation,
     loadOriginAllowlist: overrides?.loadOriginAllowlist,
+    isAuthorized: overrides?.isAuthorized,
   });
   await service.start();
   const status = service.getStatus();
@@ -121,6 +123,23 @@ describe('ExtensionBridgeService', () => {
       protocol: 1,
       capabilities: ['pair', 'import', 'outbox', 'associate'],
       pairing_window: 'closed',
+    });
+  });
+
+  it('rejects requests while membership is inactive and recovers at runtime', async () => {
+    let authorized = false;
+    harness = await startHarness({ isAuthorized: () => authorized });
+
+    const rejected = await fetch(`${harness.baseUrl}/v1/status`);
+    expect(rejected.status).toBe(403);
+    expect(await rejected.json()).toEqual({ error: 'membership_required' });
+
+    authorized = true;
+    const allowed = await fetch(`${harness.baseUrl}/v1/status`);
+    expect(allowed.status).toBe(200);
+    expect(await allowed.json()).toMatchObject({
+      app: 'vesti-desktop',
+      protocol: 1,
     });
   });
 

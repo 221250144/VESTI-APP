@@ -85,7 +85,7 @@ export const koTranslations = {
       title: "모델 액세스",
       description: "BYOK 및 프록시 설정",
       privacyTitle: "기기에서 전송되는 정보",
-      privacyDisclosure: "캡처, 로컬 저장, 키워드 검색은 100% 기기 내에서 이루어집니다. AI 기능(요약, 탐색, 임베딩, 프롬프트 도구, 원탁)은 관련 대화 텍스트를 설정된 모델로 전송합니다 — 기본적으로 Vesti 프록시를 통해 ModelScope로. 직접 라우팅하려면 자신의 API 키를 추가하세요.",
+      privacyDisclosure: "캡처, 로컬 저장, 키워드 검색은 100% 기기 내에서 이루어집니다. AI 기능(요약, 탐색, 임베딩, 프롬프트 도구, 원탁)은 관련 대화 텍스트를 설정된 모델로 전송합니다. 기본 요청은 Vesti 프록시를 통해 라우팅되며 실제 공급자와 모델은 프록시 서비스가 선택합니다. 직접 연결하려면 자신의 API 키와 사용자 지정 OpenAI 호환 엔드포인트를 사용하세요.",
       useCustomApiKey: "사용자 지정 API 키 사용",
       byokDesc: "BYOK - 내 키로 직접 라우팅",
       proxyActive: "프록시 활성화",

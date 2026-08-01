@@ -393,12 +393,59 @@ export interface SessionRecallHit {
   subagentSessionId?: string;
 }
 
+// ---- Local Beta membership ----
+
+export type MembershipState = 'unregistered' | 'signed_out' | 'active' | 'expired';
+export type MembershipPlan = 'beta';
+
+/**
+ * Public membership state exposed to renderers. Password material and the
+ * stored credential hash never cross the preload boundary.
+ */
+export interface MembershipStatus {
+  state: MembershipState;
+  plan: MembershipPlan | null;
+  registered: boolean;
+  authenticated: boolean;
+  active: boolean;
+  username: string | null;
+  memberSince: number | null;
+  expiresAt: number | null;
+  daysRemaining: number;
+}
+
+export interface MembershipCredentials {
+  username: string;
+  password: string;
+}
+
+export type MembershipErrorCode =
+  | 'NOT_INITIALIZED'
+  | 'ALREADY_REGISTERED'
+  | 'INVALID_USERNAME'
+  | 'WEAK_PASSWORD'
+  | 'NOT_REGISTERED'
+  | 'INVALID_CREDENTIALS'
+  | 'AUTHENTICATION_REQUIRED'
+  | 'MEMBERSHIP_EXPIRED'
+  | 'MEMBERSHIP_DATA_CORRUPT'
+  | 'STORAGE_ERROR';
+
+export type MembershipActionResult =
+  | { ok: true; status: MembershipStatus }
+  | { ok: false; status: MembershipStatus; error: MembershipErrorCode };
+
 export const IPC = {
   windowMinimize: 'vesti:window-minimize',
   windowToggleMaximize: 'vesti:window-toggle-maximize',
   windowClose: 'vesti:window-close',
   windowIsMaximized: 'vesti:window-is-maximized',
   windowMaximizedChanged: 'vesti:window-maximized-changed',
+  membershipStatus: 'vesti:membership-status',
+  membershipRegister: 'vesti:membership-register',
+  membershipLogin: 'vesti:membership-login',
+  membershipLogout: 'vesti:membership-logout',
+  membershipChanged: 'vesti:membership-changed',
   overview: 'vesti:overview',
   sessions: 'vesti:sessions',
   session: 'vesti:session',
@@ -850,6 +897,15 @@ export interface VestiDesktopApi {
   enqueueRelayOutbox(request: RelayOutboxEnqueueRequest): Promise<RelayOutboxEnqueueResult>;
   getRelaySessionContexts(sessionIds: string[]): Promise<RelaySessionContext[]>;
   getRelayFileTouches(sessionIds: string[]): Promise<RelayFileTouchRow[]>;
+}
+
+/** Authentication bridge available before the product shell is unlocked. */
+export interface VestiMembershipApi {
+  getStatus(): Promise<MembershipStatus>;
+  register(credentials: MembershipCredentials): Promise<MembershipActionResult>;
+  login(credentials: MembershipCredentials): Promise<MembershipActionResult>;
+  logout(): Promise<MembershipStatus>;
+  onStatusChanged(listener: (status: MembershipStatus) => void): () => void;
 }
 
 /**

@@ -33,6 +33,9 @@ const DEBOUNCE_MS = 500;
 // The main process stamps these on every exported record (see contracts.ts).
 type LocalTerminalFields = {
   _source?: string;
+  /** Stable source identity. Unlike the numeric Dexie key, this survives
+   * changes to cliIdToNumeric's hash implementation. */
+  _cli_id?: string;
   /** Rolling content hash written by importBundles; compared on the next
    * sync so unchanged conversations (and their messages) are not rewritten. */
   _sync_fingerprint?: number;
@@ -134,25 +137,64 @@ export function planImport(
   bundles: ConversationExportBundle[],
   previousRecords: Array<ConversationRecord & LocalTerminalFields>
 ): ImportPlan {
-  const keep = new Set(bundles.map((bundle) => bundle.conversation.id));
   const previousById = new Map<number, ConversationRecord & LocalTerminalFields>();
+  const previousByCliId = new Map<
+    string,
+    ConversationRecord & LocalTerminalFields
+  >();
   for (const record of previousRecords) {
     if (typeof record.id === "number") previousById.set(record.id, record);
+    if (
+      record._source === "local_terminal" &&
+      typeof record._cli_id === "string" &&
+      record._cli_id.length > 0 &&
+      !previousByCliId.has(record._cli_id)
+    ) {
+      previousByCliId.set(record._cli_id, record);
+    }
   }
 
   const toPut: ConversationRecord[] = [];
   const changedIds: number[] = [];
   const changedMessages: MessageRecord[] = [];
+  const matchedPreviousIds = new Set<number>();
 
   for (const bundle of bundles) {
-    const conversation = bundle.conversation as unknown as ConversationRecord &
+    const incoming = bundle.conversation as unknown as ConversationRecord &
       LocalTerminalFields;
     const fingerprint = computeBundleFingerprint(
       bundle.conversation,
       bundle.messages
     );
+    // `_cli_id` is the durable identity. The numeric id is only a storage key
+    // derived from a hash, and that hash has changed before (FNV32 -> FNV64).
+    // Match by the durable id first so an upgrade does not classify the whole
+    // old mirror as stale and rebuild it under unrelated primary keys.
+    const cliId =
+      typeof incoming._cli_id === "string" && incoming._cli_id.length > 0
+        ? incoming._cli_id
+        : null;
     const prev =
-      conversation.id !== undefined ? previousById.get(conversation.id) : undefined;
+      (cliId ? previousByCliId.get(cliId) : undefined) ??
+      (incoming.id !== undefined ? previousById.get(incoming.id) : undefined);
+    if (prev?._source === "local_terminal" && typeof prev.id === "number") {
+      matchedPreviousIds.add(prev.id);
+    }
+
+    // Preserve the established Dexie primary key. Other user-owned tables
+    // (annotations, summaries, topics, notes) refer to it, so changing it just
+    // because the hash implementation changed would orphan those relations.
+    const resolvedId =
+      typeof prev?.id === "number" ? prev.id : incoming.id;
+    const conversation =
+      resolvedId === incoming.id ? incoming : { ...incoming, id: resolvedId };
+    const messages =
+      resolvedId === incoming.id
+        ? bundle.messages
+        : bundle.messages.map((message) => ({
+            ...message,
+            conversation_id: resolvedId,
+          }));
     if (prev && prev._sync_fingerprint === fingerprint) {
       continue;
     }
@@ -179,22 +221,30 @@ export function planImport(
     toPut.push(merged);
     if (typeof conversation.id === "number") {
       changedIds.push(conversation.id);
-      for (const message of bundle.messages) {
+      for (const message of messages) {
         changedMessages.push(message as unknown as MessageRecord);
       }
     }
   }
 
-  // Reconcile: local-terminal conversations absent from the snapshot were
-  // deleted at the source; drop them and their messages here too.
-  const staleIds = previousRecords
-    .filter(
-      (record) =>
-        record._source === "local_terminal" &&
-        typeof record.id === "number" &&
-        !keep.has(record.id)
-    )
-    .map((record) => record.id as number);
+  // Reconcile by source identity, not by the current numeric hash. A previous
+  // row matched through `_cli_id` remains retained even when its numeric key
+  // differs from the incoming bundle. Unmatched duplicate/removed rows are
+  // still cleaned up, while browser-extension records remain out of scope.
+  // An empty export can be a transient startup/read failure. Without snapshot
+  // generation metadata there is no safe way to distinguish that from a
+  // deliberate deletion of every source session, so preserve the mirror and
+  // wait for the next non-empty authoritative export instead of wiping it.
+  const staleIds = bundles.length === 0
+    ? []
+    : previousRecords
+        .filter(
+          (record) =>
+            record._source === "local_terminal" &&
+            typeof record.id === "number" &&
+            !matchedPreviousIds.has(record.id)
+        )
+        .map((record) => record.id as number);
 
   return { toPut, changedIds, changedMessages, staleIds };
 }

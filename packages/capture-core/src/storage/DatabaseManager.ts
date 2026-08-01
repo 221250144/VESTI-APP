@@ -36,6 +36,7 @@ import type {
   ProjectState,
   ProjectBrief,
   FileTimelineEvent,
+  TokenUsageEvent,
 } from '../types/unified.js';
 
 type Database = import('better-sqlite3').Database;
@@ -631,6 +632,61 @@ export class DatabaseManager {
     }
 
     return (this.getDb().prepare(sql).all(...params) as any[]).map(r => this.rowToWorkSession(r));
+  }
+
+  // ==================== Token usage events ====================
+
+  /** Atomically replace the complete event snapshot for one physical source. */
+  replaceTokenUsageEvents(sourceScope: string, events: TokenUsageEvent[]): void {
+    if (!sourceScope) throw new Error('Token usage source scope must not be empty');
+    if (events.some(event => event.sourceScope !== sourceScope)) {
+      throw new Error('Token usage event source scope does not match replacement scope');
+    }
+    const db = this.getDb();
+    const remove = db.prepare('DELETE FROM token_usage_events WHERE source_scope = ?');
+    const stmt = db.prepare(`
+      INSERT INTO token_usage_events (
+        id, session_id, dedupe_key, source_scope, timestamp, input_tokens, output_tokens,
+        cache_creation_tokens, cache_read_tokens, reasoning_tokens,
+        model, source
+      ) VALUES (
+        @id, @sessionId, @dedupeKey, @sourceScope, @timestamp, @inputTokens, @outputTokens,
+        @cacheCreationTokens, @cacheReadTokens, @reasoningTokens,
+        @model, @source
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        session_id = excluded.session_id,
+        dedupe_key = excluded.dedupe_key,
+        source_scope = excluded.source_scope,
+        timestamp = excluded.timestamp,
+        input_tokens = excluded.input_tokens,
+        output_tokens = excluded.output_tokens,
+        cache_creation_tokens = excluded.cache_creation_tokens,
+        cache_read_tokens = excluded.cache_read_tokens,
+        reasoning_tokens = excluded.reasoning_tokens,
+        model = excluded.model,
+        source = excluded.source
+    `);
+    const replaceAll = db.transaction((items: TokenUsageEvent[]) => {
+      remove.run(sourceScope);
+      for (const event of items) {
+        stmt.run({
+          id: event.id,
+          sessionId: event.sessionId,
+          dedupeKey: event.dedupeKey,
+          sourceScope: event.sourceScope,
+          timestamp: event.timestamp,
+          inputTokens: event.inputTokens,
+          outputTokens: event.outputTokens,
+          cacheCreationTokens: event.cacheCreationTokens,
+          cacheReadTokens: event.cacheReadTokens,
+          reasoningTokens: event.reasoningTokens,
+          model: event.model ?? null,
+          source: event.source,
+        });
+      }
+    });
+    replaceAll(events);
   }
 
   // ==================== Turns CRUD ====================
@@ -1400,11 +1456,13 @@ export class DatabaseManager {
       INSERT INTO session_digests (
         session_id, host, platform, project_key, one_liner,
         key_topics, key_files, decisions, open_questions,
-        embedding, embedding_status, digest_version, message_count, updated_at
+        embedding, embedding_provider, embedding_model, embedding_dimensions,
+        embedding_version, embedding_status, digest_version, message_count, updated_at
       ) VALUES (
         @sessionId, @host, @platform, @projectKey, @oneLiner,
         @keyTopics, @keyFiles, @decisions, @openQuestions,
-        @embedding, @embeddingStatus, @digestVersion, @messageCount, @updatedAt
+        @embedding, @embeddingProvider, @embeddingModel, @embeddingDimensions,
+        @embeddingVersion, @embeddingStatus, @digestVersion, @messageCount, @updatedAt
       )
       ON CONFLICT(session_id) DO UPDATE SET
         host = excluded.host,
@@ -1416,6 +1474,10 @@ export class DatabaseManager {
         decisions = excluded.decisions,
         open_questions = excluded.open_questions,
         embedding = excluded.embedding,
+        embedding_provider = excluded.embedding_provider,
+        embedding_model = excluded.embedding_model,
+        embedding_dimensions = excluded.embedding_dimensions,
+        embedding_version = excluded.embedding_version,
         embedding_status = excluded.embedding_status,
         digest_version = excluded.digest_version,
         message_count = excluded.message_count,
@@ -1431,11 +1493,37 @@ export class DatabaseManager {
       decisions: JSON.stringify(digest.decisions ?? []),
       openQuestions: JSON.stringify(digest.openQuestions ?? []),
       embedding: digest.embedding ?? null,
+      embeddingProvider: digest.embeddingProvider ?? null,
+      embeddingModel: digest.embeddingModel ?? null,
+      embeddingDimensions: digest.embeddingDimensions ?? null,
+      embeddingVersion: digest.embeddingVersion ?? null,
       embeddingStatus: digest.embeddingStatus,
       digestVersion: digest.digestVersion,
       messageCount: digest.messageCount,
       updatedAt: digest.updatedAt,
     });
+
+    if (digest.embedding && digest.embeddingVersion) {
+      this.getDb().prepare(`
+        INSERT INTO session_digest_embeddings (
+          session_id, provider, model, dimensions, index_version, embedding, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_id, index_version) DO UPDATE SET
+          provider = excluded.provider,
+          model = excluded.model,
+          dimensions = excluded.dimensions,
+          embedding = excluded.embedding,
+          created_at = excluded.created_at
+      `).run(
+        digest.sessionId,
+        digest.embeddingProvider ?? 'unknown',
+        digest.embeddingModel ?? 'unknown',
+        digest.embeddingDimensions ?? Math.floor(digest.embedding.byteLength / 4),
+        digest.embeddingVersion,
+        digest.embedding,
+        digest.updatedAt,
+      );
+    }
   }
 
   getSessionDigest(sessionId: string): SessionDigest | null {
@@ -1541,6 +1629,10 @@ export class DatabaseManager {
       decisions: parseArray(row.decisions),
       openQuestions: parseArray(row.open_questions),
       embedding: row.embedding ?? null,
+      embeddingProvider: row.embedding_provider ?? null,
+      embeddingModel: row.embedding_model ?? null,
+      embeddingDimensions: row.embedding_dimensions ?? null,
+      embeddingVersion: row.embedding_version ?? null,
       embeddingStatus: row.embedding_status ?? 'none',
       digestVersion: row.digest_version ?? 1,
       messageCount: row.message_count ?? 0,
@@ -1737,22 +1829,66 @@ export class DatabaseManager {
     `).get() as any).c;
 
     const tokenRow = db.prepare(`
+      WITH deduped_events AS (
+        SELECT * FROM (
+          SELECT events.*,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY session_id, dedupe_key
+                   ORDER BY timestamp ASC, id ASC
+                 ) AS dedupe_rank
+          FROM token_usage_events events
+        ) WHERE dedupe_rank = 1
+      ),
+      event_totals AS (
+        SELECT session_id,
+               COALESCE(SUM(input_tokens), 0) AS ti,
+               COALESCE(SUM(output_tokens), 0) AS ot,
+               COALESCE(SUM(cache_creation_tokens + cache_read_tokens), 0) AS tc
+        FROM deduped_events
+        GROUP BY session_id
+      )
       SELECT
-        COALESCE(SUM(total_input_tokens), 0) as ti,
-        COALESCE(SUM(total_output_tokens), 0) as to2,
-        COALESCE(SUM(total_cache_creation_tokens + total_cache_read_tokens), 0) as tc
-      FROM work_sessions
-      WHERE session_type = 'conversation'
+        COALESCE(SUM(MAX(COALESCE(sessions.total_input_tokens, 0), COALESCE(events.ti, 0))), 0) as ti,
+        COALESCE(SUM(MAX(COALESCE(sessions.total_output_tokens, 0), COALESCE(events.ot, 0))), 0) as to2,
+        COALESCE(SUM(MAX(
+          COALESCE(sessions.total_cache_creation_tokens, 0) + COALESCE(sessions.total_cache_read_tokens, 0),
+          COALESCE(events.tc, 0)
+        )), 0) as tc
+      FROM work_sessions sessions
+      LEFT JOIN event_totals events ON events.session_id = sessions.id
+      WHERE sessions.session_type = 'conversation'
     `).get() as any;
 
     const platformRows = db.prepare(`
-      SELECT platform,
+      WITH deduped_events AS (
+        SELECT * FROM (
+          SELECT events.*,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY session_id, dedupe_key
+                   ORDER BY timestamp ASC, id ASC
+                 ) AS dedupe_rank
+          FROM token_usage_events events
+        ) WHERE dedupe_rank = 1
+      ),
+      event_totals AS (
+        SELECT session_id,
+               COALESCE(SUM(input_tokens), 0) AS ti,
+               COALESCE(SUM(output_tokens), 0) AS ot
+        FROM deduped_events
+        GROUP BY session_id
+      )
+      SELECT sessions.platform AS platform,
              COUNT(*) as c,
-             COALESCE(SUM(total_input_tokens), 0) as ti,
-             COALESCE(SUM(total_output_tokens), 0) as ot
-      FROM work_sessions
-      WHERE session_type = 'conversation'
-      GROUP BY platform
+             COALESCE(SUM(MAX(
+               COALESCE(sessions.total_input_tokens, 0), COALESCE(events.ti, 0)
+             )), 0) as ti,
+             COALESCE(SUM(MAX(
+               COALESCE(sessions.total_output_tokens, 0), COALESCE(events.ot, 0)
+             )), 0) as ot
+      FROM work_sessions sessions
+      LEFT JOIN event_totals events ON events.session_id = sessions.id
+      WHERE sessions.session_type = 'conversation'
+      GROUP BY sessions.platform
     `).all() as any[];
     const platformBreakdown: Record<string, number> = {};
     const platformTokenBreakdown: VestiStats['platformTokenBreakdown'] = {};
@@ -1799,16 +1935,29 @@ export class DatabaseManager {
       messages: r.msgs || 0,
     }));
 
-    // Session totals are authoritative for all capture adapters. Attribute a
-    // session's complete usage to its last-active local day so the dashboard
-    // remains truthful even for formats that only expose cumulative usage.
+    // Unlike all-time totals above, a time series must use the actual time of
+    // each usage record. A single session can span many days, so grouping its
+    // cumulative total by last_activity_at would create a false spike on the
+    // day it was most recently touched.
     const dailyTokenRows = db.prepare(`
-      SELECT date(last_activity_at / 1000, 'unixepoch', 'localtime') as d,
-             COALESCE(SUM(total_input_tokens), 0) as ti,
-             COALESCE(SUM(total_output_tokens), 0) as ot
-      FROM work_sessions
-      WHERE session_type = 'conversation'
-      GROUP BY d ORDER BY d DESC LIMIT 30
+      WITH deduped_events AS (
+        SELECT * FROM (
+          SELECT events.*,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY session_id, dedupe_key
+                   ORDER BY timestamp ASC, id ASC
+                 ) AS dedupe_rank
+          FROM token_usage_events events
+        ) WHERE dedupe_rank = 1
+      )
+      SELECT date(events.timestamp / 1000, 'unixepoch', 'localtime') as d,
+             COALESCE(SUM(events.input_tokens), 0) as ti,
+             COALESCE(SUM(events.output_tokens), 0) as ot
+      FROM deduped_events events
+      INNER JOIN work_sessions sessions ON sessions.id = events.session_id
+      WHERE sessions.session_type = 'conversation'
+        AND events.timestamp >= CAST(strftime('%s', date('now', 'localtime', '-29 days'), 'utc') AS INTEGER) * 1000
+      GROUP BY d ORDER BY d DESC
     `).all() as any[];
     const dailyTokenUsage = dailyTokenRows.map(r => ({
       date: r.d,
