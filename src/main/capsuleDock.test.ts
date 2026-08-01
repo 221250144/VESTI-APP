@@ -315,16 +315,13 @@ describe('appendQuickAskHistory', () => {
 });
 
 describe('DEMO_PROXY_MODEL_IDS', () => {
-  // The gateway silently falls back to qwen-plus for anything off-whitelist;
-  // pin the list so an accidental edit (renamed id, dropped model) fails here
-  // instead of shipping a picker that lies about which model answers.
+  // The gateway rejects anything off-whitelist with UNSUPPORTED_MODEL (and
+  // maps qwen-turbo to qwen-plus); pin the list so an accidental edit ships
+  // a picker that lies about which model answers.
   it('pins exactly the gateway whitelist, qwen-plus as the default first', () => {
     expect([...DEMO_PROXY_MODEL_IDS]).toEqual([
       'qwen-plus',
       'qwen-turbo',
-      'qwen-max',
-      'deepseek-v3',
-      'deepseek-r1',
     ]);
   });
 });

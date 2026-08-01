@@ -622,17 +622,18 @@ export interface CapsuleQuickAskResult {
 }
 
 /**
- * Models the demo gateway (vesti-gate) actually proxies. Its server-side
- * whitelist SILENTLY falls back to qwen-plus for anything else, so the app
- * must never offer or send ids outside this list in demo mode — otherwise the
- * UI would show one model while another answers. BYOK accepts any id.
+ * Models the demo gateway (api.ccvg1218.online) actually proxies, verified
+ * against the live service: the whitelist rejects anything else with
+ * UNSUPPORTED_MODEL (qwen-turbo is an alias answered by qwen-plus), so the
+ * app must never offer or send ids outside this list in demo mode —
+ * otherwise the UI would show one model while another answers or the call
+ * fails outright. BYOK accepts any id. deepseek-v4-flash is the intended
+ * default once the gateway whitelist adds it; keep it out until the live
+ * probe passes.
  */
 export const DEMO_PROXY_MODEL_IDS = [
   'qwen-plus',
   'qwen-turbo',
-  'qwen-max',
-  'deepseek-v3',
-  'deepseek-r1',
 ] as const;
 export type DemoProxyModelId = (typeof DEMO_PROXY_MODEL_IDS)[number];
 
