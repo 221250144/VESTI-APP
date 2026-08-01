@@ -4,7 +4,7 @@
 // app first launches (after initial sync), the wizard renders.
 
 import { useCallback, useEffect, useState } from "react";
-import type { SupportedLocale } from "./OnboardingWizard";
+import type { SupportedLocale } from "../i18n/locales";
 
 const ONBOARDING_PREF_KEY = "onboarding.completed";
 

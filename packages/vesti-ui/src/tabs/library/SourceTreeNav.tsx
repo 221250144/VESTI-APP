@@ -60,6 +60,12 @@ function selectionEquals(
   b: SourceSelection,
 ): boolean {
   if (!a) return false;
+  // A platform-wide selection (home-dashboard deep link) owns no single tree
+  // node; highlight every source node of that platform instead.
+  if (a.kind === "platform") {
+    return b.kind === "source" && b.source.platform === a.platform;
+  }
+  if (b.kind === "platform") return false;
   if (a.kind !== b.kind) return false;
   if (!sameRef(a.source, b.source)) return false;
   if (a.kind === "source") return true;

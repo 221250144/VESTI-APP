@@ -174,6 +174,7 @@ export function normalizeRelayPackPayload(raw: unknown): RelayPackPayload {
   const source = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
   const confidence = normalizeConfidence(source.confidence);
   const extractedKeyFiles = normalizeExtractedFiles(source.extracted_key_files);
+  const verifyFirst = asStringList(source.verify_first);
   return {
     title: asString(source.title),
     goal: asString(source.goal),
@@ -188,6 +189,7 @@ export function normalizeRelayPackPayload(raw: unknown): RelayPackPayload {
     verification: normalizeVerification(source.verification),
     next_steps: asStringList(source.next_steps),
     ...(confidence ? { confidence } : {}),
+    ...(verifyFirst.length > 0 ? { verify_first: verifyFirst } : {}),
     ...(extractedKeyFiles.length > 0 ? { extracted_key_files: extractedKeyFiles } : {}),
     suggested_prompt: asString(source.suggested_prompt),
   };
@@ -285,6 +287,15 @@ export function serializeRelayPackMarkdown(pack: RelayPack): string {
   parts.push(...section("未决问题", bulletList(payload.open_issues)));
   if (hasVerificationContent(payload.verification)) {
     parts.push(...section("验证", verificationBlock(payload.verification)));
+  }
+  // Schema v2 additive: the verify-before-acting checklist for the receiver.
+  if (payload.verify_first && payload.verify_first.length > 0) {
+    parts.push(
+      ...section(
+        "接手先验证",
+        payload.verify_first.map((item, index) => `${index + 1}. ${item}`).join("\n")
+      )
+    );
   }
   parts.push(
     ...section(

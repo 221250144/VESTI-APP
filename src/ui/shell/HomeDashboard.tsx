@@ -57,6 +57,7 @@ interface HomeCopy {
   noTokenData: string;
   platformUsage: string;
   platformUsageHint: string;
+  viewSource: string;
   conversationsUnit: string;
   modelUsage: string;
   modelUsageHint: string;
@@ -96,6 +97,7 @@ const HOME_COPY: Record<SupportedLocale, HomeCopy> = {
     noTokenData: "捕获到真实 Token 后，趋势会显示在这里。",
     platformUsage: "Agent 分布",
     platformUsageHint: "各平台的对话和 Token 占比",
+    viewSource: "在会话库中查看 {label}",
     conversationsUnit: "个对话",
     modelUsage: "模型消耗",
     modelUsageHint: "按照真实 Token 使用量排序",
@@ -133,6 +135,7 @@ const HOME_COPY: Record<SupportedLocale, HomeCopy> = {
     noTokenData: "The trend will appear after real token usage is captured.",
     platformUsage: "Agent distribution",
     platformUsageHint: "Conversation and token share by platform",
+    viewSource: "View {label} in the library",
     conversationsUnit: "conversations",
     modelUsage: "Model usage",
     modelUsageHint: "Ranked by reported token usage",
@@ -170,6 +173,7 @@ const HOME_COPY: Record<SupportedLocale, HomeCopy> = {
     noTokenData: "Token を取得すると推移が表示されます。",
     platformUsage: "Agent 分布",
     platformUsageHint: "プラットフォーム別の会話と Token",
+    viewSource: "ライブラリで {label} を表示",
     conversationsUnit: "件",
     modelUsage: "モデル使用量",
     modelUsageHint: "実際の Token 使用量順",
@@ -207,6 +211,7 @@ const HOME_COPY: Record<SupportedLocale, HomeCopy> = {
     noTokenData: "실제 토큰이 캡처되면 추세가 표시됩니다.",
     platformUsage: "Agent 분포",
     platformUsageHint: "플랫폼별 대화 및 토큰 비율",
+    viewSource: "라이브러리에서 {label} 보기",
     conversationsUnit: "개 대화",
     modelUsage: "모델 사용량",
     modelUsageHint: "실제 토큰 사용량순",
@@ -257,7 +262,14 @@ function relativeTime(timestamp: number, locale: SupportedLocale): string {
   return formatter.format(Math.round(hours / 24), "day");
 }
 
-export function HomeDashboard({ onOpenLibrary }: { onOpenLibrary: () => void }) {
+export function HomeDashboard({
+  onOpenLibrary,
+  onOpenSource,
+}: {
+  onOpenLibrary: () => void;
+  /** Source deep link: open the library filtered to this platform. */
+  onOpenSource: (platform: string) => void;
+}) {
   const { locale } = useI18n();
   const copy = HOME_COPY[locale] ?? HOME_COPY.en;
   const [overview, setOverview] = useState<Overview>(EMPTY_OVERVIEW);
@@ -409,8 +421,16 @@ export function HomeDashboard({ onOpenLibrary }: { onOpenLibrary: () => void }) 
                 platformUsage.map((row) => {
                   const meta = PLATFORM_META[row.id] ?? { label: row.id, color: "#7a8190" };
                   const share = totalTokens > 0 ? (row.totalTokens / totalTokens) * 100 : 0;
+                  const viewLabel = copy.viewSource.replace("{label}", meta.label);
                   return (
-                    <div key={row.id}>
+                    <button
+                      key={row.id}
+                      type="button"
+                      onClick={() => onOpenSource(row.id)}
+                      aria-label={viewLabel}
+                      title={viewLabel}
+                      className="-mx-2 block w-[calc(100%+1rem)] rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-accent-primary-light focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus"
+                    >
                       <div className="flex items-start justify-between gap-4">
                         <div className="flex min-w-0 items-center gap-2.5">
                           <span className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: meta.color }} />
@@ -432,7 +452,7 @@ export function HomeDashboard({ onOpenLibrary }: { onOpenLibrary: () => void }) 
                           style={{ width: `${Math.max(share, row.totalTokens > 0 ? 2 : 0)}%`, backgroundColor: meta.color }}
                         />
                       </div>
-                    </div>
+                    </button>
                   );
                 })
               )}

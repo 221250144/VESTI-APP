@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildProjectMemoryBlock,
   buildRelayTranscript,
   RELAY_CONTEXT_BUDGET_CHARS,
   type RelayContextConversation,
 } from "./relayContext";
+import type { ProjectStateView } from "../../shared/contracts";
 
 function conversation(
   overrides: Partial<RelayContextConversation>
@@ -72,14 +74,13 @@ describe("buildRelayTranscript", () => {
     const transcript = buildRelayTranscript([
       conversation({ digest: { oneLiner: "x" }, messages }),
     ]);
-    // V2: RECENT_MESSAGE_LIMIT raised to 8; with a single conversation and
-    // 18K budget, the window holds all 10 short messages. Oldest messages
-    // near index 1-2 may drop if budget is tight; the newest messages are
-    // always included.
+    // The recent-message window (12) comfortably holds all 10 short messages
+    // within the single-conversation budget; the newest messages are always
+    // included.
     expect(transcript).toContain("第 10 条消息");
     expect(transcript).toContain("第 5 条消息");
-    // V2: more messages fit in the transcript — the oldest (#1) may or may not
-    // appear depending on budget, but messages #3+ should all be present.
+    // Messages #3+ are all present; #1-#2 could only drop if the budget were
+    // genuinely tight, which it is not here.
     expect(transcript).toContain("第 3 条消息");
     // Chronological order in the output: #5 before #10.
     expect(transcript.indexOf("第 5 条消息")).toBeLessThan(transcript.indexOf("第 10 条消息"));
@@ -277,5 +278,125 @@ describe("buildRelayTranscript", () => {
     );
     expect(transcript.length).toBeLessThanOrEqual(budget);
     expect(transcript).toContain("关键文件（程序提取，带锚点）");
+  });
+});
+
+describe("project memory (L0/L2) injection", () => {
+  const projectState: ProjectStateView = {
+    projectKey: "player",
+    oneLiner: "播放器重构进行中",
+    activeFiles: [
+      { path: "src/player/decoder.ts", touches: 5, lastTouched: "2026-07-30T10:00:00Z" },
+      { path: "src/player/render.ts", touches: 2, lastTouched: "2026-07-29T10:00:00Z" },
+    ],
+    openQuestions: ["字幕同步如何对齐"],
+    sessionCount: 7,
+    lastActive: "2026-07-30T12:00:00Z",
+    updatedAt: "2026-07-30T12:00:00Z",
+  };
+
+  it("renders the L0 state card and the L2 brief between anchors and heads", () => {
+    const transcript = buildRelayTranscript(
+      [conversation({ id: 11, digest: { oneLiner: "一" } })],
+      RELAY_CONTEXT_BUDGET_CHARS,
+      {
+        fileAnchors: [
+          {
+            path: "src/player/decoder.ts",
+            touches: 5,
+            lastTouchedAt: Date.UTC(2026, 6, 30, 12, 0, 0),
+            conversationIds: [11],
+          },
+        ],
+        projectMemory: [
+          {
+            label: "播放器",
+            state: projectState,
+            briefMarkdown: "# 项目简报\n\n解码层已拆分，渲染层待接入。",
+          },
+        ],
+      }
+    );
+    expect(transcript).toContain("## 项目记忆（跨会话状态，优先采信）");
+    expect(transcript).toContain("### 项目：播放器");
+    expect(transcript).toContain(
+      "L0 状态卡：播放器重构进行中 · 7 个会话 · 最近活跃 2026-07-30"
+    );
+    expect(transcript).toContain(
+      "活跃文件：src/player/decoder.ts（5 次）、src/player/render.ts（2 次）"
+    );
+    expect(transcript).toContain("未决问题：字幕同步如何对齐");
+    expect(transcript).toContain(
+      "L2 项目简报：\n# 项目简报\n\n解码层已拆分，渲染层待接入。"
+    );
+    // Ordering: anchors on top, then project memory, then the conversation head.
+    const anchorAt = transcript.indexOf("## 关键文件（程序提取，带锚点）");
+    const memoryAt = transcript.indexOf("## 项目记忆（跨会话状态，优先采信）");
+    const headAt = transcript.indexOf("## 会话 1");
+    expect(anchorAt).toBeGreaterThanOrEqual(0);
+    expect(memoryAt).toBeGreaterThan(anchorAt);
+    expect(headAt).toBeGreaterThan(memoryAt);
+  });
+
+  it("renders a brief-only project without the L0 lines", () => {
+    const transcript = buildRelayTranscript(
+      [conversation({ digest: { oneLiner: "x" } })],
+      RELAY_CONTEXT_BUDGET_CHARS,
+      { projectMemory: [{ label: "播放器", briefMarkdown: "简报正文" }] }
+    );
+    expect(transcript).toContain("### 项目：播放器");
+    expect(transcript).toContain("L2 项目简报：\n简报正文");
+    expect(transcript).not.toContain("L0 状态卡");
+  });
+
+  it("omits the block when no project carries memory", () => {
+    const transcript = buildRelayTranscript(
+      [conversation({ digest: { oneLiner: "x" } })],
+      RELAY_CONTEXT_BUDGET_CHARS,
+      { projectMemory: [{ label: "", state: null, briefMarkdown: null }] }
+    );
+    expect(transcript).not.toContain("项目记忆");
+  });
+
+  it("clips an over-long L2 brief at the cap, preserving its newlines", () => {
+    const block = buildProjectMemoryBlock([
+      { label: "p", briefMarkdown: `# 标题\n\n${"长".repeat(2_000)}` },
+    ]);
+    expect(block).toContain("# 标题\n\n");
+    expect(block).toContain("…");
+    // Header + project line + label prefix + the 1_500-char clipped brief.
+    expect(block?.length ?? 0).toBeLessThan(1_600);
+  });
+
+  it("caps the block at two projects", () => {
+    const block = buildProjectMemoryBlock([
+      { label: "一", briefMarkdown: "简报一" },
+      { label: "二", briefMarkdown: "简报二" },
+      { label: "三", briefMarkdown: "简报三" },
+    ]);
+    expect(block).toContain("### 项目：一");
+    expect(block).toContain("### 项目：二");
+    expect(block).not.toContain("### 项目：三");
+  });
+
+  it("counts the memory block against the budget", () => {
+    const budget = 500;
+    const transcript = buildRelayTranscript(
+      [
+        conversation({
+          id: 1,
+          digest: { oneLiner: "x" },
+          messages: [{ role: "user", content: "很长的消息".repeat(200) }],
+        }),
+      ],
+      budget,
+      {
+        projectMemory: [
+          { label: "播放器", state: projectState, briefMarkdown: "简报".repeat(200) },
+        ],
+      }
+    );
+    expect(transcript.length).toBeLessThanOrEqual(budget);
+    expect(transcript).toContain("项目记忆（跨会话状态，优先采信）");
   });
 });

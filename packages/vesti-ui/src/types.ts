@@ -713,6 +713,9 @@ export interface PromptExtractionResult {
   skipped: number;
   candidates: number;
   usedLlm: boolean;
+  /** Set when the LLM distill step was attempted and failed (the heuristic
+   * path still ran); null/undefined otherwise. */
+  llmError?: string | null;
 }
 
 // ---- Conversation-library prompt scan (interactive review flow) ------------
@@ -875,6 +878,10 @@ export interface RelayPackPayload {
   failed_paths: RelayPackFailedPath[];
   open_issues: string[];
   verification: RelayPackVerification;
+  /** Verify-first checklist (schema v2 additive): concrete checks the
+   * receiving AI runs before building on the pack. Absent on v1 packs and on
+   * packs generated before the checklist existed. */
+  verify_first?: string[];
   next_steps: string[];
   /** Absent on v1 packs and when the model gave no usable confidence. */
   confidence?: RelayPackConfidence;
@@ -1879,6 +1886,9 @@ export interface DashboardLabels {
     toastNoLlm: string;
     toastImproveFailed: string;
     toastExtract: string;
+    toastExtractEmpty: string;
+    toastExtractNone: string;
+    toastExtractLlmFallback: string;
     unavailable: string;
     exportLabel: string;
     importLabel: string;
@@ -2064,6 +2074,8 @@ export interface DashboardLabels {
     toRoundtable: string;
     /** Roundtable question template for that handoff; "{topic}" = domain name. */
     roundtablePrompt: string;
+    moreDomains: string;
+    uncategorizedIncluded: string;
   };
   roundtable: {
     title: string;

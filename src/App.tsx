@@ -23,7 +23,7 @@ import {
   subscribeCaptureSync,
   type CaptureSyncState,
 } from "./ui/sync/captureSync";
-import { startAutoClassifyTrigger } from "./ui/organize/autoClassify";
+import { resolveClassifyLanguage, startAutoClassifyTrigger } from "./ui/organize/autoClassify";
 import { startUpstreamAutoExport } from "./ui/upstream/autoExport";
 import { startDailyScheduler } from "./ui/daily/dailyScheduler";
 import { startPromptSnapshotSync } from "./ui/sync/promptSnapshot";
@@ -65,6 +65,9 @@ function Shell() {
   const { t, locale } = useI18n();
   const { themeMode, toggleTheme } = useUiTheme();
   const [page, setPage] = useState<ShellPage>("home");
+  // Home → library source deep link: one-shot platform filter request, handed
+  // to VestiDashboard/LibraryTab and cleared once applied.
+  const [libraryPlatformFilter, setLibraryPlatformFilter] = useState<string | null>(null);
   const [syncState, setSyncState] = useState<CaptureSyncState>(getCaptureSyncState());
   const [adoptedIds, setAdoptedIds] = useState<string[]>([]);
   const [aiti, setAiti] = useState<AitiProfile | undefined>(undefined);
@@ -94,11 +97,23 @@ function Shell() {
     let cancelled = false;
     let debounce: ReturnType<typeof setTimeout> | null = null;
     const recompute = () => {
-      void Promise.all([getAllSummaries(), getTopics(), listConversations()])
-        .then(([summaries, topics, conversations]) => {
+      void Promise.all([
+        getAllSummaries(),
+        getTopics(),
+        listConversations(),
+        // Learn's synthesized route names follow the agent output-language
+        // setting (UI locale as fallback), mirroring the classify pipeline.
+        window.vesti?.getSettings().catch(() => null) ?? Promise.resolve(null),
+        window.vestiUi?.getUiPreference("language").catch(() => null) ?? Promise.resolve(null),
+      ])
+        .then(([summaries, topics, conversations, settings, uiLanguage]) => {
           if (cancelled) return;
+          const learnLang = resolveClassifyLanguage(
+            settings?.agent?.outputLanguage,
+            (uiLanguage as { locale?: string } | null)?.locale,
+          );
           setAiti(computeAiti(summaries));
-          setLearn(computeLearn(summaries, topics, conversations));
+          setLearn(computeLearn(summaries, topics, conversations, undefined, undefined, learnLang));
         })
         .catch(() => {
           if (cancelled) return;
@@ -183,7 +198,13 @@ function Shell() {
           {page === "settings" ? (
             <SettingsPage themeMode={themeMode} onToggleTheme={() => void toggleTheme()} />
           ) : page === "home" ? (
-            <HomeDashboard onOpenLibrary={() => setPage("library")} />
+            <HomeDashboard
+              onOpenLibrary={() => setPage("library")}
+              onOpenSource={(platform) => {
+                setLibraryPlatformFilter(platform);
+                setPage("library");
+              }}
+            />
           ) : showLoading ? (
             <LoadingState copy={LOADING_COPY[locale] ?? LOADING_COPY.en} />
           ) : (
@@ -205,6 +226,8 @@ function Shell() {
               lang={lang}
               tab={dashboardTab}
               onTabChange={(tab) => setPage(tab)}
+              libraryPlatformFilter={libraryPlatformFilter}
+              onLibraryPlatformFilterApplied={() => setLibraryPlatformFilter(null)}
             />
           )}
         </main>

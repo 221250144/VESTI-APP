@@ -10,6 +10,7 @@ import {
   formatRelayFileAnchorBlock,
   type RelayFileAnchor,
 } from "./relayFiles";
+import type { ProjectStateView } from "../../shared/contracts";
 
 /** Total transcript budget handed to the relay agent. The main process caps
  * transcriptOverride at 30K, so this always fits.
@@ -20,7 +21,12 @@ export const RELAY_CONTEXT_BUDGET_CHARS = 28_000;
 /** Budget when only a single conversation is selected — most of the handoff
  * value comes from the target session's own details. */
 export const RELAY_SINGLE_CONVERSATION_BUDGET_CHARS = 18_000;
-const RECENT_MESSAGE_LIMIT = 8;
+/** Recent-message window per conversation. The excerpt budget per
+ * conversation is typically several thousand chars, so a window of 8
+ * under-used it (8 × 600 ≈ 5K) and dropped the mid-session decision trail the
+ * digest missed; 12 keeps the window evidence-rich while the per-conversation
+ * budget remains the real cap. */
+const RECENT_MESSAGE_LIMIT = 12;
 const MESSAGE_EXCERPT_MAX_CHARS = 600;
 const SUMMARY_FALLBACK_MAX_CHARS = 600;
 const SNIPPET_FALLBACK_MAX_CHARS = 200;
@@ -90,6 +96,9 @@ export interface RelayPackV2 {
   decisions: RelayPackDecision[];
   failedPaths: RelayPackFailedPath[];
   verification: RelayPackVerification;
+  /** Verify-first checklist for the receiving AI (optional: packs generated
+   * before the checklist rule lack it). */
+  verifyFirst?: string[];
   nextSteps: string[];
   confidence: RelayPackConfidence;
   /** Environment snapshot gathered from tool executions. */
@@ -139,6 +148,23 @@ export interface RelayContextConversation {
   createdAt?: number;
   /** V2: when true, this conversation is the primary and gets weighted budget. */
   isPrimary?: boolean;
+}
+
+/**
+ * Project memory for the relay transcript (memory v2): the L0 deterministic
+ * state card and/or the L2 LLM-maintained brief of each project the selection
+ * touches. This is the most current cross-session project state — exactly
+ * what a handoff pack must summarize — so it rides near the top of the
+ * transcript as a fixed block. The caller (desktopStorage) gathers it over
+ * IPC; the rendering here is pure.
+ */
+export interface RelayProjectMemory {
+  /** Project display label (source tree). */
+  label: string;
+  /** L0 state card (capture store), when it has been rebuilt. */
+  state?: ProjectStateView | null;
+  /** L2 project brief markdown, when the memory service maintains one. */
+  briefMarkdown?: string | null;
 }
 
 /**
@@ -282,6 +308,70 @@ function buildKeyFilesAggregate(
   return `## 关键文件汇总（跨会话去重）\n${files.join("、")}`;
 }
 
+// ---- Project memory block (L0 state card + L2 brief) -------------------------
+
+const PROJECT_MEMORY_PROJECT_LIMIT = 2;
+const PROJECT_MEMORY_BRIEF_MAX_CHARS = 1_500;
+const PROJECT_MEMORY_FILE_LIMIT = 5;
+const PROJECT_MEMORY_QUESTION_LIMIT = 5;
+
+/** Newline-preserving clip for the L2 brief (truncateText collapses
+ * whitespace, which would flatten the brief's Markdown structure). */
+function clipMultilineText(value: string, maxChars: number): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+  return `${trimmed.slice(0, Math.max(0, maxChars - 1))}…`;
+}
+
+/**
+ * Render the project-memory block injected near the top of the relay
+ * transcript (after the file anchors, before the per-conversation heads).
+ * Returns null when no project carries any memory — the block is then omitted
+ * entirely.
+ */
+export function buildProjectMemoryBlock(
+  memory: RelayProjectMemory[] | undefined
+): string | null {
+  const usable = (memory ?? [])
+    .filter(
+      (entry) =>
+        entry.state || Boolean(entry.briefMarkdown?.trim()) || entry.label.trim()
+    )
+    .slice(0, PROJECT_MEMORY_PROJECT_LIMIT);
+  if (usable.length === 0) return null;
+  const sections = usable.map((entry) => {
+    const lines: string[] = [
+      `### 项目：${truncateText(entry.label || "未命名项目", 80)}`,
+    ];
+    const state = entry.state;
+    if (state) {
+      const facts = [
+        state.oneLiner ? truncateText(state.oneLiner, 200) : null,
+        `${state.sessionCount} 个会话`,
+        state.lastActive ? `最近活跃 ${state.lastActive.slice(0, 10)}` : null,
+      ].filter((fact): fact is string => Boolean(fact));
+      if (facts.length > 0) lines.push(`L0 状态卡：${facts.join(" · ")}`);
+      const files = state.activeFiles
+        .slice(0, PROJECT_MEMORY_FILE_LIMIT)
+        .map((file) => `${file.path}（${file.touches} 次）`);
+      if (files.length > 0) lines.push(`活跃文件：${files.join("、")}`);
+      const openQuestions = joinList(
+        state.openQuestions,
+        PROJECT_MEMORY_QUESTION_LIMIT
+      );
+      if (openQuestions) lines.push(`未决问题：${openQuestions}`);
+    }
+    const brief = entry.briefMarkdown?.trim();
+    if (brief) {
+      lines.push(
+        `L2 项目简报：\n${clipMultilineText(brief, PROJECT_MEMORY_BRIEF_MAX_CHARS)}`
+      );
+    }
+    return lines.join("\n");
+  });
+  return `## 项目记忆（跨会话状态，优先采信）\n${sections.join("\n\n")}`;
+}
+
 /**
  * Most-recent message excerpts fitting `budgetChars`. Walks the tail of the
  * chronological list newest-first, then re-orders chronologically; when the
@@ -323,6 +413,11 @@ function collectMessageExcerpts(
  * very top of the transcript (counted against the budget) and the relay
  * prompt pins the model's key_files output to that list.
  *
+ * `options.projectMemory` (memory v2): L0/L2 project state for the projects
+ * the selection touches — when present, a "项目记忆（跨会话状态，优先采信）"
+ * block rides directly under the anchors (counted against the budget) and the
+ * relay prompt treats it as the most current project state.
+ *
  * `options.primaryConversationId` (V2): when set, the matching conversation
  * is treated as the weighted primary for budget allocation regardless of
  * its `isPrimary` flag.
@@ -332,6 +427,7 @@ export function buildRelayTranscript(
   budgetChars: number = RELAY_CONTEXT_BUDGET_CHARS,
   options: {
     fileAnchors?: RelayFileAnchor[];
+    projectMemory?: RelayProjectMemory[];
     primaryConversationId?: number;
   } = {}
 ): string {
@@ -362,14 +458,16 @@ export function buildRelayTranscript(
       return index >= 0 ? `会话 ${index + 1}` : null;
     }
   );
+  const memoryBlock = buildProjectMemoryBlock(options.projectMemory);
   const aggregate = buildKeyFilesAggregate(conversations);
   const heads = conversations.map((conversation, index) =>
     buildConversationHead(conversation, index)
   );
   const separator = "\n\n";
-  // Fixed head blocks, top first: file anchors, digest aggregate, per-
-  // conversation heads — all always kept, all counted against the budget.
-  const fixedBlocks = [anchorBlock, aggregate, ...heads].filter(
+  // Fixed head blocks, top first: file anchors, project memory, digest
+  // aggregate, per-conversation heads — all always kept, all counted against
+  // the budget.
+  const fixedBlocks = [anchorBlock, memoryBlock, aggregate, ...heads].filter(
     (block): block is string => Boolean(block)
   );
   const fixedTotal =
@@ -437,7 +535,8 @@ export function buildRelayTranscript(
     }
   }
 
-  const headCount = (anchorBlock ? 1 : 0) + (aggregate ? 1 : 0);
+  const headCount =
+    (anchorBlock ? 1 : 0) + (memoryBlock ? 1 : 0) + (aggregate ? 1 : 0);
   const blocks = conversations.map((conversation, index) => {
     const budgetForThis = perConversationBudgets[index] ?? Math.floor(excerptBudget / conversations.length);
     const excerpts = collectMessageExcerpts(conversation.messages, budgetForThis);

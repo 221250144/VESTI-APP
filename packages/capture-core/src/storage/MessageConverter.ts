@@ -47,14 +47,17 @@ export class MessageConverter {
       filePath: sub.filePath,
       messageCount: 0,
     }));
-    // Child-side lineage (e.g. Cursor background agents): same id scheme as
-    // the parent-side ref, so INSERT OR IGNORE dedups if both sides exist.
+    // Child-side lineage (e.g. Cursor background agents, kimi-code sub
+    // wires): when the adapter names an agentId the link id matches the
+    // parent-side ref (`parent:agent`), so the two insert paths dedup; the
+    // upsert in insertSubagentLink upgrades child_session_id either way.
     if (session.subagentOf) {
+      const agentId = session.subagentOf.agentId ?? session.sessionId;
       subagentLinks.push({
-        id: `${session.subagentOf.parentSessionId}:${session.sessionId}`,
+        id: `${session.subagentOf.parentSessionId}:${agentId}`,
         parentSessionId: session.subagentOf.parentSessionId,
         childSessionId: sessionId,
-        agentId: session.sessionId,
+        agentId,
         agentRole: session.subagentOf.agentRole,
         slug: session.subagentOf.agentRole,
         filePath: typeof session.meta?.source_database === 'string' ? session.meta.source_database : '',

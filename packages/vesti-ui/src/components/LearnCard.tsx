@@ -38,6 +38,8 @@ interface LearnCardProps {
   onOpenAiti?: () => void;
   /** "继续深入": jump to Ask with a prefilled follow-up about this domain. */
   onExploreTopic?: (question: string) => void;
+  /** "发起圆桌": hand this domain to the roundtable as a seeded topic. */
+  onRoundtableTopic?: (question: string) => void;
   storage?: StorageApi;
   sendToLabels?: DashboardLabels["library"];
   /** Transcript/analysis language for AI 深化 runs; defaults to "zh". */
@@ -71,6 +73,7 @@ export function LearnCard({
   onOpenConversation,
   onOpenAiti,
   onExploreTopic,
+  onRoundtableTopic,
   storage,
   sendToLabels,
   lang = "zh",
@@ -194,7 +197,9 @@ export function LearnCard({
                 const deepPct = Math.round((d.deep / total) * 100);
                 const modPct = Math.round((d.moderate / total) * 100);
                 const domainName = d.name || labels.uncategorized;
-                const domainKey = `${d.topicId ?? "null"}`;
+                // Synthetic clusters (project / platform / assorted) all share
+                // topicId null — the name disambiguates their keys.
+                const domainKey = d.topicId !== null ? String(d.topicId) : `synthetic:${d.name}`;
                 const deepenState = deepenByDomain[domainKey];
                 // The uncategorized bucket gets no AI 深化 (see header note).
                 const showDeepenAi =
@@ -265,6 +270,19 @@ export function LearnCard({
                         >
                           <Sparkles className="h-3.5 w-3.5" strokeWidth={1.75} />
                           {labels.deepenAi}
+                        </button>
+                      ) : null}
+                      {/* 发起圆桌: seed the roundtable with this domain as topic. */}
+                      {onRoundtableTopic ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onRoundtableTopic(labels.roundtablePrompt.replace("{topic}", domainName))
+                          }
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-border-subtle px-2.5 py-1 text-[11.5px] font-medium text-accent-primary transition-colors hover:bg-accent-primary-light"
+                        >
+                          <MessagesSquare className="h-3.5 w-3.5" strokeWidth={1.75} />
+                          {labels.toRoundtable}
                         </button>
                       ) : null}
                     </div>
@@ -367,7 +385,7 @@ export function LearnCard({
                       const domainName = d.name || labels.uncategorized;
                       return (
                         <div
-                          key={`compact-${d.topicId ?? "null"}`}
+                          key={d.topicId !== null ? `compact-${d.topicId}` : `compact-synthetic:${d.name}`}
                           className="flex items-center gap-1.5 rounded-md border border-border-subtle bg-bg-surface-card px-2.5 py-1 text-[11px] text-text-secondary"
                         >
                           <span className="max-w-[160px] truncate">{domainName}</span>

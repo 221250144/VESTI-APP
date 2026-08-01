@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  appendQuickAskHistory,
   assembleCapsuleRelayDraft,
   buildQuickAskTranscript,
   CAPSULE_DRAFT_BUDGET_CHARS,
@@ -9,7 +10,7 @@ import {
   searchCapsulePrompts,
   type CapsuleDraftSessionInput,
 } from './capsuleDock';
-import type { CapsulePromptSnapshot } from '../shared/contracts';
+import { DEMO_PROXY_MODEL_IDS, type CapsulePromptSnapshot } from '../shared/contracts';
 
 function session(overrides: Partial<CapsuleDraftSessionInput> = {}): CapsuleDraftSessionInput {
   return {
@@ -271,5 +272,59 @@ describe('buildQuickAskTranscript', () => {
     ], { language: 'zh-CN' });
     expect(full).toContain('召回的历史会话片段');
     expect(full).toContain('一句话：聊了重定向');
+  });
+});
+
+describe('appendQuickAskHistory', () => {
+  const base = buildQuickAskTranscript([
+    { title: '会话 A', oneLiner: '聊了重定向', snippet: '细节……' },
+  ], { language: 'zh-CN' });
+
+  it('returns the transcript untouched without usable turns', () => {
+    expect(appendQuickAskHistory(base, [], { language: 'zh-CN' })).toBe(base);
+    expect(
+      appendQuickAskHistory(base, [{ question: '  ', answer: '' }], { language: 'zh-CN' }),
+    ).toBe(base);
+  });
+
+  it('appends recent turns after the recall context (zh + en)', () => {
+    const zh = appendQuickAskHistory(base, [
+      { question: '重定向为什么循环？', answer: '因为 302 相互指向。' },
+    ], { language: 'zh-CN' });
+    expect(zh).toContain('最近的快速问答');
+    expect(zh).toContain('重定向为什么循环？');
+    expect(zh).toContain('因为 302 相互指向。');
+
+    const en = appendQuickAskHistory(base, [
+      { question: 'why loop?', answer: 'mutual 302s.' },
+    ], { language: 'en-US' });
+    expect(en).toContain('Recent quick-ask exchanges');
+    expect(en).toContain('why loop?');
+  });
+
+  it('keeps only the newest turns within the cap', () => {
+    const turns = Array.from({ length: 6 }, (_, index) => ({
+      question: `问题 ${index}`,
+      answer: `回答 ${index}`,
+    }));
+    const text = appendQuickAskHistory(base, turns, { language: 'zh-CN', maxTurns: 2 });
+    expect(text).toContain('问题 5');
+    expect(text).toContain('问题 4');
+    expect(text).not.toContain('问题 3');
+  });
+});
+
+describe('DEMO_PROXY_MODEL_IDS', () => {
+  // The gateway silently falls back to qwen-plus for anything off-whitelist;
+  // pin the list so an accidental edit (renamed id, dropped model) fails here
+  // instead of shipping a picker that lies about which model answers.
+  it('pins exactly the gateway whitelist, qwen-plus as the default first', () => {
+    expect([...DEMO_PROXY_MODEL_IDS]).toEqual([
+      'qwen-plus',
+      'qwen-turbo',
+      'qwen-max',
+      'deepseek-v3',
+      'deepseek-r1',
+    ]);
   });
 });

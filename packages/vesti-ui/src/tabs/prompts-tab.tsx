@@ -397,11 +397,21 @@ export function PromptsTab({
       } catch {
         /* ignore */
       }
-      setToast(
-        labels.toastExtract
+      // Distinguish the three ways "nothing new" happens — before this the
+      // toast always read "archived 0 of N candidates", which looked broken.
+      let message: string;
+      if (result.candidates === 0) {
+        message = labels.toastExtractEmpty;
+      } else if (result.created === 0) {
+        message = labels.toastExtractNone.replace("{candidates}", String(result.candidates));
+      } else {
+        message = labels.toastExtract
           .replace("{created}", String(result.created))
-          .replace("{candidates}", String(result.candidates)),
-      );
+          .replace("{candidates}", String(result.candidates));
+      }
+      // An attempted-but-failed LLM distill falls back to heuristics; say so.
+      if (result.llmError) message = `${message} ${labels.toastExtractLlmFallback}`;
+      setToast(message);
       await load();
     } catch (extractError) {
       setToast((extractError as Error)?.message ?? labels.extractFailed);

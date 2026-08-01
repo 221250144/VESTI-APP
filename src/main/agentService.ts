@@ -2,18 +2,41 @@ import { net, session } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import type {
-  AgentResult,
-  AgentRunRequest,
-  LlmTestResult,
-  SessionDetail,
-  SessionMessage,
+import {
+  DEMO_PROXY_MODEL_IDS,
+  type AgentResult,
+  type AgentRunRequest,
+  type LlmTestResult,
+  type SessionDetail,
+  type SessionMessage,
 } from '../shared/contracts';
 import { getAgentKindDefinition } from './agentPrompts';
 import type { CaptureService } from './captureService';
 import type { RuntimeAgentSettings, RuntimeLlmSettings, SettingsService } from './settingsService';
 
 const MAX_TRANSCRIPT_CHARACTERS = 80_000;
+/** Settings upper bound for max_tokens (mirrors settingsService's 128–16_384
+ * range); per-kind floors below can never push past it. */
+const MAX_TOKENS_SETTINGS_CAP = 16_384;
+/**
+ * Per-kind output-token floors. Kinds that answer with a long structured
+ * document are silently degraded by the global default (1600): the relay pack
+ * either truncates mid-JSON (parse then throws) or the model guts sections to
+ * fit. The user setting wins when it is higher; kinds not listed keep it
+ * verbatim.
+ */
+const KIND_MIN_MAX_TOKENS: Record<string, number> = {
+  // Relay V2 pack: goal + state + decisions + failed paths + verification +
+  // verify-first checklist + an embedded paste-ready handoff prompt.
+  relay: 4096,
+};
+
+function effectiveMaxTokens(kind: string, configured: number): number {
+  return Math.min(
+    MAX_TOKENS_SETTINGS_CAP,
+    Math.max(configured, KIND_MIN_MAX_TOKENS[kind] ?? 0)
+  );
+}
 
 export class AgentService {
   constructor(
@@ -34,6 +57,10 @@ export class AgentService {
     if (!transcript.trim()) throw new Error('该会话没有可用于分析的文本内容');
 
     const llm = this.settings.getRuntimeLlm();
+    // Per-kind output budget: kinds with a floor (relay) get their long
+    // structured answer protected from the global default's truncation.
+    llm.maxTokens = effectiveMaxTokens(request.kind, llm.maxTokens);
+    llm.modelId = this.resolveModelId(llm, request.modelId);
     const question = request.question?.trim();
     const definition = getAgentKindDefinition(request.kind);
     const raw = await this.complete(llm, definition.buildPrompt({ transcript, question, template: request.template, preferences }));
@@ -81,6 +108,22 @@ export class AgentService {
 
   private get resultsPath(): string {
     return path.join(this.capture.activeDataDirectory, 'agent-results', 'results.json');
+  }
+
+  /**
+   * Per-request model override (capsule quick-ask picker). In demo-proxy mode
+   * only the gateway whitelist may be sent — anything else is REJECTED rather
+   * than passed through, because the gateway would silently fall back to
+   * qwen-plus while the UI showed the requested name. BYOK accepts any
+   * non-empty id.
+   */
+  private resolveModelId(llm: RuntimeLlmSettings, requested: string | undefined): string {
+    const override = requested?.trim().slice(0, 100);
+    if (!override) return llm.modelId;
+    if (llm.mode === 'demo_proxy' && !(DEMO_PROXY_MODEL_IDS as readonly string[]).includes(override)) {
+      throw new Error(`演示代理暂不支持模型「${override}」，可选：${DEMO_PROXY_MODEL_IDS.join('、')}`);
+    }
+    return override;
   }
 
   private buildTranscript(detail: SessionDetail, preferences: RuntimeAgentSettings): string {

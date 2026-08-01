@@ -35,6 +35,9 @@ export type SourceRef = {
 };
 
 export type SourceSelection =
+  /** Platform-wide pick (home-dashboard source deep link): every host of the
+   * platform matches, native and WSL alike — no single tree node owns it. */
+  | { kind: "platform"; platform: string }
   | { kind: "source"; source: SourceRef }
   | { kind: "project"; source: SourceRef; projectKey: string }
   | { kind: "topic"; source: SourceRef; projectKey: string; topicId: number };
@@ -259,7 +262,8 @@ export function collectTopicSubtreeIds(topics: Topic[], topicId: number): Set<nu
  * Filter the library conversation list by a source-tree selection. Topic
  * selections include the whole topic subtree (matching the aggregated counts)
  * and stay scoped to the enclosing project, so the list matches the counts
- * shown in the tree. A1: subagent sessions are folded under their parent and
+ * shown in the tree; platform selections span every host of that platform
+ * (native + WSL). A1: subagent sessions are folded under their parent and
  * never listed here — they surface through the parent card's subagent strip.
  */
 export function filterConversationsBySelection<T extends Conversation>(
@@ -277,6 +281,9 @@ export function filterConversationsBySelection<T extends Conversation>(
     if (isSubagentConversation(conversation, lookup)) return false;
     const placement = resolveConversationPlacement(conversation, lookup);
     if (!placement) return false;
+    if (selection.kind === "platform") {
+      return placement.source.platform === selection.platform;
+    }
     if (!sameSource(placement.source, selection.source)) return false;
     if (selection.kind === "source") return true;
     if (placement.projectKey !== selection.projectKey) return false;
@@ -433,6 +440,9 @@ export function describeSelection(
   topics: Topic[],
   browserLabel = "Browser",
 ): string {
+  if (selection.kind === "platform") {
+    return sourcePlatformLabel(selection.platform, browserLabel);
+  }
   const sourceNode = model.sources.find(
     (node) => node.platform === selection.source.platform && node.host === selection.source.host,
   );

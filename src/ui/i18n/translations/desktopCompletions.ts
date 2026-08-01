@@ -60,7 +60,10 @@ export const jaDesktopCompletion = {
       exportMarkdown: ".md をフォルダーへ出力…", exportedTo: "{path} に出力しました", emptyTitle: "テンプレートまたはナレッジを選択",
       emptyHint: "会話の範囲から要約ドキュメントを生成するか、左側の保存済みナレッジを確認できます。", untitled: "無題", failed: "失敗: {message}",
       scopeDescProject: "プロジェクト: {label}", scopeDescTopic: "トピック: {label}", scopeDescTimerange: "期間: {start} ～ {end}",
-      scopeDescSelection: "手動選択: {count} 件の会話", opsBadge: "変更 {total} 件：追加 {added}・更新 {updated}・削除 {deleted}", opAdd: "追加", opUpdate: "更新", opDelete: "削除", opNoop: "維持", opsReason: "理由",
+      scopeDescSelection: "手動選択: {count} 件の会話", scopeDescAll: "すべての会話", opsBadge: "変更 {total} 件：追加 {added}・更新 {updated}・削除 {deleted}", opAdd: "追加", opUpdate: "更新", opDelete: "削除", opNoop: "維持", opsReason: "理由",
+      sweepAll: "一括ナレッジ生成", sweepAllHint: "すべてのプリセット（背景知識・各プロジェクト状況・文章スタイル）を一度に生成します。",
+      sweepProgress: "生成中 {current}/{total}: {label}",
+      sweepSummary: "一括生成完了：追加 {added}・更新 {updated}・スキップ {skipped}", sweepFailed: "{failed} 件失敗",
     },
     daily: {
       title: "デイリーログ", subtitle: "毎晩まとめられる AI 活動。", unavailable: "現在の環境ではデイリーログを利用できません。",
@@ -90,6 +93,8 @@ export const jaDesktopCompletion = {
       followUpPrompt: "未解決のまま残した質問があります：「{question}」。過去の会話を踏まえて、きちんと解き明かしてください。",
       toRoundtable: "円卓会議へ",
       roundtablePrompt: "「{topic}」について、私の理解の弱い部分はどこですか？次に何へ投資すべきでしょうか？",
+      moreDomains: "+ あと{n}件",
+      uncategorizedIncluded: "· 未分類を含む",
     },
     roundtable: {
       comingSoonTitle: "AI 円卓会議 — 近日公開", comingSoonBody: "構想：異なる視点を持つ AI パネリストを招へいし、モデレーターが合意・相違点・提言をまとめます。マルチターンの調整は現在も磨き上げ中です。本物になるまで、見せかけの実行は表示しません。",
@@ -162,7 +167,10 @@ export const koDesktopCompletion = {
       exportMarkdown: ".md를 폴더로 내보내기…", exportedTo: "{path}(으)로 내보냄", emptyTitle: "템플릿 또는 지식 문서 선택",
       emptyHint: "대화 범위에서 정제 문서를 생성하거나 왼쪽에서 저장된 지식 문서를 검토하세요.", untitled: "제목 없음", failed: "실패: {message}",
       scopeDescProject: "프로젝트: {label}", scopeDescTopic: "주제: {label}", scopeDescTimerange: "기간: {start} ~ {end}",
-      scopeDescSelection: "직접 선택: 대화 {count}개", opsBadge: "변경 {total}건: 추가 {added} · 업데이트 {updated} · 삭제 {deleted}", opAdd: "추가", opUpdate: "업데이트", opDelete: "삭제", opNoop: "유지", opsReason: "이유",
+      scopeDescSelection: "직접 선택: 대화 {count}개", scopeDescAll: "모든 대화", opsBadge: "변경 {total}건: 추가 {added} · 업데이트 {updated} · 삭제 {deleted}", opAdd: "추가", opUpdate: "업데이트", opDelete: "삭제", opNoop: "유지", opsReason: "이유",
+      sweepAll: "한 번에 전체 생성", sweepAllHint: "모든 프리셋(배경 지식·각 프로젝트 상태·글쓰기 스타일)을 한 번에 생성합니다.",
+      sweepProgress: "생성 중 {current}/{total}: {label}",
+      sweepSummary: "전체 생성 완료: 추가 {added} · 업데이트 {updated} · 건너뜀 {skipped}", sweepFailed: "{failed}개 실패",
     },
     daily: {
       title: "일일 로그", subtitle: "매일 저녁 요약되는 AI 활동입니다.", unavailable: "현재 환경에서는 일일 로그를 사용할 수 없습니다.",
@@ -192,6 +200,8 @@ export const koDesktopCompletion = {
       followUpPrompt: "해결하지 못한 질문이 있습니다: \"{question}\". 제 과거 대화를 바탕으로 제대로 설명해 주세요.",
       toRoundtable: "라운드테이블로",
       roundtablePrompt: "\"{topic}\"에서 제 이해가 아직 약한 부분은 어디이고, 다음에는 무엇에 투자할 가치가 있을까요?",
+      moreDomains: "+ {n}개 더",
+      uncategorizedIncluded: "· 미분류 포함",
     },
     roundtable: {
       comingSoonTitle: "AI 라운드테이블 — 출시 예정", comingSoonBody: "계획: 서로 다른 관점을 가진 AI 패널들이 질문을 논의하고, 진행자가 합의·이견·제안을 정리합니다. 멀티턴 오케스트레이션은 아직 다듬는 중이므로, 진짜가 되기 전까지는 가짜 실행을 보여주지 않겠습니다.",

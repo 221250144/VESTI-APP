@@ -121,6 +121,38 @@ describe("serializeRelayPackMarkdown", () => {
     // current_state is empty on v2 packs — the section disappears entirely.
     expect(markdown).not.toContain("## 当前状态");
   });
+
+  it("renders the verify-first checklist when the pack carries one", () => {
+    const markdown = serializeRelayPackMarkdown(
+      pack({
+        pack: {
+          title: "v2 交接",
+          goal: "迁移播放器",
+          current_state: "",
+          completed: [],
+          in_progress: [],
+          git_state: { dirty_files: [], last_commits: [] },
+          key_decisions: [],
+          key_files: [],
+          failed_paths: [],
+          open_issues: [],
+          verification: { commands: ["pnpm test"], last_results: ["42 项通过"] },
+          verify_first: ["重跑 pnpm test 确认 42 项通过", "确认 src/player/decoder.ts 已拆分"],
+          next_steps: [],
+          suggested_prompt: "p",
+        },
+      })
+    );
+    expect(markdown).toContain("## 接手先验证");
+    expect(markdown).toContain("1. 重跑 pnpm test 确认 42 项通过");
+    expect(markdown).toContain("2. 确认 src/player/decoder.ts 已拆分");
+    // The checklist rides right after the verification section.
+    expect(markdown.indexOf("## 验证")).toBeLessThan(markdown.indexOf("## 接手先验证"));
+  });
+
+  it("omits the verify-first section when the checklist is absent or empty", () => {
+    expect(serializeRelayPackMarkdown(pack())).not.toContain("接手先验证");
+  });
 });
 
 describe("normalizeRelayPackPayload", () => {
@@ -192,5 +224,21 @@ describe("normalizeRelayPackPayload", () => {
     expect(markdown).toContain("## 当前状态\n\n旧状态");
     expect(markdown).not.toContain("## 已完成");
     expect(markdown).not.toContain("## 置信度");
+  });
+
+  it("passes verify_first through when present, drops it when empty", () => {
+    const withList = normalizeRelayPackPayload({
+      title: "t",
+      goal: "g",
+      suggested_prompt: "p",
+      verify_first: ["重跑 pnpm test", 42],
+    });
+    expect(withList.verify_first).toEqual(["重跑 pnpm test"]);
+    const without = normalizeRelayPackPayload({ title: "t", goal: "g", suggested_prompt: "p" });
+    expect(without.verify_first).toBeUndefined();
+    const empty = normalizeRelayPackPayload({
+      title: "t", goal: "g", suggested_prompt: "p", verify_first: [],
+    });
+    expect(empty.verify_first).toBeUndefined();
   });
 });

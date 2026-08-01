@@ -1125,11 +1125,13 @@ export class DatabaseManager {
 
   insertSubagentLink(link: SubagentLink): void {
     this.getDb().prepare(`
-      INSERT OR IGNORE INTO subagent_links (
+      INSERT INTO subagent_links (
         id, parent_session_id, child_session_id, agent_id, agent_role, slug, file_path, message_count, spawned_at
       ) VALUES (
         @id, @parentSessionId, @childSessionId, @agentId, @agentRole, @slug, @filePath, @messageCount, @spawnedAt
       )
+      ON CONFLICT(id) DO UPDATE SET
+        child_session_id = COALESCE(excluded.child_session_id, child_session_id)
     `).run({
       id: link.id,
       parentSessionId: link.parentSessionId,
@@ -1141,6 +1143,14 @@ export class DatabaseManager {
       messageCount: link.messageCount ?? 0,
       spawnedAt: link.spawnedAt ?? null,
     });
+    // A child has exactly one parent: once a link names the child session,
+    // drop rows that mount the same child elsewhere (e.g. stale rows from
+    // before nested parentAgentId lineage was honored).
+    if (link.childSessionId) {
+      this.getDb().prepare(
+        'DELETE FROM subagent_links WHERE child_session_id = ? AND id != ?'
+      ).run(link.childSessionId, link.id);
+    }
   }
 
   getSubagentLinks(sessionId: string): SubagentLink[] {
@@ -1238,8 +1248,13 @@ export class DatabaseManager {
   }
 
   updateSubagentLinkChild(linkId: string, childSessionId: string): void {
-    this.getDb().prepare(
+    const db = this.getDb();
+    db.prepare(
       'UPDATE subagent_links SET child_session_id = ? WHERE id = ?'
+    ).run(childSessionId, linkId);
+    // Same single-parent invariant as insertSubagentLink.
+    db.prepare(
+      'DELETE FROM subagent_links WHERE child_session_id = ? AND id != ?'
     ).run(childSessionId, linkId);
   }
 

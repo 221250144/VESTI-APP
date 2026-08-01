@@ -450,6 +450,9 @@ export interface PromptExtractionResult {
   skipped: number
   candidates: number
   usedLlm: boolean
+  /** Set when the LLM distill step was attempted and failed (heuristic path
+   * still ran); null otherwise. Lets the UI surface the fallback. */
+  llmError?: string | null
 }
 
 export interface PromptCompletionResult {
@@ -951,6 +954,8 @@ export interface RelayPackPayload {
   failed_paths: RelayPackFailedPath[]
   open_issues: string[]
   verification: RelayPackVerification
+  /** Verify-first checklist (additive v2); absent on older packs. */
+  verify_first?: string[]
   next_steps: string[]
   /** Absent on v1 packs and when the model gave no usable confidence. */
   confidence?: RelayPackConfidence

@@ -29,6 +29,16 @@ describe('prompt-improve kind', () => {
     expect(messages[1].content).toContain(SAMPLE_PROMPT);
   });
 
+  it('threads the user instruction into the refine prompt when provided', () => {
+    const messages = getAgentKindDefinition('prompt-improve').buildPrompt({
+      transcript: SAMPLE_PROMPT,
+      question: '更简洁',
+      preferences: zhPreferences,
+    });
+    expect(messages[1].content).toContain('更简洁');
+    expect(messages[1].content).toContain(SAMPLE_PROMPT);
+  });
+
   it('parses clean JSON output and normalizes the shape', () => {
     const parsed = parsePromptImprovePayload(
       '{"improved": "  优化后的提示词  ", "notes": ["要点一", "要点二"]}',

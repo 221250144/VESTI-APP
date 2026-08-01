@@ -79,11 +79,13 @@ const COPY: Record<SupportedLocale, OnboardingCopy> = {
 };
 
 // Per-step content (separate from the shared labels above).
+type StepBase = "welcome" | "capture" | "library" | "explore" | "settings";
+
 interface StepContent {
   icon: string;
-  titleKey: keyof typeof STEP_TITLES;
-  bodyKey: keyof typeof STEP_BODIES;
-  featuresKey: keyof typeof STEP_FEATURES;
+  titleKey: StepBase;
+  bodyKey: StepBase;
+  featuresKey: StepBase;
 }
 
 const STEP_TITLES = {
@@ -163,8 +165,8 @@ const STEPS: StepContent[] = [
   { icon: "⚙️", titleKey: "settings", bodyKey: "settings", featuresKey: "settings" },
 ];
 
-function tKey(locale: SupportedLocale, base: string): string {
-  return `${base}_${locale}` as keyof typeof STEP_TITLES;
+function tKey(locale: SupportedLocale, base: StepBase): keyof typeof STEP_TITLES {
+  return `${base}_${locale}`;
 }
 
 export interface OnboardingProps {

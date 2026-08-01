@@ -234,7 +234,13 @@ export function Capsule() {
         {view === 'home' && (
           <>
             <div className="capsule-home">
-              <QuickAsk copy={copy} llmConfigured={llmConfigured} onToast={showToast} />
+              <QuickAsk
+                copy={copy}
+                llmConfigured={llmConfigured}
+                llmMode={dockStatus?.llmMode}
+                defaultModelId={dockStatus?.defaultModelId}
+                onToast={showToast}
+              />
               <div className="capsule-home-actions">
                 <button
                   type="button"

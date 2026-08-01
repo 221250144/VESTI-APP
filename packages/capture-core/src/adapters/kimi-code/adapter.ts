@@ -103,11 +103,27 @@ export class KimiCodeAdapter implements AgentAdapter {
 
     if (!session.model) session.model = await this.getDefaultModel();
 
-    // Main wire advertises its subagents; SyncEngine links them by file path
-    // once the sub wire files are synced as standalone sessions.
-    if (agentName === 'main') {
-      session.subagents = await this.discoverSubagents(sessionDir, state);
+    if (agentName !== 'main') {
+      // Child-side lineage: the sub wire's own state.json roster entry names
+      // its parent agent, so the link lands resolved at insert time — no
+      // dependency on the parent wire being (re-)parsed or on file-path
+      // matching. Nested runs (parentAgentId = another agent) mount under
+      // that agent's wire session. agentId reuses the parent-side link id.
+      const parentAgentId = state?.agents?.[agentName]?.parentAgentId;
+      const parentWireId = parentAgentId && parentAgentId !== 'main'
+        ? `${sessionDirName}--${parentAgentId}`
+        : sessionDirName;
+      session.subagentOf = {
+        parentSessionId: `kimi-code:${parentWireId}`,
+        agentId: agentName,
+        agentRole: state?.agents?.[agentName]?.swarmItem,
+      };
     }
+
+    // Every agent wire advertises its direct children; SyncEngine links them
+    // by file path once the child wire files are synced as standalone
+    // sessions (the child-side subagentOf above resolves them regardless).
+    session.subagents = await this.discoverSubagents(sessionDir, state, agentName);
 
     return session;
   }
@@ -140,28 +156,36 @@ export class KimiCodeAdapter implements AgentAdapter {
   }
 
   /**
-   * Subagent refs for the main session. state.json's agents map is
-   * authoritative; the agents/ directory listing is the fallback.
+   * Subagent refs for one agent wire. state.json's agents map is
+   * authoritative: each agent claims exactly its direct children
+   * (parentAgentId === agentName), so nested runs mount under the agent that
+   * spawned them instead of all flattening under main. Without a roster the
+   * agents/ directory listing is the fallback (main claims everything, the
+   * legacy behavior — nesting is unknowable then).
    */
-  private async discoverSubagents(sessionDir: string, state: KimiSessionState | null): Promise<SubagentRef[]> {
+  private async discoverSubagents(sessionDir: string, state: KimiSessionState | null, agentName: string): Promise<SubagentRef[]> {
     const agentsDir = path.join(sessionDir, 'agents');
     const refs: SubagentRef[] = [];
     const seen = new Set<string>();
 
     const push = (agentId: string, slug?: string) => {
-      if (agentId === 'main' || seen.has(agentId)) return;
+      if (agentId === agentName || seen.has(agentId)) return;
       const wirePath = path.join(agentsDir, agentId, 'wire.jsonl');
       if (!fs.existsSync(wirePath)) return;
       seen.add(agentId);
       refs.push({ agentId, slug, filePath: wirePath });
     };
 
-    for (const [agentId, info] of Object.entries(state?.agents ?? {})) {
-      if (info?.type === 'sub' || (agentId !== 'main' && info)) {
-        push(agentId, info?.swarmItem);
+    const roster = state?.agents;
+    if (roster && Object.keys(roster).length > 0) {
+      for (const [agentId, info] of Object.entries(roster)) {
+        const parent = info?.parentAgentId ?? 'main';
+        if (parent === agentName) push(agentId, info?.swarmItem);
       }
+      return refs;
     }
 
+    if (agentName !== 'main') return refs;
     try {
       if (await fs.pathExists(agentsDir)) {
         for (const entry of await fs.readdir(agentsDir, { withFileTypes: true })) {

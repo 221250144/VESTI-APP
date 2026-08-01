@@ -122,6 +122,10 @@ type LibraryTabProps = {
   themeMode?: UiThemeMode;
   openConversationId?: number | null;
   onConversationOpened?: () => void;
+  /** One-shot platform filter request (home-dashboard source deep link):
+   * applied like a source-tree pick, then handed back via the callback. */
+  platformFilter?: string | null;
+  onPlatformFilterApplied?: () => void;
   returnToSourceLabel?: string | null;
   onReturnToSource?: () => void;
   labels?: Record<string, any>;
@@ -548,6 +552,8 @@ export function LibraryTab({
   themeMode = "light",
   openConversationId,
   onConversationOpened,
+  platformFilter,
+  onPlatformFilterApplied,
   returnToSourceLabel = null,
   onReturnToSource,
   labels: providedLabels,
@@ -1817,6 +1823,22 @@ export function LibraryTab({
     onConversationOpened,
     selectedConversationId,
   ]);
+
+  // Home-dashboard source deep link: apply the platform-wide source filter
+  // with the same reset contract as a source-tree pick, then hand back so
+  // repeat clicks re-trigger. The filter itself re-resolves once the
+  // conversation tree finishes loading (treeLookup is a filter dep).
+  useEffect(() => {
+    if (!platformFilter) return;
+    void flushPendingNoteSaveRef.current();
+    setViewMode("conversations");
+    setListFilter("all");
+    setSelectedTag(null);
+    setSourceSelection({ kind: "platform", platform: platformFilter });
+    setSelectedConversationId(null);
+    setIsSplitNavigationOpen(false);
+    onPlatformFilterApplied?.();
+  }, [platformFilter, onPlatformFilterApplied]);
 
   function getConversationLinkedNotes(conversationId: number): Note[] {
     return notes

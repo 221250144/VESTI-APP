@@ -6,6 +6,7 @@
 import fs from 'fs-extra';
 import path from 'path';
 import type { AgentPlatform } from '../types/index.js';
+import type { SubagentLink } from '../types/unified.js';
 import type { AdapterManager } from '../adapters/AdapterManager.js';
 import type { DatabaseManager } from '../storage/DatabaseManager.js';
 import type { VaultManager } from '../storage/VaultManager.js';
@@ -31,6 +32,14 @@ export interface SyncFileResult {
 
 export class SyncEngine {
   private vault?: VaultManager;
+  /**
+   * Child-side links whose parent session was not stored yet (FK on
+   * parent_session_id rejected them). Retried at the top of every
+   * resolveSubagentLinks() call — each sync path runs one after storing
+   * sessions, so a child-first event order still lands its link in the same
+   * sync round.
+   */
+  private pendingSubagentLinks = new Map<string, SubagentLink>();
 
   constructor(
     private adapters: AdapterManager,
@@ -150,6 +159,7 @@ export class SyncEngine {
       toolExecutions: 0,
       turns: 0,
     };
+    let linkDeferred = false;
 
     for (const session of sessions) {
       if (session.messages.length === 0) continue;
@@ -187,7 +197,18 @@ export class SyncEngine {
       this.db.insertContextCompactions(converted.contextCompactions);
 
       for (const link of converted.subagentLinks) {
-        this.db.insertSubagentLink(link);
+        try {
+          this.db.insertSubagentLink(link);
+        } catch (err) {
+          // Child-side lineage (kimi-code sub wire, Cursor background agent)
+          // can arrive before the parent session is stored; the FK on
+          // parent_session_id rejects the row. Queue it for the next
+          // resolveSubagentLinks() run and leave sync_state unset so the
+          // file re-parses (and retries) after a restart too.
+          if ((err as { code?: string })?.code !== 'SQLITE_CONSTRAINT_FOREIGNKEY') throw err;
+          this.pendingSubagentLinks.set(link.id, link);
+          linkDeferred = true;
+        }
       }
 
       totals.sessions++;
@@ -196,17 +217,20 @@ export class SyncEngine {
       totals.turns += Math.max(0, converted.turns.length - previousTurnCount);
     }
 
-    // Update sync state
-    const onlySession = sessions.length === 1 ? sessions[0] : undefined;
-    this.db.setSyncState(
-      filePath,
-      platform,
-      size,
-      mtimeMs,
-      onlySession?.sessionId,
-      onlySession ? `${platform}:${onlySession.sessionId}` : undefined,
-      parserVersion,
-    );
+    // Update sync state. Skipped while a subagent link is deferred: the file
+    // must re-parse later so the link retries even without a file change.
+    if (!linkDeferred) {
+      const onlySession = sessions.length === 1 ? sessions[0] : undefined;
+      this.db.setSyncState(
+        filePath,
+        platform,
+        size,
+        mtimeMs,
+        onlySession?.sessionId,
+        onlySession ? `${platform}:${onlySession.sessionId}` : undefined,
+        parserVersion,
+      );
+    }
 
     return totals.sessions > 0 ? totals : null;
   }
@@ -226,6 +250,20 @@ export class SyncEngine {
    */
   async resolveSubagentLinks(): Promise<number> {
     let resolved = 0;
+    // Retry child-side links that arrived before their parent session. A
+    // still-missing parent keeps the link queued; any other failure drops
+    // it (the parent-side ref + file-path resolution is the backstop).
+    for (const [id, link] of this.pendingSubagentLinks) {
+      try {
+        this.db.insertSubagentLink(link);
+        this.pendingSubagentLinks.delete(id);
+        resolved += 1;
+      } catch (err) {
+        if ((err as { code?: string })?.code !== 'SQLITE_CONSTRAINT_FOREIGNKEY') {
+          this.pendingSubagentLinks.delete(id);
+        }
+      }
+    }
     // Pass 1: resolve from sync_state; collect links whose transcript was
     // never synced. Pass 2: sync those files, then resolve again.
     for (let pass = 0; pass < 2; pass += 1) {

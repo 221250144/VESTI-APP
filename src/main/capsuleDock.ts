@@ -7,6 +7,7 @@ import type {
   CapsulePromptHit,
   CapsulePromptSnapshot,
   CapsulePromptSnapshotEntry,
+  CapsuleQuickAskTurn,
   CapsuleRelayDraftRequest,
 } from '../shared/contracts';
 
@@ -375,4 +376,32 @@ export function buildQuickAskTranscript(
   if (text.length <= budget) return text;
   const marker = english ? '\n[context truncated]' : '\n[上下文已截断]';
   return `${text.slice(0, Math.max(0, budget - marker.length))}${marker}`;
+}
+
+/**
+ * Lightweight multi-turn context: append the user's recent quick-ask turns
+ * (kept only in capsule memory, never persisted) after the recall transcript.
+ * Only complete Q/A pairs count; the newest turns win.
+ */
+export function appendQuickAskHistory(
+  transcript: string,
+  turns: CapsuleQuickAskTurn[],
+  options: { language: CapsuleDraftLanguage; maxTurns?: number },
+): string {
+  const recent = turns
+    .filter(turn => turn.question.trim() && turn.answer.trim())
+    .slice(-Math.max(1, options.maxTurns ?? 4));
+  if (recent.length === 0) return transcript;
+  const english = options.language === 'en-US';
+  const block = recent.map((turn, index) => {
+    const question = truncateText(turn.question, 300);
+    const answer = truncateText(turn.answer, 800);
+    return english
+      ? `${index + 1}. User: ${question}\n   You answered: ${answer}`
+      : `${index + 1}. 用户：${question}\n   你当时回答：${answer}`;
+  });
+  const header = english
+    ? 'Recent quick-ask exchanges (oldest first):'
+    : '最近的快速问答（由旧到新）：';
+  return `${transcript}\n\n${header}\n${block.join('\n')}`;
 }

@@ -272,6 +272,13 @@ export interface AgentRunRequest {
    * (batch jobs like digest/classify pipelines). Defaults to true.
    */
   persist?: boolean;
+  /**
+   * Per-request model override (capsule quick-ask picker). Demo-proxy mode
+   * only accepts DEMO_PROXY_MODEL_IDS (anything else is rejected, never
+   * silently sent); BYOK accepts any non-empty id. Defaults to the
+   * settings-level modelId.
+   */
+  modelId?: string;
 }
 
 export interface AgentResult {
@@ -532,6 +539,34 @@ export interface CapsuleQuickAskResult {
   recalled: number;
 }
 
+/**
+ * Models the demo gateway (vesti-gate) actually proxies. Its server-side
+ * whitelist SILENTLY falls back to qwen-plus for anything else, so the app
+ * must never offer or send ids outside this list in demo mode — otherwise the
+ * UI would show one model while another answers. BYOK accepts any id.
+ */
+export const DEMO_PROXY_MODEL_IDS = [
+  'qwen-plus',
+  'qwen-turbo',
+  'qwen-max',
+  'deepseek-v3',
+  'deepseek-r1',
+] as const;
+export type DemoProxyModelId = (typeof DEMO_PROXY_MODEL_IDS)[number];
+
+/** One completed quick-ask exchange, kept client-side for multi-turn context. */
+export interface CapsuleQuickAskTurn {
+  question: string;
+  answer: string;
+}
+
+export interface CapsuleQuickAskOptions {
+  /** Per-request model override (demo mode: whitelist only; BYOK: any id). */
+  modelId?: string;
+  /** Recent completed turns (oldest first); only the last few are used. */
+  history?: CapsuleQuickAskTurn[];
+}
+
 /** AI-refined prompt (agent kind 'prompt-improve'): new body + change notes. */
 export interface CapsulePromptImproveResult {
   improved: string;
@@ -578,6 +613,9 @@ export interface CapsuleDockStatus {
   extensionConnected: boolean;
   /** Capture sources that are enabled and detected as installed. */
   sourceCount: number;
+  /** LLM access mode + the settings-level default model (for model pickers). */
+  llmMode: LlmAccessMode;
+  defaultModelId: string;
 }
 
 export interface CapsuleContextMenuLabels {
@@ -607,7 +645,7 @@ export interface VestiCapsuleApi {
   // ---- P6 dock ----
   getDockStatus(): Promise<CapsuleDockStatus>;
   /** Recall-grounded quick question (agent kind 'explore'). */
-  quickAsk(question: string): Promise<CapsuleQuickAskResult>;
+  quickAsk(question: string, options?: CapsuleQuickAskOptions): Promise<CapsuleQuickAskResult>;
   getProjects(): Promise<CapsuleProjectView[]>;
   /** Assemble the local (no-LLM) handoff draft for a scope. */
   buildRelayDraft(request: CapsuleRelayDraftRequest): Promise<CapsuleRelayDraft>;
@@ -615,8 +653,12 @@ export interface VestiCapsuleApi {
   relayAiPolish(draft: string): Promise<CapsuleRelayPolishResult>;
   /** Search curated catalog + user prompt snapshot. */
   searchPrompts(query: string): Promise<CapsulePromptHit[]>;
-  /** AI-refine a prompt body (agent kind 'prompt-improve', persist:false). */
-  improvePrompt(body: string): Promise<CapsulePromptImproveResult>;
+  /**
+   * AI-refine a prompt body (agent kind 'prompt-improve', persist:false).
+   * `instruction` is the user's natural-language refine request ("更简洁"…);
+   * omitted → the default clarity/reusability pass.
+   */
+  improvePrompt(body: string, instruction?: string): Promise<CapsulePromptImproveResult>;
   /** AI-continue a prompt body (agent kind 'prompt-continue', persist:false). */
   continuePrompt(body: string): Promise<CapsulePromptContinueResult>;
   getPromptSnapshot(): Promise<CapsulePromptSnapshot | null>;

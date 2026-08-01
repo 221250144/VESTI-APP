@@ -6,6 +6,7 @@ import {
   parseDigestPayload,
   parseExtractPayload,
   parseRelayPayload,
+  parseRelayPayloadV2,
   registerAgentKind,
   RELAY_HANDOFF_PREFIX_EN,
   RELAY_HANDOFF_PREFIX_ZH,
@@ -229,7 +230,7 @@ describe('relay agent kind', () => {
     expect(messages[1].content).toContain('handoffPrompt');
     // V2: key_files → files (program-extracted anchors)
     expect(messages[1].content).toContain('files');
-    expect(messages[1].content).toContain('800 字以内');
+    expect(messages[1].content).toContain('1200 字以内');
     // schema v2 fields
     expect(messages[1].content).toContain('completed');
     expect(messages[1].content).toContain('inProgress');
@@ -237,6 +238,7 @@ describe('relay agent kind', () => {
     // V2: failed_paths → failedPaths (camelCase)
     expect(messages[1].content).toContain('failedPaths');
     expect(messages[1].content).toContain('verification');
+    expect(messages[1].content).toContain('verifyFirst');
     expect(messages[1].content).toContain('confidence');
     // V2: new fields
     expect(messages[1].content).toContain('environment');
@@ -287,6 +289,94 @@ describe('relay agent kind', () => {
     });
     expect(en[1].content).toContain('never invent files beyond it');
     expect(en[1].content).toContain('failed attempt and rejection reason');
+  });
+
+  it('shows the schema with straight JSON quotes so the model echoes parseable JSON', () => {
+    const zh = getAgentKindDefinition('relay').buildPrompt({
+      transcript: 'T',
+      preferences: zhPreferences,
+    });
+    // Curly quotes (“”) in the template invite the model to reproduce them,
+    // which breaks JSON.parse downstream — the schema must stay ASCII-quoted.
+    expect(zh[1].content).toContain('"meta"');
+    expect(zh[1].content).toContain('"verifyFirst"');
+    expect(zh[1].content).not.toContain('“meta”');
+    const en = getAgentKindDefinition('relay').buildPrompt({
+      transcript: 'T',
+      preferences: { ...zhPreferences, outputLanguage: 'en-US' },
+    });
+    expect(en[1].content).toContain('"meta"');
+    expect(en[1].content).not.toContain('“meta”');
+  });
+
+  it('pins the verify-first checklist and the project-memory precedence rules (zh and en)', () => {
+    const zh = getAgentKindDefinition('relay').buildPrompt({
+      transcript: 'T',
+      preferences: zhPreferences,
+    });
+    expect(zh[1].content).toContain('接手先验证');
+    expect(zh[1].content).toContain('## 项目记忆（跨会话状态，优先采信）');
+    expect(zh[1].content).toContain('以项目记忆为准');
+    // Per-conversation heads are the compressed summaries to synthesize from.
+    expect(zh[1].content).toContain('压缩摘要');
+    const en = getAgentKindDefinition('relay').buildPrompt({
+      transcript: 'T',
+      preferences: { ...zhPreferences, outputLanguage: 'en-US' },
+    });
+    expect(en[1].content).toContain('verify before acting');
+    expect(en[1].content).toContain('project memory');
+    expect(en[1].content).toContain('compressed summary');
+  });
+
+  it('parses a V2 payload, mapping verifyFirst and the structured sections', () => {
+    const parsed = parseRelayPayloadV2(JSON.stringify({
+      meta: { version: 2, createdAt: '2026-07-31T00:00:00Z', conversationCount: 2 },
+      goal: '把播放器迁移到新架构',
+      state: {
+        completed: ['解码层拆分'],
+        inProgress: ['渲染层接入'],
+        blocked: ['字幕同步依赖解码器升级'],
+      },
+      files: [{ path: 'src/player/decoder.ts', why: '解码入口', last_state: '已拆分' }],
+      decisions: [{ decision: '采用插件化解码', rationale: '否决了整体重写' }],
+      failedPaths: [{ approach: '重写渲染线程', whyFailed: '丢帧严重', evidence: '会话 2 末尾' }],
+      verification: { lastCommand: 'pnpm test', lastResult: '42 项通过', passed: true },
+      verifyFirst: ['重跑 pnpm test 确认 42 项通过', '确认 src/player/decoder.ts 存在且已拆分'],
+      nextSteps: ['接入新渲染层'],
+      confidence: { overall: 0.8, lowAreas: ['字幕同步'] },
+      environment: { gitBranch: 'feature/player', dirtyFiles: ['src/player/render.ts'] },
+      handoffPrompt: '背景：正在重构播放器……',
+    }));
+    expect(parsed.goal).toBe('把播放器迁移到新架构');
+    expect(parsed.completed).toEqual(['解码层拆分']);
+    expect(parsed.in_progress).toEqual(['渲染层接入']);
+    expect(parsed.open_issues).toEqual(['[阻塞] 字幕同步依赖解码器升级']);
+    expect(parsed.key_decisions).toEqual(['采用插件化解码 — 否决了整体重写']);
+    expect(parsed.key_files).toEqual([
+      { path: 'src/player/decoder.ts', why: '解码入口', last_state: '已拆分' },
+    ]);
+    expect(parsed.failed_paths).toEqual([{ approach: '重写渲染线程', why_failed: '丢帧严重' }]);
+    expect(parsed.verification).toEqual({ commands: ['pnpm test'], last_results: ['42 项通过'] });
+    expect(parsed.verify_first).toEqual([
+      '重跑 pnpm test 确认 42 项通过',
+      '确认 src/player/decoder.ts 存在且已拆分',
+    ]);
+    expect(parsed.git_state.branch).toBe('feature/player');
+    expect(parsed.git_state.dirty_files).toEqual(['src/player/render.ts']);
+    expect(parsed.confidence).toEqual({ overall: 0.8, low_areas: ['字幕同步'] });
+    expect(parsed.suggested_prompt).toBe('背景：正在重构播放器……');
+  });
+
+  it('keeps verify_first absent when the model gives no usable checklist', () => {
+    const bare = parseRelayPayloadV2(JSON.stringify({
+      meta: { version: 2 }, goal: 'g', state: {}, handoffPrompt: 'p',
+    }));
+    expect(bare.verify_first).toBeUndefined();
+    // …and a v1 payload that happens to carry the field still passes it through.
+    const v1 = parseRelayPayload(JSON.stringify({
+      title: 't', goal: 'g', suggested_prompt: 'p', verify_first: [' 先跑测试 ', 42],
+    }));
+    expect(v1.verify_first).toEqual(['先跑测试']);
   });
 
   it('parses and normalizes a valid v2 payload', () => {
@@ -368,14 +458,14 @@ describe('relay agent kind', () => {
     expect(parsed.verification).toEqual({ commands: [], last_results: [] });
   });
 
-  it('caps the suggested prompt at 800 chars', () => {
+  it('caps the suggested prompt at 1200 chars', () => {
     const parsed = parseRelayPayload(JSON.stringify({
       title: 't',
       goal: 'g',
       current_state: 'c',
-      suggested_prompt: ` ${'长'.repeat(1_000)} `,
+      suggested_prompt: ` ${'长'.repeat(1_500)} `,
     }));
-    expect(parsed.suggested_prompt).toHaveLength(800);
+    expect(parsed.suggested_prompt).toHaveLength(1_200);
   });
 
   it('rejects non-JSON output and missing required fields', () => {

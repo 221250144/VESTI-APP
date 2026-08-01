@@ -747,6 +747,9 @@ const DEFAULT_LABELS: DashboardLabels = {
     toastNoLlm: "No LLM configured — configure one in Settings to enable AI rewrite.",
     toastImproveFailed: "AI completion failed.",
     toastExtract: "Archived {created} new prompt(s) from {candidates} candidate(s).",
+    toastExtractEmpty: "No reusable prompt patterns found yet — chat a bit more, then extract again.",
+    toastExtractNone: "Scanned {candidates} candidate(s); nothing new to archive.",
+    toastExtractLlmFallback: "(AI summarization failed; used offline extraction results.)",
     unavailable: "Prompt management is not available in this build.",
     exportLabel: "Export",
     importLabel: "Import",
@@ -883,6 +886,8 @@ const DEFAULT_LABELS: DashboardLabels = {
     followUpPrompt: "I left a question unresolved: \"{question}\". Walk me through it properly, drawing on my past conversations.",
     toRoundtable: "Take it to the roundtable",
     roundtablePrompt: "On \"{topic}\": where is my understanding still weak, and what is worth investing in next?",
+    moreDomains: "+ {n} more areas",
+    uncategorizedIncluded: "· includes uncategorized",
   },
   roundtable: {
     title: "AI Roundtable",
@@ -953,6 +958,10 @@ type DashboardProps = {
   /** Controlled active tab (desktop dock rail). Uncontrolled when omitted. */
   tab?: Tab;
   onTabChange?: (tab: Tab) => void;
+  /** Desktop home → library source deep link: one-shot platform filter
+   * request, cleared through the callback once the library applies it. */
+  libraryPlatformFilter?: string | null;
+  onLibraryPlatformFilterApplied?: () => void;
 };
 
 export function VestiDashboard({
@@ -975,6 +984,8 @@ export function VestiDashboard({
   lang = "zh",
   tab: controlledTab,
   onTabChange,
+  libraryPlatformFilter,
+  onLibraryPlatformFilterApplied,
 }: DashboardProps) {
   const labels = providedLabels ?? DEFAULT_LABELS;
   const SETTINGS_KEY = "vesti_llm_settings";
@@ -1555,6 +1566,8 @@ export function VestiDashboard({
                 themeMode={themeMode}
                 openConversationId={openConversationId}
                 onConversationOpened={() => setOpenConversationId(null)}
+                platformFilter={libraryPlatformFilter}
+                onPlatformFilterApplied={onLibraryPlatformFilterApplied}
                 returnToSourceLabel={returnToSourceLabel}
                 onReturnToSource={returnToSourceLabel ? handleReturnToSource : undefined}
                 labels={labels.library}

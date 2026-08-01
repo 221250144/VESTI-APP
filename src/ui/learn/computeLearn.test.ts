@@ -6,15 +6,22 @@ function conv(
   id: number,
   topicId: number | null,
   updatedAt: number,
-  flags?: { archived?: boolean; trash?: boolean },
+  flags?: {
+    archived?: boolean;
+    trash?: boolean;
+    platform?: Conversation["platform"];
+    projectPath?: string;
+    source?: string;
+    url?: string;
+  },
 ): Conversation {
   return {
     id,
     uuid: `uuid-${id}`,
-    platform: "ChatGPT",
+    platform: flags?.platform ?? "ChatGPT",
     title: `会话 ${id}`,
     snippet: "",
-    url: "",
+    url: flags?.url ?? "",
     source_created_at: updatedAt,
     first_captured_at: updatedAt,
     last_captured_at: updatedAt,
@@ -27,11 +34,14 @@ function conv(
     tags: [],
     topic_id: topicId,
     is_starred: false,
-  };
+    // Non-indexed capture fields computeLearn reads structurally (V3).
+    ...(flags?.projectPath ? { _project_path: flags.projectPath } : {}),
+    ...(flags?.source ? { _source: flags.source } : {}),
+  } as Conversation;
 }
 
-function topic(id: number, name: string): Topic {
-  return { id, name, parent_id: null, created_at: 0, updated_at: 0 };
+function topic(id: number, name: string, parentId: number | null = null): Topic {
+  return { id, name, parent_id: parentId, created_at: 0, updated_at: 0 };
 }
 
 function summary(
@@ -46,7 +56,7 @@ function summary(
     conversationId,
     content: "",
     structured: depthLevel
-      ? {
+      ? ({
           core_question: "q",
           thinking_journey: [],
           key_insights: keyInsights.map(ki =>
@@ -55,7 +65,7 @@ function summary(
           unresolved_threads: unresolvedThreads,
           meta_observations: { thinking_style: "s", emotional_tone: "e", depth_level: depthLevel },
           actionable_next_steps: [],
-        }
+        } as unknown as SummaryRecord["structured"])
       : null,
     modelId: "test-model",
     createdAt,
@@ -241,5 +251,134 @@ describe('computeLearn with user corrections', () => {
     const withoutArgs = computeLearn(summaries, [topic(1, "前端")], conversations);
     expect(withEmpty.glossary).toEqual(withoutArgs.glossary);
     expect(withEmpty.openLoops).toEqual(withoutArgs.openLoops);
+  });
+});
+
+// ---- V3: Route aggregation --------------------------------------------------
+
+describe("computeLearn V3 route aggregation", () => {
+  it("clusters unclassified conversations by project, never into a nameless bucket", () => {
+    const conversations = [
+      conv(1, null, 100, { projectPath: "C:/work/VESTI-APP" }),
+      conv(2, null, 200, { projectPath: "C:/work/VESTI-APP" }),
+      conv(3, null, 300, { projectPath: "D:/sites/blog" }),
+      conv(4, null, 400, { projectPath: "D:/sites/blog" }),
+    ];
+    const profile = computeLearn([], [], conversations);
+    expect(profile.available).toBe(true);
+    expect(profile.domains.length).toBe(2);
+    expect(profile.domains.every((d) => d.name.trim().length > 0)).toBe(true);
+    expect(profile.domains.map((d) => d.name).sort()).toEqual(["VESTI-APP", "blog"]);
+  });
+
+  it("folds a singleton project into its platform cluster", () => {
+    const conversations = [
+      conv(1, null, 100, { projectPath: "C:/work/VESTI-APP" }),
+      conv(2, null, 200, { projectPath: "C:/work/VESTI-APP" }),
+      conv(3, null, 300, { projectPath: "D:/sites/blog" }), // alone → platform
+    ];
+    const profile = computeLearn([], [], conversations);
+    const vesti = profile.domains.find((d) => d.name === "VESTI-APP")!;
+    expect(vesti.count).toBe(2);
+    const platform = profile.domains.find((d) => d.name === "ChatGPT · 综合探索")!;
+    expect(platform.count).toBe(1);
+    expect(platform.representatives.map((r) => r.conversationId)).toEqual([3]);
+  });
+
+  it("clusters browser-extension captures by site hostname", () => {
+    const conversations = [
+      conv(1, null, 100, { source: "browser_extension", url: "https://github.com/a/b" }),
+      conv(2, null, 200, { source: "browser_extension", url: "https://github.com/c/d" }),
+      conv(3, null, 300),
+    ];
+    const profile = computeLearn([], [], conversations);
+    expect(profile.domains.some((d) => d.name === "github.com" && d.count === 2)).toBe(true);
+  });
+
+  it("groups leaf topics under their root topic", () => {
+    const conversations = [conv(1, 2, 100), conv(2, 2, 200), conv(3, 1, 300)];
+    const profile = computeLearn([], [topic(1, "前端"), topic(2, "React", 1)], conversations);
+    expect(profile.domains.length).toBe(1);
+    const domain = profile.domains[0];
+    expect(domain.topicId).toBe(1);
+    expect(domain.name).toBe("前端");
+    expect(domain.count).toBe(3);
+  });
+
+  it("treats a dangling topic_id as unclassified instead of a nameless domain", () => {
+    const conversations = [conv(1, 99, 100), conv(2, 99, 200), conv(3, 99, 300)];
+    const profile = computeLearn([], [], conversations);
+    expect(profile.domains.every((d) => d.name.trim().length > 0)).toBe(true);
+    expect(profile.domains.map((d) => d.name)).toEqual(["ChatGPT · 综合探索"]);
+  });
+
+  it("produces structured routes when nothing is classified at all (no-LLM fallback)", () => {
+    const conversations = [
+      conv(1, null, 100),
+      conv(2, null, 200),
+      conv(3, null, 300),
+      conv(4, null, 400, { platform: "Kimi" }),
+      conv(5, null, 500, { platform: "Kimi" }),
+    ];
+    const profile = computeLearn([], [], conversations);
+    expect(profile.available).toBe(true);
+    expect(profile.domains.every((d) => d.name.trim().length > 0)).toBe(true);
+    expect(profile.domains.map((d) => d.name)).toEqual([
+      "ChatGPT · 综合探索",
+      "Kimi · 综合探索",
+    ]);
+    expect(profile.domains.every((d) => d.representatives.length > 0)).toBe(true);
+  });
+
+  it("keeps the fallback route at or below one third of conversations by promoting tail clusters", () => {
+    // 12 root topics × 2 conversations each = 24 conversations.
+    const topics: Topic[] = [];
+    const conversations: Conversation[] = [];
+    for (let t = 1; t <= 12; t += 1) {
+      topics.push(topic(t, `话题${t}`));
+      conversations.push(conv(t * 2 - 1, t, 100 + t), conv(t * 2, t, 200 + t));
+    }
+    const profile = computeLearn([], topics, conversations);
+    // 7 named soft cap → tail of 5 (10 conversations = 42%) → one promotion
+    // brings the fallback to 8/24 = one third: 8 named + 1 fallback.
+    expect(profile.domains.length).toBe(9);
+    const misc = profile.domains[profile.domains.length - 1];
+    expect(misc.topicId).toBe(null);
+    expect(misc.count * 3).toBeLessThanOrEqual(24);
+    expect(misc.count).toBe(8);
+    expect(misc.name).toContain("零散探索");
+  });
+
+  it("gives the fallback route a descriptive name and sorts it last", () => {
+    // 9 root topics × 2 conversations: tail of 2 → fallback 4/18 ≈ 22%, no promotion.
+    const topics: Topic[] = [];
+    const conversations: Conversation[] = [];
+    for (let t = 1; t <= 9; t += 1) {
+      topics.push(topic(t, `话题${t}`));
+      conversations.push(conv(t * 2 - 1, t, 100 + t), conv(t * 2, t, 200 + t));
+    }
+    const profile = computeLearn([], topics, conversations);
+    expect(profile.domains.length).toBe(8);
+    const misc = profile.domains[profile.domains.length - 1];
+    expect(misc.topicId).toBe(null);
+    expect(misc.count).toBe(4);
+    expect(misc.name.startsWith("零散探索：")).toBe(true);
+    expect(misc.name).toContain("话题");
+    expect(misc.representatives.length).toBeGreaterThan(0);
+  });
+
+  it("localizes synthesized route names with the lang parameter", () => {
+    const topics: Topic[] = [];
+    const conversations: Conversation[] = [];
+    for (let t = 1; t <= 9; t += 1) {
+      topics.push(topic(t, `Topic${t}`));
+      conversations.push(conv(t * 2 - 1, t, 100 + t), conv(t * 2, t, 200 + t));
+    }
+    conversations.push(conv(100, null, 500), conv(101, null, 600));
+    const profile = computeLearn([], topics, conversations, undefined, undefined, "en");
+    const misc = profile.domains[profile.domains.length - 1];
+    expect(misc.name.startsWith("Assorted: ")).toBe(true);
+    const platform = profile.domains.find((d) => d.name === "ChatGPT · General exploration");
+    expect(platform).toBeDefined();
   });
 });

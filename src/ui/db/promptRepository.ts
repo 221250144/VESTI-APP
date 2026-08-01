@@ -5,16 +5,16 @@
 
 import { normalizePlatform } from "./platform";
 import {
-  canonicalizeForHash,
   computePromptHash,
   detectVariables,
   deriveTitle,
-  extractCandidatesFromMessages,
   heuristicEnrichment,
   normalizeWhitespace,
+  scanUserPromptInputs,
   scorePrompt,
+  selectClustersForExtraction,
 } from "./promptlib";
-import type { PromptCandidate, PromptEnrichment } from "./promptlib";
+import type { PromptCandidate, PromptEnrichment, PromptScanUserInput } from "./promptlib";
 import type {
   CreatePromptInput,
   Platform,
@@ -25,7 +25,7 @@ import type {
 } from "./types";
 import { logger } from "./logger";
 import { db } from "./schema";
-import type { ConversationRecord, MessageRecord, PromptRecord } from "./schema";
+import type { MessageRecord, PromptRecord } from "./schema";
 
 function toPrompt(record: PromptRecord & { id: number }): Prompt {
   return {
@@ -228,6 +228,12 @@ export interface ExtractPromptsOptions {
   scope?: "all" | "recent";
   limit?: number;
   /**
+   * Additional flattened user turns from non-Dexie sources (desktop: CLI
+   * agent sessions in the main-process capture store). Without these the
+   * extraction only sees extension-captured browser conversations.
+   */
+  extraInputs?: PromptScanUserInput[];
+  /**
    * Optional LLM distiller: given candidate user prompts, returns reusable
    * FRAGMENTS (常用提示词 片段). When provided and it returns results, fragments
    * replace the heuristic frequency selection. Omitted → offline heuristic path.
@@ -236,40 +242,18 @@ export interface ExtractPromptsOptions {
 }
 
 const DISTILL_INPUT_CAP = 150;
+/** Hard cap on archived rows per run — a handful, not a hoard. */
+const MAX_EXTRACTED_RESULTS = 6;
+/** Wide net for the scanner; the curation pass below selects the final few. */
+const SCAN_CLUSTER_CAP = 100;
 
 /**
  * Scan captured conversations, extract prompt-worthy user turns, and archive
- * the new ones. De-dupes against the existing library by body hash. When an
- * `enrich` callback is supplied (LLM available) candidate metadata is refined;
- * otherwise heuristic metadata from the extractor is used.
+ * the new ones. De-dupes against the existing library by body hash. When a
+ * `distill` callback is supplied (LLM available) reusable fragments replace
+ * the heuristic selection; its failures are reported on the result
+ * (`llmError`) while the heuristic path still produces output.
  */
-interface CandidateGroup {
-  candidate: PromptCandidate;
-  conversationIds: Set<number>;
-}
-
-// Selective curation: collect only FREQUENT + HIGH-QUALITY prompts ("常用提示词"),
-// not everything. Frequency (recurs across conversations) is the primary signal;
-// a quality gate keeps low-value chatter out; a hard cap keeps the library
-// curated. A small quality-gated singleton top-up ensures a useful minimum on
-// sparse/new libraries without hoarding.
-// Curation is deliberately STRICT: only the genuinely most-used AND high-quality
-// prompts earn a slot. Recurrence is required (no one-off top-up) and the bar is
-// high, so the library stays tiny and trustworthy rather than a junk drawer.
-const FREQUENT_MIN_CONVERSATIONS = 4; // must recur across >= 4 distinct conversations
-const FREQUENT_QUALITY_GATE = 0.62; // and clear a high quality bar
-const SINGLETON_QUALITY_GATE = 0.9; // one-offs effectively excluded (kept for safety only)
-const MAX_RESULTS = 6; // hard cap — a handful, not a hoard
-const MIN_FLOOR = 0; // NO singleton top-up: if nothing recurs enough, keep it empty
-const MAX_SINGLETON_TOPUP = 0;
-
-function combinedCurationScore(group: CandidateGroup): number {
-  const quality = group.candidate.heuristicScore; // 0..1
-  // Frequency weighted equally with quality, and normalized over a higher bar so
-  // "most-used" genuinely dominates the ranking.
-  const freqNorm = Math.min(1, group.conversationIds.size / 6); // 0..1
-  return quality * 0.5 + freqNorm * 0.5;
-}
 
 /**
  * Snapshot the ids of the currently auto-extracted prompts. Extraction refreshes
@@ -305,6 +289,10 @@ async function pruneStaleExtracted(
  * and clear a quality bar. Selective (capped), offline, no LLM enrichment. New
  * prompts get a concise trigger (唤醒词) derived from the body; the user
  * curates/edits afterwards.
+ *
+ * Clustering/merging of similar prompts is delegated to the promptlib scanner
+ * (the same deterministic template merging the interactive library scan uses),
+ * so similar prompts aggregate into one reusable entry even with no LLM.
  */
 export async function extractPromptsFromLibrary(
   options: ExtractPromptsOptions = {},
@@ -318,9 +306,9 @@ export async function extractPromptsFromLibrary(
     .limit(conversationLimit)
     .toArray();
 
-  // Group candidates by canonical body, counting how many DISTINCT conversations
-  // each recurs in (= frequency).
-  const groups = new Map<string, CandidateGroup>();
+  // Flatten every browser-conversation user turn into the scanner's input
+  // shape, then append the caller-supplied non-Dexie sources (agent sessions).
+  const inputs: PromptScanUserInput[] = [];
   for (const conversation of conversations) {
     const conversationId = conversation.id ?? null;
     if (conversationId === null) continue;
@@ -330,49 +318,44 @@ export async function extractPromptsFromLibrary(
       .equals(conversationId)
       .toArray()) as MessageRecord[];
 
-    const candidates = extractCandidatesFromMessages(
-      messages.map((message) => ({
-        id: message.id ?? null,
-        role: message.role,
-        content_text: message.content_text ?? "",
-      })),
-      {
-        conversationId,
-        platform: normalizePlatformValue((conversation as ConversationRecord).platform),
-      },
-    );
-
-    const localSeen = new Set<string>();
-    for (const candidate of candidates) {
-      const hash = canonicalizeForHash(candidate.body);
-      if (localSeen.has(hash)) continue; // count each prompt once per conversation
-      localSeen.add(hash);
-      const existing = groups.get(hash);
-      if (existing) {
-        existing.conversationIds.add(conversationId);
-      } else {
-        groups.set(hash, { candidate, conversationIds: new Set([conversationId]) });
-      }
+    for (const message of messages) {
+      if (message.role !== "user") continue;
+      const text = (message.content_text ?? "").trim();
+      if (!text) continue;
+      inputs.push({
+        origin: "browser",
+        conversationId: String(conversationId),
+        conversationTitle: conversation.title || "",
+        text,
+      });
     }
   }
-
-  const allGroups = Array.from(groups.values());
-  const byCurationScore = (a: CandidateGroup, b: CandidateGroup) =>
-    combinedCurationScore(b) - combinedCurationScore(a);
+  const clusters = scanUserPromptInputs(
+    [...inputs, ...(options.extraInputs ?? [])],
+    { maxResults: SCAN_CLUSTER_CAP },
+  );
 
   // LLM path: distill reusable FRAGMENTS from the best candidate prompts. When a
   // distiller is injected and yields fragments, they become the 常用提示词
   // library (片段-level), superseding the heuristic full-turn selection.
-  if (options.distill) {
-    const ranked = [...allGroups].sort(byCurationScore).slice(0, DISTILL_INPUT_CAP);
-    const turns = ranked.map((group) => group.candidate.body);
+  let llmError: string | null = null;
+  if (options.distill && clusters.length > 0) {
+    const turns = clusters.slice(0, DISTILL_INPUT_CAP).map((cluster) => cluster.body);
     let fragments: ExtractedFragment[] = [];
     try {
       fragments = await options.distill(turns);
     } catch (error) {
+      llmError = (error as Error)?.message ?? String(error);
       logger.warn("service", "Fragment distillation failed; falling back to heuristics", {
-        error: (error as Error)?.message ?? String(error),
+        error: llmError,
       });
+    }
+    if (fragments.length === 0 && llmError === null) {
+      // The model answered but nothing parseable came back — that is still a
+      // distill failure. Surface it (llmError) instead of silently degrading,
+      // so the UI can tell the user the AI summarize was skipped.
+      llmError = "LLM distill returned no parseable fragments";
+      logger.warn("service", "Fragment distillation returned nothing; falling back to heuristics");
     }
     if (fragments.length > 0) {
       // Refresh by DIFF, not up-front wipe: install the new set, then prune only
@@ -382,7 +365,7 @@ export async function extractPromptsFromLibrary(
       const keepIds = new Set<number>();
       let created = 0;
       let skipped = 0;
-      for (const fragment of fragments.slice(0, MAX_RESULTS)) {
+      for (const fragment of fragments.slice(0, MAX_EXTRACTED_RESULTS)) {
         const body = fragment.body.trim();
         if (!body) {
           skipped += 1;
@@ -407,43 +390,19 @@ export async function extractPromptsFromLibrary(
       }
       logger.info("service", "Prompt fragment distillation complete", {
         scope,
-        candidates: allGroups.length,
+        candidates: clusters.length,
         fragments: fragments.length,
         created,
         skipped,
       });
-      return { created, skipped, candidates: allGroups.length, usedLlm: true };
+      return { created, skipped, candidates: clusters.length, usedLlm: true, llmError };
     }
     // distiller produced nothing → fall through to the heuristic path below.
   }
 
-  // Primary: frequent prompts that clear a (lenient) quality gate.
-  const frequent = allGroups
-    .filter(
-      (group) =>
-        group.conversationIds.size >= FREQUENT_MIN_CONVERSATIONS &&
-        group.candidate.heuristicScore >= FREQUENT_QUALITY_GATE,
-    )
-    .sort(byCurationScore);
-
-  let selected = frequent.slice(0, MAX_RESULTS);
-
-  // Floor top-up: if too few recur, add only genuinely HIGH-QUALITY one-offs so
-  // the library is useful without collecting everything.
-  if (selected.length < MIN_FLOOR) {
-    const selectedHashes = new Set(
-      selected.map((group) => canonicalizeForHash(group.candidate.body)),
-    );
-    const topUp = allGroups
-      .filter(
-        (group) =>
-          !selectedHashes.has(canonicalizeForHash(group.candidate.body)) &&
-          group.candidate.heuristicScore >= SINGLETON_QUALITY_GATE,
-      )
-      .sort((a, b) => b.candidate.heuristicScore - a.candidate.heuristicScore)
-      .slice(0, Math.min(MAX_SINGLETON_TOPUP, MIN_FLOOR - selected.length, MAX_RESULTS - selected.length));
-    selected = [...selected, ...topUp];
-  }
+  // Heuristic path: curated selection over the merged clusters (recurring
+  // patterns first, high-quality one-offs as a floor top-up).
+  const selected = selectClustersForExtraction(clusters);
 
   // Refresh by DIFF (same safe strategy as the distill path): install, then prune
   // only the old extracted rows the new set didn't reproduce.
@@ -451,17 +410,19 @@ export async function extractPromptsFromLibrary(
   const keepIds = new Set<number>();
   let created = 0;
   let skipped = 0;
-  for (const group of selected) {
-    const candidate = group.candidate;
+  for (const cluster of selected) {
+    const browserSource = cluster.sources.find((source) => source.origin === "browser");
+    const sourceConversationId =
+      browserSource && /^\d+$/.test(browserSource.conversationId)
+        ? Number(browserSource.conversationId)
+        : null;
     const result = await createPrompt({
       // Concise trigger (唤醒词); body is the original prompt. No enrichment.
-      title: deriveTitle(candidate.body, 28),
-      body: candidate.body,
+      title: deriveTitle(cluster.body, 28),
+      body: cluster.body,
       source: "extracted",
-      source_platform: candidate.platform,
-      source_conversation_id: candidate.conversationId,
-      source_message_id: candidate.messageId,
-      quality_score: candidate.heuristicScore,
+      source_conversation_id: sourceConversationId,
+      quality_score: cluster.score,
     });
     if (result.prompt.id != null) keepIds.add(result.prompt.id);
     if (result.created) created += 1;
@@ -474,11 +435,11 @@ export async function extractPromptsFromLibrary(
 
   logger.info("service", "Prompt extraction complete", {
     scope,
-    groups: allGroups.length,
-    frequent: frequent.length,
+    clusters: clusters.length,
+    selected: selected.length,
     created,
     skipped,
   });
 
-  return { created, skipped, candidates: allGroups.length, usedLlm: false };
+  return { created, skipped, candidates: clusters.length, usedLlm: false, llmError };
 }

@@ -268,6 +268,10 @@ export interface RelayPackPayload {
   failed_paths: RelayPackFailedPath[];
   open_issues: string[];
   verification: RelayPackVerification;
+  /** Verify-first checklist (V2): concrete checks the receiving AI runs
+   * before building on the pack. Absent on v1 packs and when the model gave
+   * no usable list. */
+  verify_first?: string[];
   next_steps: string[];
   /** Absent when the model gave no usable confidence (always absent on v1). */
   confidence?: RelayPackConfidence;
@@ -283,8 +287,10 @@ export interface RelayPackPayload {
   suggested_prompt: string;
 }
 
-/** The suggested prompt must stay paste-ready; hard-cap it in parse. */
-export const RELAY_SUGGESTED_PROMPT_MAX_CHARS = 800;
+/** The suggested prompt must stay paste-ready; hard-cap it in parse. V2 packs
+ * embed a condensed verify-first checklist, so the cap allows a little more
+ * than the original 800. */
+export const RELAY_SUGGESTED_PROMPT_MAX_CHARS = 1_200;
 
 /**
  * Handoff framing: every suggested prompt must open with this fixed sentence
@@ -363,14 +369,15 @@ function asVerification(value: unknown): RelayPackVerification {
   };
 }
 
-/** Confidence stays absent unless the model gave a usable 0-1 number. */
+/** Confidence stays absent unless the model gave a usable 0-1 number. The
+ * low-areas list arrives snake_case on v1 output, camelCase on V2. */
 function asConfidence(value: unknown): RelayPackConfidence | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const entry = value as Record<string, unknown>;
   if (typeof entry.overall !== 'number' || !Number.isFinite(entry.overall)) return undefined;
   return {
     overall: Math.min(1, Math.max(0, entry.overall)),
-    low_areas: asStringList(entry.low_areas, 8),
+    low_areas: asStringList(entry.low_areas ?? entry.lowAreas, 8),
   };
 }
 
@@ -390,6 +397,9 @@ export function parseRelayPayload(raw: string): RelayPackPayload {
   const suggestedPrompt = asTrimmedString(parsed.suggested_prompt, RELAY_SUGGESTED_PROMPT_MAX_CHARS);
   if (!suggestedPrompt) throw new Error('relay 输出缺少 suggested_prompt');
   const confidence = asConfidence(parsed.confidence);
+  // Additive v2 field tolerated on v1-shaped output: only present when the
+  // model actually supplied entries (never required, never throws).
+  const verifyFirst = asStringList(parsed.verify_first ?? parsed.verifyFirst, 8);
   return {
     title,
     goal,
@@ -402,6 +412,7 @@ export function parseRelayPayload(raw: string): RelayPackPayload {
     failed_paths: asFailedPathList(parsed.failed_paths, 8),
     open_issues: asStringList(parsed.open_issues, 12),
     verification: asVerification(parsed.verification),
+    ...(verifyFirst.length > 0 ? { verify_first: verifyFirst } : {}),
     next_steps: asStringList(parsed.next_steps, 12),
     ...(confidence ? { confidence } : {}),
     suggested_prompt: suggestedPrompt,
@@ -504,7 +515,7 @@ function parseV2ToPayload(parsed: Record<string, unknown>): RelayPackPayload {
 
   // V2 environment → merge into git_state
   const env = parsed.environment as RelayPackEnvironmentV2 | undefined;
-  const gitState: RelayPackGitState = {};
+  const gitState: RelayPackGitState = { dirty_files: [], last_commits: [] };
   if (env?.gitBranch) gitState.branch = env.gitBranch;
   if (env?.gitRemote) {
     // Store remote in the branch field as "branch · remote" format if both exist
@@ -528,6 +539,9 @@ function parseV2ToPayload(parsed: Record<string, unknown>): RelayPackPayload {
 
   const confidence = asConfidence(parsed.confidence);
 
+  // V2 verifyFirst: the verify-before-acting checklist for the receiving AI.
+  const verifyFirst = asStringList(parsed.verifyFirst ?? parsed.verify_first, 8);
+
   // Current state synthesizes completed + in_progress + blocked for v1 consumers.
   const currentStateParts = [
     ...completed.map((c) => `✓ ${c}`),
@@ -548,6 +562,7 @@ function parseV2ToPayload(parsed: Record<string, unknown>): RelayPackPayload {
     failed_paths: failedPathsV2,
     open_issues: openIssues,
     verification,
+    ...(verifyFirst.length > 0 ? { verify_first: verifyFirst } : {}),
     next_steps: asStringList(parsed.nextSteps ?? parsed.next_steps, 12),
     ...(confidence ? { confidence } : {}),
     suggested_prompt: handoffPrompt,
@@ -563,20 +578,25 @@ registerAgentKind('relay', {
       ? 'Write the whole pack in clear, concise English.'
       : '使用简洁的中文。';
     // V2 schema: unified format with structured decisions, environment capture,
-    // blocked items, and programmatic verification fields.
+    // blocked items, and programmatic verification fields. JSON keys use
+    // straight quotes so the model reproduces parseable JSON verbatim.
     const schema = english
-      ? '{“meta”: {“version”: 2, “createdAt”: “ISO 8601 timestamp”, “conversationCount”: <N>}, “goal”: “what this work aims to achieve (1-2 sentences, testable)”, “state”: {“completed”: [“done items with evidence anchors, <= 8”], “inProgress”: [“underway items and where they stopped, <= 8”], “blocked”: [“items blocked by unresolved dependencies, <= 6”]}, “files”: [{“path”: “file path (verbatim from anchor list)”, “why”: “why this file matters”, “last_state”: “its current change state”}, “<= 8 — MUST choose from the program-extracted anchor list”], “decisions”: [{“decision”: “what was decided”, “rationale”: “why, and what alternatives were rejected”}, “<= 8”], “failedPaths”: [{“approach”: “approach tried and abandoned”, “whyFailed”: “why it failed”, “evidence”: “where in the conversation this is shown”}, “<= 6”], “verification”: {“lastCommand”: “the last verification command actually run”, “lastResult”: “its most recent output (truncated)”, “passed”: true}, “nextSteps”: [“suggested next steps in priority order, <= 8”], “confidence”: {“overall”: 0.0, “lowAreas”: [“areas you are least sure about”]}, “environment”: {“gitBranch”: “...”, “gitRemote”: “...”, “dirtyFiles”: [“...”], “nodeVersion”: “...”, “packageManager”: “...”}, “handoffPrompt”: “self-contained prompt for a fresh AI session: background, goal, state, key files, todos; paste-ready at session start, <= 800 chars”}'
-      : '{“meta”: {“version”: 2, “createdAt”: “ISO 8601 时间戳”, “conversationCount”: <N>}, “goal”: “这项工作要达成的可检验目标（一两句）”, “state”: {“completed”: [“已完成事项，带证据锚点，至多 8 条”], “inProgress”: [“进行中事项及停在哪一步，至多 8 条”], “blocked”: [“被未解决依赖阻塞的事项，至多 6 条”]}, “files”: [{“path”: “文件路径（必须原样取自锚点清单）”, “why”: “为什么重要”, “last_state”: “该文件目前的改动状态”}, “至多 8 个，必须从程序提取的锚点清单选取”], “decisions”: [{“decision”: “做了什么决定”, “rationale”: “理由及否决的替代方案”}, “至多 8 条”], “failedPaths”: [{“approach”: “试过但放弃的方案”, “whyFailed”: “失败原因”, “evidence”: “上下文中的证据位置”}, “至多 6 条”], “verification”: {“lastCommand”: “实际执行的最后验证命令”, “lastResult”: “最近一次输出（截断）”, “passed”: true}, “nextSteps”: [“建议的下一步，按优先级排序，至多 8 条”], “confidence”: {“overall”: 0.0, “lowAreas”: [“你最没把握的部分”]}, “environment”: {“gitBranch”: “...”, “gitRemote”: “...”, “dirtyFiles”: [“...”], “nodeVersion”: “...”, “packageManager”: “...”}, “handoffPrompt”: “可直接粘贴到新 AI 会话开头的自包含交接提示词：背景、目标、现状、关键文件、待办，800 字以内”}';
+      ? '{"meta": {"version": 2, "createdAt": "ISO 8601 timestamp", "conversationCount": <N>}, "goal": "what this work aims to achieve (1-2 sentences, testable)", "state": {"completed": ["done items with evidence anchors, <= 8"], "inProgress": ["underway items and where they stopped, <= 8"], "blocked": ["items blocked by unresolved dependencies, <= 6"]}, "files": [{"path": "file path (verbatim from anchor list)", "why": "why this file matters", "last_state": "its current change state"}, "<= 8 — MUST choose from the program-extracted anchor list"], "decisions": [{"decision": "what was decided", "rationale": "why, and what alternatives were rejected"}, "<= 8"], "failedPaths": [{"approach": "approach tried and abandoned", "whyFailed": "why it failed", "evidence": "where in the conversation this is shown"}, "<= 6"], "verification": {"lastCommand": "the last verification command actually run", "lastResult": "its most recent output (truncated)", "passed": true}, "verifyFirst": ["concrete checks the receiving AI runs BEFORE touching anything, ordered, <= 6"], "nextSteps": ["suggested next steps in priority order, <= 8"], "confidence": {"overall": 0.0, "lowAreas": ["areas you are least sure about"]}, "environment": {"gitBranch": "...", "gitRemote": "...", "dirtyFiles": ["..."], "nodeVersion": "...", "packageManager": "..."}, "handoffPrompt": "self-contained prompt for a fresh AI session: background, goal, state, key files, todos, and a condensed verify-first checklist; paste-ready at session start, <= 1200 chars"}'
+      : '{"meta": {"version": 2, "createdAt": "ISO 8601 时间戳", "conversationCount": <N>}, "goal": "这项工作要达成的可检验目标（一两句）", "state": {"completed": ["已完成事项，带证据锚点，至多 8 条"], "inProgress": ["进行中事项及停在哪一步，至多 8 条"], "blocked": ["被未解决依赖阻塞的事项，至多 6 条"]}, "files": [{"path": "文件路径（必须原样取自锚点清单）", "why": "为什么重要", "last_state": "该文件目前的改动状态"}, "至多 8 个，必须从程序提取的锚点清单选取"], "decisions": [{"decision": "做了什么决定", "rationale": "理由及否决的替代方案"}, "至多 8 条"], "failedPaths": [{"approach": "试过但放弃的方案", "whyFailed": "失败原因", "evidence": "上下文中的证据位置"}, "至多 6 条"], "verification": {"lastCommand": "实际执行的最后验证命令", "lastResult": "最近一次输出（截断）", "passed": true}, "verifyFirst": ["接手方在改动任何代码前必须先执行的验证步骤，按顺序，至多 6 条"], "nextSteps": ["建议的下一步，按优先级排序，至多 8 条"], "confidence": {"overall": 0.0, "lowAreas": ["你最没把握的部分"]}, "environment": {"gitBranch": "...", "gitRemote": "...", "dirtyFiles": ["..."], "nodeVersion": "...", "packageManager": "..."}, "handoffPrompt": "可直接粘贴到新 AI 会话开头的自包含交接提示词：背景、目标、现状、关键文件、待办与精简版接手先验证清单，1200 字以内"}';
     const notes = english
       ? [
           'Rules:',
           '- confidence.overall is a number between 0 and 1.',
           '- state.blocked lists things that CANNOT proceed until something else is resolved — distinct from inProgress.',
           '- decisions.rationale MUST include what alternatives were considered and rejected.',
-          '- When the context contains a “## Key files (program-extracted, with anchors)” / “## 关键文件（程序提取，带锚点）” section, files MUST be chosen from that list with the paths kept verbatim — never invent files beyond it; derive “why” and “last_state” from the context.',
-          '- failedPaths MUST preserve every failed attempt and rejection reason visible in the context — never drop them to make the pack look cleaner; output an empty array only when there genuinely were none. Include an “evidence” field pointing to which conversation or message shows the failure.',
+          '- When the context contains a "## Key files (program-extracted, with anchors)" / "## 关键文件（程序提取，带锚点）" section, files MUST be chosen from that list with the paths kept verbatim — never invent files beyond it; derive "why" and "last_state" from the context.',
+          '- failedPaths MUST preserve every failed attempt and rejection reason visible in the context — never drop them to make the pack look cleaner; output an empty array only when there genuinely were none. Include an "evidence" field pointing to which conversation or message shows the failure.',
           '- verification.lastCommand and verification.lastResult should be extracted from actual tool executions in the context when visible; set passed=false when the output indicates failure.',
-          '- If nothing was verified, output “verification”: {“lastCommand”: “”, “lastResult”: “”, “passed”: false}.',
+          '- If nothing was verified, output "verification": {"lastCommand": "", "lastResult": "", "passed": false}.',
+          '- verifyFirst is the "verify before acting" checklist: concrete, executable checks grounded in the context — re-run the last verification command, confirm the anchored key files exist in their described state, confirm the git branch and dirty files. Order them so the receiving AI can validate this pack before building on it; empty array only when nothing is verifiable.',
+          '- The handoffPrompt must embed the verifyFirst checklist in condensed form (a short "verify first" list) between the state/files recap and the closing rule.',
+          '- When the context contains a "## 项目记忆（跨会话状态，优先采信）" (project memory) section, treat it as the most current cross-session project state: align goal, state and environment with it — where older conversation fragments conflict, the project memory wins.',
+          '- Each "## 会话 N" head (一句话/关键主题/关键决策/未决问题) is that conversation\'s compressed summary: synthesize primarily from the heads and use the "最近消息" excerpts as supporting evidence and detail, not as the full picture.',
           '- environment: extract git branch/remote from Git lines, node/package versions from tool output if visible. Omit the environment key entirely when nothing is known.',
           `- The handoffPrompt MUST start with this exact fixed sentence, verbatim:\n${prefix}`,
           `- The handoffPrompt MUST end with this exact fixed sentence, verbatim:\n${rule}`,
@@ -588,9 +608,13 @@ registerAgentKind('relay', {
           '- state.blocked 列出因依赖未解决而无法推进的事项——与 inProgress 不同。',
           '- decisions.rationale 必须写明考虑过并否决了哪些替代方案。',
           '- 上下文包含「## 关键文件（程序提取，带锚点）」部分时，files 必须从该清单中选取并原样沿用其路径，不得虚构清单之外的文件；why 和 last_state 依据上下文推断。',
-          '- failedPaths 必须完整保留上下文中出现的失败尝试与否决原因，不得为了让交接显得顺利而省略；确实没有时才输出空数组。每条附带 “evidence” 字段指向哪条会话或消息显示了该失败。',
+          '- failedPaths 必须完整保留上下文中出现的失败尝试与否决原因，不得为了让交接显得顺利而省略；确实没有时才输出空数组。每条附带 "evidence" 字段指向哪条会话或消息显示了该失败。',
           '- verification.lastCommand 和 verification.lastResult 应尽量从上下文中的工具执行记录提取；输出表明失败时 passed 设为 false。',
-          '- 没有做过任何验证时输出 “verification”: {“lastCommand”: “”, “lastResult”: “”, “passed”: false}。',
+          '- 没有做过任何验证时输出 "verification": {"lastCommand": "", "lastResult": "", "passed": false}。',
+          '- verifyFirst 是「接手先验证」清单：依据上下文写出的具体可执行检查——重跑最后一次验证命令、确认锚点清单中的关键文件存在且状态与描述相符、确认 git 分支与未提交改动。按先验证后动手的顺序排列，让接手方先核实本交接包再继续；确实没有可验证的事项时才输出空数组。',
+          '- handoffPrompt 必须在现状与关键文件回顾之后、结尾固定规则之前，嵌入精简版 verifyFirst 清单（「接手先验证」列表）。',
+          '- 上下文包含「## 项目记忆（跨会话状态，优先采信）」部分时，把它当作当前最新的跨会话项目状态：goal、state、environment 与之对齐；与较旧的会话片段冲突时以项目记忆为准。',
+          '- 每个「## 会话 N」头部（一句话/关键主题/关键决策/未决问题）是该会话的压缩摘要：综合时以头部摘要为主，「最近消息」摘录作为证据与细节补充，不要把摘录当作全貌。',
           '- environment：从 Git 行提取分支/远程，从工具输出提取 node/包管理版本。完全未知时省略整个 environment 键。',
           `- handoffPrompt 必须以下面这句固定开场白原样开头：\n${prefix}`,
           `- handoffPrompt 必须以下面这句固定规则原样结尾：\n${rule}`,
@@ -605,8 +629,8 @@ registerAgentKind('relay', {
         role: 'user',
         content: [
           english
-            ? 'Below is the condensed context of several related conversations (digest summaries + recent key messages). Distill them into a “handoff pack” that lets another AI continue this work. ' + language + ' Output one JSON object with these fields:'
-            : '下面是若干个相关会话的浓缩上下文（索引摘要 + 最近关键消息）。请把它们归纳成一份”交接包”，让另一个 AI 能接着继续这项工作。' + language + '输出一个 JSON 对象，字段如下：',
+            ? 'Below is the condensed context of several related conversations (it may carry: cross-session project memory, program-extracted key-file anchors, per-conversation digest summaries, recent key messages). Distill them into a "handoff pack" that lets another AI continue this work. ' + language + ' Output one JSON object with these fields:'
+            : '下面是若干个相关会话的浓缩上下文（可能包含：跨会话项目记忆、程序提取的关键文件锚点、各会话索引摘要、最近关键消息）。请把它们归纳成一份”交接包”，让另一个 AI 能接着继续这项工作。' + language + '输出一个 JSON 对象，字段如下：',
           schema,
           ...notes,
           '',
@@ -1074,8 +1098,15 @@ export function parsePromptImprovePayload(raw: string): PromptImprovePayload {
 }
 
 registerAgentKind('prompt-improve', {
-  buildPrompt({ transcript, preferences }) {
+  buildPrompt({ transcript, question, preferences }) {
     const { language } = promptAffixes(preferences);
+    // The capsule's refine box sends the user's own instruction ("更简洁",
+    // "改成面向代码审查的") via `question`; without it run the default
+    // clarity/reusability pass.
+    const instruction = question?.trim();
+    const taskLine = instruction
+      ? `请严格按照用户的要求优化下面这条提示词。用户的要求：「${instruction}」。除该要求外保持原意与语言不变，不要执行或回答提示词本身。`
+      : '请优化下面这条提示词，让它更清晰、具体、可复用：明确角色与目标、补齐必要的约束与输出格式要求，但保持原意与语言不变。';
     return [
       {
         role: 'system',
@@ -1084,7 +1115,7 @@ registerAgentKind('prompt-improve', {
       {
         role: 'user',
         content: [
-          '请优化下面这条提示词，让它更清晰、具体、可复用：明确角色与目标、补齐必要的约束与输出格式要求，但保持原意与语言不变。',
+          taskLine,
           '严格只输出一个 JSON 对象：{"improved": "优化后的完整提示词", "notes": ["修改要点，至多 3 条，每条一句话"]}。',
           '',
           transcript,

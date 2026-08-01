@@ -256,6 +256,21 @@ describe("filterConversationsBySelection", () => {
     expect(ids(filterConversationsBySelection(ALL, wsl, LOOKUP, TOPICS))).toEqual([4]);
   });
 
+  it("filters platform-wide across hosts (home-dashboard source deep link)", () => {
+    const platform: SourceSelection = { kind: "platform", platform: "claude-code" };
+    expect(
+      ids(filterConversationsBySelection(ALL, platform, LOOKUP, TOPICS)),
+    ).toEqual([1, 2, 3, 4, 6, 7]);
+    const browser: SourceSelection = { kind: "platform", platform: "browser" };
+    expect(
+      ids(filterConversationsBySelection(ALL, browser, LOOKUP, TOPICS)),
+    ).toEqual([5]);
+    const unknown: SourceSelection = { kind: "platform", platform: "kimi-code" };
+    expect(
+      ids(filterConversationsBySelection(ALL, unknown, LOOKUP, TOPICS)),
+    ).toEqual([]);
+  });
+
   it("filters by project", () => {
     const selection: SourceSelection = {
       kind: "project",
@@ -464,5 +479,18 @@ describe("describeSelection", () => {
         TOPICS,
       ),
     ).toBe("vesti-app · Backend");
+  });
+
+  it("describes a platform-wide selection with the platform label", () => {
+    expect(
+      describeSelection(model, { kind: "platform", platform: "claude-code" }, TOPICS),
+    ).toBe("Claude Code");
+    expect(
+      describeSelection(model, { kind: "platform", platform: "browser" }, TOPICS, "浏览器"),
+    ).toBe("浏览器");
+    // Unknown platforms fall back to the raw slug.
+    expect(
+      describeSelection(model, { kind: "platform", platform: "kimi-x" }, TOPICS),
+    ).toBe("kimi-x");
   });
 });

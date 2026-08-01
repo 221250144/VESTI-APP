@@ -26,6 +26,7 @@ import { UiPrefsService } from './main/uiPrefsService';
 import { writeUpstreamExportFile } from './main/vaultExportService';
 import {
   assembleCapsuleRelayDraft,
+  appendQuickAskHistory,
   buildQuickAskTranscript,
   CAPSULE_DRAFT_MAX_SESSIONS,
   CAPSULE_QUICK_ASK_MAX_CHARS,
@@ -48,6 +49,8 @@ import {
   type CapsulePromptContinueResult,
   type CapsulePromptImproveResult,
   type CapsulePromptSnapshot,
+  type CapsuleQuickAskOptions,
+  type CapsuleQuickAskTurn,
   type CapsuleRelayDraft,
   type CapsuleRelaySessionView,
   type ExtensionImportRequestPayload,
@@ -221,7 +224,9 @@ function validAgentRequest(value: unknown): value is AgentRunRequest {
     && (request.template === undefined || (typeof request.template === 'string' && request.template.length <= 64))
     && (request.transcriptOverride === undefined
       || (typeof request.transcriptOverride === 'string' && request.transcriptOverride.length <= 30_000))
-    && (request.persist === undefined || typeof request.persist === 'boolean');
+    && (request.persist === undefined || typeof request.persist === 'boolean')
+    && (request.modelId === undefined
+      || (typeof request.modelId === 'string' && request.modelId.length <= 100));
 }
 
 function validSettingsUpdate(value: unknown): value is AppSettingsUpdate {
@@ -384,11 +389,6 @@ function capsuleDraftLanguage(): 'zh-CN' | 'en-US' {
 function capsuleUiLanguage(): 'zh' | 'en' {
   const value = uiPrefs.get('language') as { locale?: unknown } | undefined;
   return value?.locale === 'zh' ? 'zh' : 'en';
-}
-
-function capsuleLlmConfigured(): boolean {
-  const llm = settings.getView(capture.activeDataDirectory).llm;
-  return llm.mode === 'demo_proxy' || llm.apiKeyConfigured;
 }
 
 // The curated catalog is locale-resolved once per language and cached; the
@@ -768,31 +768,58 @@ function registerIpc(): void {
   ipcMain.handle(IPC.capsuleDockStatus, async () => {
     // getOverview re-detects sources; only fetched when the panel opens.
     const overview = await capture.getOverview().catch(() => null);
+    const llm = settings.getView(capture.activeDataDirectory).llm;
     return {
-      llmConfigured: capsuleLlmConfigured(),
+      llmConfigured: llm.mode === 'demo_proxy' || llm.apiKeyConfigured,
       extensionConnected: extensionBridge.getStatus().clients.length > 0,
       sourceCount: overview
         ? overview.sources.filter(source => source.enabled && source.installed).length
         : 0,
+      llmMode: llm.mode,
+      defaultModelId: llm.modelId,
     };
   });
-  ipcMain.handle(IPC.capsuleQuickAsk, async (_event, question: unknown) => {
+  ipcMain.handle(IPC.capsuleQuickAsk, async (_event, question: unknown, options: unknown) => {
     if (typeof question !== 'string' || !question.trim() || question.length > CAPSULE_QUICK_ASK_MAX_CHARS) {
       throw new Error('问题内容无效');
     }
     const query = question.trim();
+    // Optional per-request overrides from the quick-ask panel: a model picker
+    // selection and the lightweight client-side turn history.
+    let modelId: string | undefined;
+    let historyTurns: CapsuleQuickAskTurn[] = [];
+    if (options && typeof options === 'object') {
+      const candidate = options as Partial<CapsuleQuickAskOptions>;
+      if (typeof candidate.modelId === 'string' && candidate.modelId.trim()) {
+        modelId = candidate.modelId.trim().slice(0, 100);
+      }
+      if (Array.isArray(candidate.history)) {
+        historyTurns = candidate.history.slice(-4).flatMap((turn) => {
+          if (!turn || typeof turn !== 'object') return [];
+          const entry = turn as Partial<CapsuleQuickAskTurn>;
+          if (typeof entry.question !== 'string' || typeof entry.answer !== 'string') return [];
+          return [{ question: entry.question.slice(0, 2_000), answer: entry.answer.slice(0, 8_000) }];
+        });
+      }
+    }
     // Query vector is best-effort, mirroring the recall IPC above.
     const vector = await embedding.embed([query]).then(vectors => vectors[0] ?? null).catch(() => null);
     const hits = capture.recallSessions(query, 5, vector);
-    const transcript = buildQuickAskTranscript(
-      hits.map(hit => ({ title: hit.title, oneLiner: hit.oneLiner, snippet: hit.snippet })),
-      { language: capsuleDraftLanguage() },
+    const language = capsuleDraftLanguage();
+    const transcript = appendQuickAskHistory(
+      buildQuickAskTranscript(
+        hits.map(hit => ({ title: hit.title, oneLiner: hit.oneLiner, snippet: hit.snippet })),
+        { language },
+      ),
+      historyTurns,
+      { language },
     );
     const result = await agent.run({
       kind: 'explore',
       sessionId: `capsule-ask:${Date.now()}`,
       question: query,
       transcriptOverride: transcript,
+      ...(modelId ? { modelId } : {}),
       persist: false,
     }, { persist: false });
     return { answer: result.content, recalled: hits.length };
@@ -824,14 +851,20 @@ function registerIpc(): void {
   });
   // Capsule prompt assistant: AI refine / continue for the picked prompt.
   // Both run through agentService with persist:false — nothing is logged.
-  ipcMain.handle(IPC.capsulePromptImprove, async (_event, body: unknown) => {
+  ipcMain.handle(IPC.capsulePromptImprove, async (_event, body: unknown, instruction: unknown) => {
     if (typeof body !== 'string' || !body.trim() || body.length > 8_000) {
       throw new Error('提示词内容无效');
     }
+    // Optional natural-language refine request ("更简洁"…) → the kind's
+    // `question` slot; the default clarity pass runs without it.
+    const userInstruction = typeof instruction === 'string' && instruction.trim()
+      ? instruction.trim().slice(0, 500)
+      : undefined;
     const result = await agent.run({
       kind: 'prompt-improve',
       sessionId: `capsule-prompt:${Date.now()}`,
       transcriptOverride: body.trim(),
+      ...(userInstruction ? { question: userInstruction } : {}),
       persist: false,
     }, { persist: false });
     // parse() in the kind definition already validated the strict JSON shape.

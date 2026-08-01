@@ -22,6 +22,7 @@ import type {
   ExtractPayload,
   ExtractResult,
   GenerateDepositInput,
+  PromptExtractionResult,
   PromptScanCandidate,
   PromptScanProgress,
   PromptScanResult,
@@ -100,6 +101,7 @@ import {
   togglePromptFavorite,
   updatePrompt,
 } from "../db/promptRepository";
+import type { ExtractedFragment } from "../db/promptRepository";
 import {
   canonicalizeForHash,
   scanUserPromptInputs,
@@ -139,6 +141,7 @@ import {
   buildRelayTranscript,
   RELAY_CONTEXT_BUDGET_CHARS,
   type RelayContextConversation,
+  type RelayProjectMemory,
 } from "../relay/relayContext";
 import {
   extractRelayFileAnchors,
@@ -731,6 +734,52 @@ async function mapSelectedCliIds(
   return map;
 }
 
+/**
+ * Project memory (memory v2) for the relay transcript: resolve the projects
+ * the selection touches via the source tree, then pull each project's L0
+ * state card and L2 brief over IPC. Best-effort — any missing piece (tree,
+ * states, briefs) simply narrows the block; failures never abort the relay.
+ */
+async function gatherRelayProjectMemory(
+  cliIdByConversationId: Map<number, string>
+): Promise<RelayProjectMemory[]> {
+  const api = vestiApi();
+  if (!api || cliIdByConversationId.size === 0) return [];
+  const tree = await loadConversationTree().catch(() => null);
+  if (!tree) return [];
+  const wanted = new Set(cliIdByConversationId.values());
+  const sessionMatches = (session: ConversationTreeSession): boolean =>
+    wanted.has(session.id) ||
+    (session.children ?? []).some(sessionMatches);
+  const projects: Array<{ projectKey: string; label: string }> = [];
+  const seen = new Set<string>();
+  for (const source of tree.sources) {
+    for (const project of source.projects) {
+      if (seen.has(project.projectKey)) continue;
+      if (!project.sessions.some(sessionMatches)) continue;
+      seen.add(project.projectKey);
+      projects.push({ projectKey: project.projectKey, label: project.label });
+      if (projects.length >= 2) break;
+    }
+    if (projects.length >= 2) break;
+  }
+  if (projects.length === 0) return [];
+  const states = await api.getProjectStates().catch(() => []);
+  const stateByKey = new Map(states.map((state) => [state.projectKey, state]));
+  const memory: RelayProjectMemory[] = [];
+  for (const project of projects) {
+    const brief = await api.getProjectBrief(project.projectKey).catch(() => null);
+    const state = stateByKey.get(project.projectKey) ?? null;
+    if (!state && !brief?.contentMarkdown?.trim()) continue;
+    memory.push({
+      label: project.label,
+      state,
+      briefMarkdown: brief?.contentMarkdown ?? null,
+    });
+  }
+  return memory;
+}
+
 async function generateRelayPackImpl(conversationIds: number[]): Promise<RelayPack> {
   const api = vestiApi();
   if (!api) {
@@ -742,12 +791,17 @@ async function generateRelayPackImpl(conversationIds: number[]): Promise<RelayPa
   }
 
   const contexts = await gatherRelayContexts(uniqueIds);
+  const cliIdByConversationId = await mapSelectedCliIds(uniqueIds);
   // Ground the pack's key-files section on captured tool executions instead
   // of model recollection; the anchors also persist on the pack so the panel
   // can badge every key_files row as anchored vs. to-be-verified.
-  const fileAnchors = await gatherRelayFileAnchors(await mapSelectedCliIds(uniqueIds));
+  const fileAnchors = await gatherRelayFileAnchors(cliIdByConversationId);
+  // Inject the L0/L2 project memory: the pack's job is to summarize the
+  // project state, and the memory layers hold exactly that, cross-session.
+  const projectMemory = await gatherRelayProjectMemory(cliIdByConversationId);
   const transcript = buildRelayTranscript(contexts, RELAY_CONTEXT_BUDGET_CHARS, {
     fileAnchors,
+    projectMemory,
   });
   const result = await api.runAgent({
     kind: "relay",
@@ -864,7 +918,11 @@ function describeDepositScope(scope: DepositScope): string {
     case "topic":
       return `话题 ${scope.label}`;
     case "timerange":
-      return `${toLocalDate(scope.start)} ~ ${toLocalDate(scope.end)}`;
+      // The one-click sweep distils the whole history as [0, now]; render it
+      // as "全部会话" instead of a 1970 start date.
+      return scope.start <= 0
+        ? "全部会话"
+        : `${toLocalDate(scope.start)} ~ ${toLocalDate(scope.end)}`;
     case "selection":
       return `手动选择 ${scope.conversationIds.length} 个会话`;
   }
@@ -1240,6 +1298,108 @@ async function scanPromptLibraryImpl(options?: {
     usedLlm,
     truncated: browserPart.truncated || allAgentSessions.length > agentSessions.length,
   };
+}
+
+// ---- One-click extraction wiring (agent sessions + optional LLM distill) ----
+//
+// extractPromptsFromLibrary itself is Dexie + injected-data only. On desktop
+// the CLI agent sessions are the primary conversation source and live in the
+// main-process capture store, so they are gathered here through the same
+// read-only IPC the interactive scan uses and passed in as extraInputs. When
+// an LLM is configured, a single batch distill call ("总结") merges the top
+// candidates into reusable fragment templates; any failure is reported on the
+// result (llmError) while the heuristic path still produces output.
+
+const EXTRACT_AGENT_SESSION_LIMIT_RECENT = 50;
+const EXTRACT_AGENT_SESSION_LIMIT_ALL = 200;
+/** Distill input cap: keeps the transcriptOverride under the 30K IPC limit. */
+const EXTRACT_DISTILL_TURNS = 30;
+const EXTRACT_DISTILL_FRAGMENT_LIMIT = 6;
+
+async function collectAgentExtractInputs(
+  api: VestiDesktopApi,
+  scope: "all" | "recent" | undefined,
+): Promise<PromptScanUserInput[]> {
+  const limit = scope === "all" ? EXTRACT_AGENT_SESSION_LIMIT_ALL : EXTRACT_AGENT_SESSION_LIMIT_RECENT;
+  const sessions = (await api.getSessions().catch(() => []))
+    .sort((a, b) => b.lastActivityAt - a.lastActivityAt)
+    .slice(0, limit);
+  return collectAgentScanInputs(api, sessions, () => {});
+}
+
+/** Leniently parse the distill response: a JSON array of {title, body, category}. */
+function parseDistillFragments(raw: string, limit: number): ExtractedFragment[] {
+  const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  const start = cleaned.indexOf("[");
+  const end = cleaned.lastIndexOf("]");
+  if (start === -1 || end <= start) return [];
+  try {
+    const parsed = JSON.parse(cleaned.slice(start, end + 1)) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    const fragments: ExtractedFragment[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== "object") continue;
+      const candidate = item as { title?: unknown; body?: unknown; category?: unknown };
+      const body = typeof candidate.body === "string" ? candidate.body.trim() : "";
+      if (!body) continue;
+      fragments.push({
+        title: typeof candidate.title === "string" ? candidate.title.trim().slice(0, 48) : "",
+        body: body.slice(0, 4_000),
+        category: typeof candidate.category === "string" && candidate.category.trim()
+          ? candidate.category.trim().slice(0, 40)
+          : null,
+      });
+      if (fragments.length >= limit) break;
+    }
+    return fragments;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Build the one-batch LLM distiller for extraction ("总结"): merge the top
+ * candidate prompts into reusable fragment templates. Returns undefined when
+ * no LLM is configured — extraction then runs the deterministic heuristic
+ * path (scanner clustering still aggregates similar prompts offline).
+ */
+async function buildPromptDistiller(
+  api: VestiDesktopApi,
+): Promise<((turns: string[]) => Promise<ExtractedFragment[]>) | undefined> {
+  const settingsView = await api.getSettings().catch(() => null);
+  const llmReady = Boolean(
+    settingsView &&
+      (settingsView.llm.mode === "demo_proxy" || settingsView.llm.apiKeyConfigured),
+  );
+  if (!llmReady) return undefined;
+  return async (turns) => {
+    const top = turns.slice(0, EXTRACT_DISTILL_TURNS);
+    if (top.length === 0) return [];
+    const transcript = top.map((body, index) => `${index + 1}. ${body.slice(0, 600)}`).join("\n\n");
+    const result = await api.runAgent({
+      kind: "explore",
+      sessionId: `prompt-distill:${Date.now()}`,
+      transcriptOverride: transcript,
+      question:
+        "上面是用户在与 AI 对话中反复使用的候选提示词（按编号给出）。请把它们提炼成至多 6 条可复用的提示词模板：合并语义相似的条目、把一次性的具体内容抽象成 {{变量}} 占位符、保留条目原来的语言。严格只输出一个 JSON 数组，每项形如 {\"title\": \"简短标题\", \"body\": \"完整模板正文\", \"category\": \"分类或 null\"}，不要输出任何其他文字。",
+      persist: false,
+    });
+    return parseDistillFragments(result.content, EXTRACT_DISTILL_FRAGMENT_LIMIT);
+  };
+}
+
+async function extractPromptsFromDesktop(options?: {
+  scope?: "all" | "recent";
+  limit?: number;
+}): Promise<PromptExtractionResult> {
+  const api = vestiApi();
+  const extraInputs = api ? await collectAgentExtractInputs(api, options?.scope) : [];
+  const distill = api ? await buildPromptDistiller(api) : undefined;
+  return extractPromptsFromLibrary({
+    ...options,
+    extraInputs,
+    ...(distill ? { distill } : {}),
+  });
 }
 
 // ---- StorageApi ------------------------------------------------------------
@@ -1714,9 +1874,10 @@ export const desktopStorage: StorageApi = {
   },
   togglePromptFavorite: (id, isFavorite) => togglePromptFavorite(id, isFavorite),
   incrementPromptUsage: (id) => incrementPromptUsage(id),
-  // Offline heuristic extraction (no LLM distiller wired on desktop); the
-  // result reports usedLlm: false, same as the extension's no-LLM path.
-  extractPromptsFromLibrary: (options) => extractPromptsFromLibrary(options),
+  // One-click extraction: agent CLI sessions are gathered over IPC and an
+  // LLM distiller ("总结") is injected when configured; without one the
+  // deterministic heuristic path still produces output (usedLlm: false).
+  extractPromptsFromLibrary: (options) => extractPromptsFromDesktop(options),
   scanPromptLibrary: (options) => scanPromptLibraryImpl(options),
   completePrompt: async (payload) => ({ completion: payload.draft, usedLlm: false }),
 };

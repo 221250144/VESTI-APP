@@ -73,8 +73,13 @@ export interface ParsedSession {
    * Cursor 2.x background agents own a top-level transcript, with lineage
    * solely in their chat meta). Converts to the same subagent_links row a
    * parent-side SubagentRef would produce.
+   * `parentSessionId` is the fully-qualified parent WorkSession.id
+   * (`<platform>:<rawId>`). `agentId` (optional) replaces the child session
+   * id in the link id/agent fields — kimi-code sets it to the agent dir name
+   * (`agent-3`) so the child-side row reuses the parent-side link id and the
+   * two insert paths dedup instead of double-linking.
    */
-  subagentOf?: { parentSessionId: string; agentRole?: string; toolCallId?: string };
+  subagentOf?: { parentSessionId: string; agentId?: string; agentRole?: string; toolCallId?: string };
   tokenUsage: SessionTokenUsage;
 
   startTime: number;

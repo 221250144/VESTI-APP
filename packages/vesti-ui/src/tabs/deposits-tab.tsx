@@ -17,6 +17,7 @@ import {
   ChevronDown,
   Download,
   FolderGit2,
+  Layers,
   Lightbulb,
   PenLine,
   Pencil,
@@ -27,6 +28,13 @@ import {
 } from "lucide-react";
 import { SendToMenu } from "../components/SendToMenu";
 import { sanitizeFileBaseName } from "../lib/extractMarkdown";
+import {
+  planDepositSweep,
+  runDepositSweep,
+  type DepositSweepPlanItem,
+  type DepositSweepProgress,
+  type DepositSweepSummary,
+} from "./deposits/sweep";
 import type {
   Conversation,
   ConversationTree,
@@ -190,6 +198,11 @@ export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps)
   const [exportOpen, setExportOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [opsOpen, setOpsOpen] = useState(false);
+
+  // One-click full sweep: batch distillation across all preset scenarios.
+  const [sweepRunning, setSweepRunning] = useState(false);
+  const [sweepProgress, setSweepProgress] = useState<DepositSweepProgress | null>(null);
+  const [sweepSummary, setSweepSummary] = useState<DepositSweepSummary | null>(null);
 
   const available = Boolean(storage.listDeposits && storage.generateDeposit);
   const llmMissing = availability !== null && !availability.llmConfigured;
@@ -398,6 +411,68 @@ export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps)
     }
   };
 
+  // One-click full sweep: every preset scenario, auto-scoped, chained onto the
+  // existing heads (repeat runs merge instead of duplicating). Per-item
+  // outcomes land in the summary line under the sweep card.
+  const canSweep = Boolean(
+    storage.listDeposits &&
+      storage.resolveDepositScope &&
+      storage.generateDeposit &&
+      storage.deleteDeposit &&
+      storage.getConversationTree,
+  );
+
+  const handleSweep = async () => {
+    const {
+      listDeposits,
+      resolveDepositScope,
+      generateDeposit,
+      deleteDeposit,
+      getConversationTree,
+    } = storage;
+    if (
+      !listDeposits ||
+      !resolveDepositScope ||
+      !generateDeposit ||
+      !deleteDeposit ||
+      !getConversationTree ||
+      sweepRunning ||
+      llmMissing
+    ) {
+      return;
+    }
+    setSweepRunning(true);
+    setSweepProgress(null);
+    setSweepSummary(null);
+    setNotice(null);
+    try {
+      const tree = (await getConversationTree().catch(() => null)) ?? null;
+      const plan = planDepositSweep({ tree, now: Date.now() });
+      const summary = await runDepositSweep(
+        {
+          listDeposits,
+          resolveScope: resolveDepositScope,
+          generate: generateDeposit,
+          remove: deleteDeposit,
+        },
+        plan,
+        (progress) => setSweepProgress(progress),
+      );
+      setSweepSummary(summary);
+      await refreshDeposits();
+    } catch (error) {
+      setNotice((error as Error)?.message ?? String(error));
+    } finally {
+      setSweepRunning(false);
+      setSweepProgress(null);
+    }
+  };
+
+  const sweepItemLabel = (item: DepositSweepPlanItem): string =>
+    item.scope.kind === "project"
+      ? `${templateName(item.template)} · ${item.scope.label}`
+      : templateName(item.template);
+
   const handleRename = async () => {
     if (!storage.renameDeposit || !viewDeposit) return;
     const title = renameTitle.trim();
@@ -490,6 +565,8 @@ export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps)
       case "topic":
         return l("scopeDescTopic", "Topic: {label}").replace("{label}", scope.label);
       case "timerange":
+        // Whole-history sweeps store [0, now]; show a label, not a 1970 date.
+        if (scope.start <= 0) return l("scopeDescAll", "All conversations");
         return l("scopeDescTimerange", "Time window: {start} ~ {end}")
           .replace("{start}", new Date(scope.start).toLocaleDateString())
           .replace("{end}", new Date(scope.end).toLocaleDateString());
@@ -550,6 +627,72 @@ export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps)
           </p>
         </div>
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3">
+          <section>
+            <button
+              type="button"
+              onClick={() => void handleSweep()}
+              disabled={!canSweep || sweepRunning || llmMissing}
+              title={llmMissing ? l("llmMissing", "Configure a model in Settings first.") : undefined}
+              className="flex w-full items-start gap-2.5 rounded-lg border border-accent-primary/40 bg-accent-primary-light px-3 py-2.5 text-left transition-colors hover:border-accent-primary disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <span className="mt-0.5 shrink-0 text-accent-primary">
+                {sweepRunning ? (
+                  <RefreshCw strokeWidth={1.75} className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Layers strokeWidth={1.75} className="h-4 w-4" />
+                )}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-vesti-base font-sans font-medium text-text-primary">
+                  {l("sweepAll", "One-click full sweep")}
+                </span>
+                <span className="mt-0.5 block text-vesti-sm font-sans leading-snug text-text-tertiary">
+                  {sweepRunning && sweepProgress
+                    ? l("sweepProgress", "Distilling {current}/{total}: {label}")
+                        .replace("{current}", String(sweepProgress.current))
+                        .replace("{total}", String(sweepProgress.total))
+                        .replace("{label}", sweepItemLabel(sweepProgress.item))
+                    : l(
+                        "sweepAllHint",
+                        "Distill every preset in one pass: background knowledge, each project's state, writing style.",
+                      )}
+                </span>
+                {sweepRunning && sweepProgress ? (
+                  <span className="mt-1.5 block h-1 overflow-hidden rounded-full bg-bg-surface-hover">
+                    <span
+                      className="block h-full rounded-full bg-accent-primary transition-[width] duration-300"
+                      style={{
+                        width: `${Math.round(
+                          ((sweepProgress.current - 1) / Math.max(1, sweepProgress.total)) * 100,
+                        )}%`,
+                      }}
+                    />
+                  </span>
+                ) : null}
+              </span>
+            </button>
+            {llmMissing ? (
+              <p className="mt-1.5 px-1 text-vesti-sm font-sans text-text-tertiary">
+                {l("llmMissing", "Configure a model in Settings first.")}
+              </p>
+            ) : null}
+            {sweepSummary ? (
+              <p
+                className={`mt-1.5 px-1 text-vesti-sm font-sans ${
+                  sweepSummary.failed > 0 ? "text-danger" : "text-text-secondary"
+                }`}
+              >
+                {l("sweepSummary", "Sweep complete: {added} added · {updated} updated · {skipped} skipped")
+                  .replace("{added}", String(sweepSummary.added))
+                  .replace("{updated}", String(sweepSummary.updated))
+                  .replace("{skipped}", String(sweepSummary.skipped))}
+                {sweepSummary.failed > 0
+                  ? ` · ${l("sweepFailed", "{failed} failed").replace("{failed}", String(sweepSummary.failed))}`
+                  : ""}
+              </p>
+            ) : null}
+          </section>
+
           <section>
             <h2 className="mb-1.5 px-1 text-vesti-sm font-sans font-medium uppercase tracking-wide text-text-tertiary">
               {l("newDeposit", "New deposit")}
