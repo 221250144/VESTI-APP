@@ -89,7 +89,7 @@ export const enTranslations = {
       description: "BYOK & proxy configuration",
       privacyTitle: "What leaves your device",
       privacyDisclosure:
-        "Capture, local storage, and keyword search stay 100% on your device. AI features (summaries, Explore, embeddings, prompt tools, roundtable) send the relevant conversation text to the configured model — by default via Vesti's proxy to ModelScope. Add your own API key for direct routing.",
+        "Capture, local storage, and keyword search stay 100% on your device. AI features (summaries, Explore, embeddings, prompt tools, roundtable) send the relevant conversation text to the configured model. By default, requests are routed through Vesti's proxy, which selects the actual provider and model; add your own API key to use a custom OpenAI-compatible endpoint directly.",
       useCustomApiKey: "Use Custom API Key",
       byokDesc: "BYOK - your key, direct routing",
       proxyActive: "Proxy Active",

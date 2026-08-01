@@ -1,6 +1,6 @@
 /**
  * Sync Engine v2
- * Orchestrates: detect → parse → convert → vault backup → store
+ * Orchestrates: detect → parse → convert → store → checkpoint → queued vault backup
  */
 
 import fs from 'fs-extra';
@@ -13,6 +13,14 @@ import type { VaultManager } from '../storage/VaultManager.js';
 import type { ClaudeCodeAdapter } from '../adapters/claude-code/adapter.js';
 import { hostFromPath, rewriteSessionIdForHost } from '../platform/PathResolver.js';
 import { MessageConverter } from '../storage/MessageConverter.js';
+import type { TokenUsageEvent } from '../types/unified.js';
+
+/** Stable replacement key for one physical sync candidate. */
+export function sourceFileKey(platform: AgentPlatform, filePath: string, host: string): string {
+  let normalized = path.resolve(filePath).replace(/\\/g, '/');
+  if (process.platform === 'win32' && host === 'native') normalized = normalized.toLowerCase();
+  return `${platform}:${host}:${normalized}`;
+}
 
 export interface SyncResult {
   platform: AgentPlatform;
@@ -129,29 +137,18 @@ export class SyncEngine {
       return null; // No new data
     }
 
+    const host = hostFromPath(filePath);
+    const physicalSourceScope = sourceFileKey(platform, filePath, host);
     const sessions = await this.adapters.parseSessions(platform, filePath);
     if (sessions.length === 0) {
+      this.db.replaceTokenUsageEvents(physicalSourceScope, []);
       this.db.setSyncState(filePath, platform, size, mtimeMs, undefined, undefined, parserVersion);
       return null;
     }
 
     // Source host ('native' or 'wsl:<distro>'), derived from the file path.
-    const host = hostFromPath(filePath);
 
-    // Vault backup (Layer 1)
     const adapter = this.adapters.getAdapter(platform);
-    if (this.vault && adapter?.shouldBackupSource !== false) {
-      try {
-        await this.vault.backup(
-          filePath,
-          platform,
-          sessions.length === 1 ? sessions[0].sessionId : undefined,
-          host,
-        );
-      } catch {
-        // Non-fatal: continue even if backup fails
-      }
-    }
 
     const totals: SyncFileResult = {
       sessions: 0,
@@ -160,9 +157,13 @@ export class SyncEngine {
       turns: 0,
     };
     let linkDeferred = false;
+    const sourceTokenUsageEvents: TokenUsageEvent[] = [];
 
     for (const session of sessions) {
-      if (session.messages.length === 0) continue;
+      // Some agents can report a completed model invocation even when no
+      // displayable text message was persisted (for example a tool-only or
+      // interrupted turn). Keep those usage events in the time series.
+      if (session.messages.length === 0 && (session.tokenUsageEvents?.length ?? 0) === 0) continue;
 
       // Load supplemental session-meta for Claude Code.
       if (platform === 'claude-code') {
@@ -178,6 +179,7 @@ export class SyncEngine {
       // work_sessions. Done after the meta lookup, which keys on the
       // original sessionId.
       session.host = host;
+      session.sourceFileKey = physicalSourceScope;
       if (host !== 'native') {
         session.sessionId = rewriteSessionIdForHost(session.sessionId, host);
       }
@@ -195,6 +197,7 @@ export class SyncEngine {
       this.db.insertTurns(converted.turns);
       this.db.insertSystemEvents(converted.systemEvents);
       this.db.insertContextCompactions(converted.contextCompactions);
+      sourceTokenUsageEvents.push(...converted.tokenUsageEvents);
 
       for (const link of converted.subagentLinks) {
         try {
@@ -217,10 +220,14 @@ export class SyncEngine {
       totals.turns += Math.max(0, converted.turns.length - previousTurnCount);
     }
 
+    // One physical candidate can yield several logical sessions. Replace its
+    // complete event snapshot once so those sessions cannot erase each other.
+    this.db.replaceTokenUsageEvents(physicalSourceScope, sourceTokenUsageEvents);
+
     // Update sync state. Skipped while a subagent link is deferred: the file
     // must re-parse later so the link retries even without a file change.
+    const onlySession = sessions.length === 1 ? sessions[0] : undefined;
     if (!linkDeferred) {
-      const onlySession = sessions.length === 1 ? sessions[0] : undefined;
       this.db.setSyncState(
         filePath,
         platform,
@@ -230,6 +237,18 @@ export class SyncEngine {
         onlySession ? `${platform}:${onlySession.sessionId}` : undefined,
         parserVersion,
       );
+    }
+
+    // Captured data and its checkpoint are durable before archival work starts.
+    // VaultManager serializes compression globally; intentionally do not await
+    // this promise so a growing JSONL or a failed archive cannot delay capture.
+    if (this.vault && adapter?.shouldBackupSource !== false) {
+      void this.vault.backup(
+        filePath,
+        platform,
+        onlySession?.sessionId,
+        host,
+      ).catch(() => undefined);
     }
 
     return totals.sessions > 0 ? totals : null;

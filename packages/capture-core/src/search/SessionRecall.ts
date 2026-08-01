@@ -186,6 +186,8 @@ export interface SessionRecallOptions {
   topK?: number;
   /** Query embedding; when absent the vector list is skipped (pure FTS). */
   queryVector?: Float32Array | null;
+  /** Exact provider/model/dimension index identity for queryVector. */
+  queryEmbeddingVersion?: string | null;
   /** Per-list FTS candidate cap before fusion. */
   candidateLimit?: number;
   /** Reference time (ms epoch) for recency decay; tests inject a fixed now. */
@@ -289,11 +291,21 @@ function rankSessionHits(db: Database, ftsQuery: string, limit: number): Array<{
   }
 }
 
-function rankVectorHits(db: Database, queryVector: Float32Array, limit: number): Array<{ id: string }> {
-  const rows = db.prepare(`
-    SELECT session_id, embedding FROM session_digests
-    WHERE embedding_status = 'ok' AND embedding IS NOT NULL
-  `).all() as Array<{ session_id: string; embedding: Buffer }>;
+function rankVectorHits(
+  db: Database,
+  queryVector: Float32Array,
+  limit: number,
+  embeddingVersion?: string | null,
+): Array<{ id: string }> {
+  const rows = embeddingVersion
+    ? db.prepare(`
+        SELECT session_id, embedding FROM session_digest_embeddings
+        WHERE index_version = ? AND dimensions = ?
+      `).all(embeddingVersion, queryVector.length) as Array<{ session_id: string; embedding: Buffer }>
+    : db.prepare(`
+        SELECT session_id, embedding FROM session_digests
+        WHERE embedding_status = 'ok' AND embedding IS NOT NULL
+      `).all() as Array<{ session_id: string; embedding: Buffer }>;
   const candidates = rows.flatMap(row => {
     try {
       return [{ id: row.session_id, vector: deserializeVector(row.embedding) }];
@@ -361,7 +373,14 @@ export function recallSessions(db: Database, query: string, options: SessionReca
   }
 
   if (options.queryVector && options.queryVector.length > 0) {
-    lists.push(rankVectorHits(db, options.queryVector, candidateLimit).map(row => row.id));
+    lists.push(
+      rankVectorHits(
+        db,
+        options.queryVector,
+        candidateLimit,
+        options.queryEmbeddingVersion,
+      ).map(row => row.id),
+    );
   }
 
   if (lists.every(list => list.length === 0)) return [];

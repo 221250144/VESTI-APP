@@ -6,6 +6,7 @@ import {
   type ExtensionImportResultPayload,
   type VestiCapsuleApi,
   type VestiDesktopApi,
+  type VestiMembershipApi,
   type VestiUiPrefsApi,
   type VestiWindowApi,
 } from './shared/contracts';
@@ -24,6 +25,20 @@ const windowControls: VestiWindowApi = {
 };
 
 contextBridge.exposeInMainWorld('vestiWindow', windowControls);
+
+const membership: VestiMembershipApi = {
+  getStatus: () => ipcRenderer.invoke(IPC.membershipStatus),
+  register: credentials => ipcRenderer.invoke(IPC.membershipRegister, credentials),
+  login: credentials => ipcRenderer.invoke(IPC.membershipLogin, credentials),
+  logout: () => ipcRenderer.invoke(IPC.membershipLogout),
+  onStatusChanged: listener => {
+    const wrapped = (_event: unknown, status: Parameters<typeof listener>[0]) => listener(status);
+    ipcRenderer.on(IPC.membershipChanged, wrapped);
+    return () => ipcRenderer.removeListener(IPC.membershipChanged, wrapped);
+  },
+};
+
+contextBridge.exposeInMainWorld('vestiMembership', membership);
 
 const api: VestiDesktopApi = {
   getOverview: () => ipcRenderer.invoke(IPC.overview),

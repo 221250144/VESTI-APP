@@ -15,7 +15,14 @@ import fs from 'fs-extra';
 import path from 'path';
 import crypto from 'crypto';
 import readline from 'readline';
-import type { ParsedSession, ParsedMessage, ToolCallBlock, ToolResultBlock, SessionTokenUsage } from '../../types/agent.js';
+import type {
+  ParsedSession,
+  ParsedMessage,
+  ParsedTokenUsageEvent,
+  ToolCallBlock,
+  ToolResultBlock,
+  SessionTokenUsage,
+} from '../../types/agent.js';
 import type { ToolExecution } from '../../types/index.js';
 import type {
   KimiWireLine,
@@ -193,9 +200,80 @@ export class KimiCodeParser {
       totalCacheReadTokens: 0,
       models: new Set(),
     };
-    // step.end usage is only a fallback: usage.record already aggregates the turn.
-    const stepEndUsage = { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
-    let sawUsageRecord = false;
+    const tokenUsageEvents: ParsedTokenUsageEvent[] = [];
+    type ProtocolUsageCandidate = {
+      kind: 'step.end' | 'usage.record';
+      event: ParsedTokenUsageEvent;
+      correlationKeys: Set<string>;
+    };
+    // Keep the physical token-bearing order. A usage.record may replace only
+    // the immediately preceding step.end fallback, never any same-valued event
+    // inside an arbitrary time window.
+    const protocolUsageCandidates: ProtocolUsageCandidate[] = [];
+    const sourceScope = `${sessionId}\u001f${agentName ?? 'session'}`;
+    const sourceScopeHash = crypto.createHash('sha256').update(sourceScope).digest('hex').slice(0, 16);
+    const eventFingerprintOccurrences = new Map<string, number>();
+
+    const correlationKeysFor = (
+      value: Record<string, unknown>,
+      options: { stepUuidIsUuid?: boolean } = {},
+    ): Set<string> => {
+      const keys = new Set<string>();
+      const add = (prefix: string, raw: unknown) => {
+        if (typeof raw === 'string' && raw) keys.add(`${prefix}:${raw}`);
+        else if (typeof raw === 'number' && Number.isFinite(raw)) keys.add(`${prefix}:${raw}`);
+      };
+      add('step', value.stepUuid);
+      add('step', value.stepId);
+      if (options.stepUuidIsUuid) add('step', value.uuid);
+      add('invocation', value.invocationId);
+      add('invocation', value.invocation_id);
+      add('request', value.requestId);
+      add('request', value.request_id);
+      add('turn', value.turnId);
+      add('turn', value.turn_id);
+      const turn = value.turnId ?? value.turn_id;
+      if ((typeof turn === 'string' || typeof turn === 'number') && value.step !== undefined) {
+        add('turn-step', `${turn}:${String(value.step)}`);
+      }
+      return keys;
+    };
+
+    const createUsageEvent = (
+      kind: string,
+      timestamp: number,
+      usage: { input: number; output: number; cacheCreation: number; cacheRead: number },
+      eventModel: string | undefined,
+      source: string,
+      semanticIdentity?: string,
+    ): ParsedTokenUsageEvent => {
+      // Line numbers are deliberately excluded: unrelated wire events may be
+      // inserted between rescans. The local ordinal retains genuinely repeated
+      // equal invocations without coupling ids to unrelated lines.
+      const fingerprint = JSON.stringify([
+        kind,
+        semanticIdentity ?? '',
+        timestamp,
+        usage.input,
+        usage.output,
+        usage.cacheCreation,
+        usage.cacheRead,
+        eventModel ?? '',
+      ]);
+      const occurrence = eventFingerprintOccurrences.get(fingerprint) ?? 0;
+      eventFingerprintOccurrences.set(fingerprint, occurrence + 1);
+      const eventHash = crypto.createHash('sha256').update(fingerprint).digest('hex').slice(0, 20);
+      return {
+        id: `kimi-${sourceScopeHash}-${kind}-${eventHash}${occurrence ? `-${occurrence}` : ''}`,
+        timestamp,
+        inputTokens: usage.input,
+        outputTokens: usage.output,
+        cacheCreationTokens: usage.cacheCreation,
+        cacheReadTokens: usage.cacheRead,
+        model: eventModel,
+        source,
+      };
+    };
 
     let model: string | undefined;
     let protocolVersion: string | undefined;
@@ -279,7 +357,7 @@ export class KimiCodeParser {
       });
     };
 
-    const handle14LoopEvent = (line: KimiWireLine, ts: number) => {
+    const handle14LoopEvent = (line: KimiWireLine, ts: number, lineIndex: number) => {
       const event = (line as { event?: Kimi14LoopEvent }).event;
       if (!event || !event.type) {
         noteUnrecognized('context.append_loop_event');
@@ -293,10 +371,28 @@ export class KimiCodeParser {
         case 'step.end': {
           const u = event.usage;
           if (u) {
-            stepEndUsage.input += (u.inputOther || 0) + (u.inputCacheRead || 0) + (u.inputCacheCreation || 0);
-            stepEndUsage.output += u.output || 0;
-            stepEndUsage.cacheCreation += u.inputCacheCreation || 0;
-            stepEndUsage.cacheRead += u.inputCacheRead || 0;
+            const input = (u.inputOther || 0) + (u.inputCacheRead || 0) + (u.inputCacheCreation || 0);
+            const output = u.output || 0;
+            const cacheCreation = u.inputCacheCreation || 0;
+            const cacheRead = u.inputCacheRead || 0;
+            if (input || output || cacheCreation || cacheRead) {
+              const correlationKeys = correlationKeysFor(event as unknown as Record<string, unknown>, {
+                stepUuidIsUuid: true,
+              });
+              const semanticIdentity = [...correlationKeys].sort().join('|');
+              protocolUsageCandidates.push({
+                kind: 'step.end',
+                correlationKeys,
+                event: createUsageEvent(
+                  'step-end',
+                  ts,
+                  { input, output, cacheCreation, cacheRead },
+                  model,
+                  'kimi-code:step.end',
+                  semanticIdentity || undefined,
+                ),
+              });
+            }
           }
           return;
         }
@@ -408,7 +504,7 @@ export class KimiCodeParser {
       }
     };
 
-    const handle14Event = (line: KimiWireLine) => {
+    const handle14Event = (line: KimiWireLine, lineIndex: number) => {
       const type = line.type || '';
       const ts = typeof line.time === 'number' ? Math.round(line.time) : 0;
 
@@ -421,18 +517,40 @@ export class KimiCodeParser {
         return;
       }
       if (type === 'context.append_loop_event') {
-        handle14LoopEvent(line, ts);
+        handle14LoopEvent(line, ts, lineIndex);
         return;
       }
       if (type === 'usage.record') {
         const p = line as unknown as Kimi14UsageRecord;
         const u = p.usage;
         if (u) {
-          sawUsageRecord = true;
-          tokenUsage.totalInputTokens += (u.inputOther || 0) + (u.inputCacheRead || 0) + (u.inputCacheCreation || 0);
-          tokenUsage.totalOutputTokens += u.output || 0;
-          tokenUsage.totalCacheCreationTokens += u.inputCacheCreation || 0;
-          tokenUsage.totalCacheReadTokens += u.inputCacheRead || 0;
+          const input = (u.inputOther || 0) + (u.inputCacheRead || 0) + (u.inputCacheCreation || 0);
+          const output = u.output || 0;
+          const cacheCreation = u.inputCacheCreation || 0;
+          const cacheRead = u.inputCacheRead || 0;
+          tokenUsage.totalInputTokens += input;
+          tokenUsage.totalOutputTokens += output;
+          tokenUsage.totalCacheCreationTokens += cacheCreation;
+          tokenUsage.totalCacheReadTokens += cacheRead;
+          if (input || output || cacheCreation || cacheRead) {
+            const rawRecord = line as unknown as Record<string, unknown>;
+            const correlationKeys = correlationKeysFor(rawRecord);
+            const semanticIdentity = [...correlationKeys].sort().join('|');
+            const event = createUsageEvent(
+              'usage-record',
+              ts,
+              { input, output, cacheCreation, cacheRead },
+              p.model || model,
+              'kimi-code:usage.record',
+              semanticIdentity || undefined,
+            );
+            tokenUsageEvents.push(event);
+            protocolUsageCandidates.push({
+              kind: 'usage.record',
+              event,
+              correlationKeys,
+            });
+          }
         }
         if (p.model) {
           tokenUsage.models.add(p.model);
@@ -455,7 +573,7 @@ export class KimiCodeParser {
 
     // ==================== Main per-line dispatch ====================
 
-    for (const line of lines) {
+    for (const [lineIndex, line] of lines.entries()) {
       if (line.message && typeof line.message.type === 'string') {
         // Legacy envelope protocol
         this.handleLegacyEvent(line, sessionId, messages, toolExecutions, tokenUsage, activeToolCalls, {
@@ -470,22 +588,55 @@ export class KimiCodeParser {
             },
           },
           peakContext: (value: number) => { if (value > peakContextUsage) peakContextUsage = value; },
+          emitTokenUsage: (source, timestamp, usage, suffix) => {
+            if (!usage.input && !usage.output && !usage.cacheCreation && !usage.cacheRead) return;
+            tokenUsageEvents.push(createUsageEvent(
+              `legacy-${source}`,
+              timestamp,
+              usage,
+              model,
+              `kimi-code:${source}`,
+              suffix,
+            ));
+          },
         });
         continue;
       }
       if (typeof line.type === 'string') {
-        handle14Event(line);
+        handle14Event(line, lineIndex);
         continue;
       }
       noteUnrecognized('(unrecognized line shape)');
     }
 
-    // Fallback: no usage.record seen → use accumulated step.end usage
-    if (!sawUsageRecord && (stepEndUsage.input > 0 || stepEndUsage.output > 0)) {
-      tokenUsage.totalInputTokens += stepEndUsage.input;
-      tokenUsage.totalOutputTokens += stepEndUsage.output;
-      tokenUsage.totalCacheCreationTokens += stepEndUsage.cacheCreation;
-      tokenUsage.totalCacheReadTokens += stepEndUsage.cacheRead;
+    // Pair only adjacent token-bearing protocol events. Non-token lines may sit
+    // between them. Shared invocation ids win when present; otherwise exact
+    // usage equality and strict order are the protocol fallback. No time window
+    // is used, so a legitimate pair may cross midnight.
+    const matchedStepEvents = new Set<ParsedTokenUsageEvent>();
+    for (let index = 0; index < protocolUsageCandidates.length - 1; index++) {
+      const step = protocolUsageCandidates[index];
+      const record = protocolUsageCandidates[index + 1];
+      if (step.kind !== 'step.end' || record.kind !== 'usage.record') continue;
+      const sameUsage = step.event.inputTokens === record.event.inputTokens
+        && step.event.outputTokens === record.event.outputTokens
+        && step.event.cacheCreationTokens === record.event.cacheCreationTokens
+        && step.event.cacheReadTokens === record.event.cacheReadTokens;
+      if (!sameUsage) continue;
+      const hasKeysOnBothSides = step.correlationKeys.size > 0 && record.correlationKeys.size > 0;
+      const sharesKey = [...step.correlationKeys].some(key => record.correlationKeys.has(key));
+      if (hasKeysOnBothSides && !sharesKey) continue;
+      matchedStepEvents.add(step.event);
+    }
+
+    for (const candidate of protocolUsageCandidates) {
+      if (candidate.kind !== 'step.end' || matchedStepEvents.has(candidate.event)) continue;
+      const stepEvent = candidate.event;
+      tokenUsage.totalInputTokens += stepEvent.inputTokens;
+      tokenUsage.totalOutputTokens += stepEvent.outputTokens;
+      tokenUsage.totalCacheCreationTokens += stepEvent.cacheCreationTokens;
+      tokenUsage.totalCacheReadTokens += stepEvent.cacheReadTokens;
+      tokenUsageEvents.push(stepEvent);
     }
 
     const timestamps = messages.filter(m => m.timestamp > 0).map(m => m.timestamp);
@@ -528,6 +679,7 @@ export class KimiCodeParser {
       toolExecutions,
       subagents: [],
       tokenUsage,
+      tokenUsageEvents: tokenUsageEvents.length > 0 ? tokenUsageEvents : undefined,
       startTime,
       endTime,
       meta: Object.keys(meta).length > 0 ? meta : undefined,
@@ -552,6 +704,12 @@ export class KimiCodeParser {
       noteUnrecognized: () => void;
       compaction: { setBegin: (ts: number) => void; end: (ts: number, summary?: string) => void };
       peakContext: (value: number) => void;
+      emitTokenUsage: (
+        source: string,
+        timestamp: number,
+        usage: { input: number; output: number; cacheCreation: number; cacheRead: number },
+        suffix?: string,
+      ) => void;
     },
   ): void {
     const msgType = line.message!.type;
@@ -715,10 +873,20 @@ export class KimiCodeParser {
         const p = payload as KimiStatusUpdatePayload;
         if (p.token_usage) {
           const tu = p.token_usage;
-          tokenUsage.totalInputTokens += (tu.input_other || 0) + (tu.input_cache_read || 0) + (tu.input_cache_creation || 0);
-          tokenUsage.totalOutputTokens += tu.output || 0;
-          tokenUsage.totalCacheCreationTokens += tu.input_cache_creation || 0;
-          tokenUsage.totalCacheReadTokens += tu.input_cache_read || 0;
+          const usage = {
+            input: (tu.input_other || 0) + (tu.input_cache_read || 0) + (tu.input_cache_creation || 0),
+            output: tu.output || 0,
+            cacheCreation: tu.input_cache_creation || 0,
+            cacheRead: tu.input_cache_read || 0,
+          };
+          tokenUsage.totalInputTokens += usage.input;
+          tokenUsage.totalOutputTokens += usage.output;
+          tokenUsage.totalCacheCreationTokens += usage.cacheCreation;
+          tokenUsage.totalCacheReadTokens += usage.cacheRead;
+          // Legacy StatusUpdate usage is a per-update value (the pre-existing
+          // parser therefore sums it); preserve that protocol semantics while
+          // retaining its source timestamp for daily analytics.
+          hooks.emitTokenUsage('StatusUpdate', ts, usage);
         }
         if (p.context_usage) hooks.peakContext(p.context_usage);
         break;
@@ -810,10 +978,17 @@ export class KimiCodeParser {
           const subStatus = subPayload as KimiStatusUpdatePayload;
           if (subStatus.token_usage) {
             const tu = subStatus.token_usage;
-            tokenUsage.totalInputTokens += (tu.input_other || 0) + (tu.input_cache_read || 0) + (tu.input_cache_creation || 0);
-            tokenUsage.totalOutputTokens += tu.output || 0;
-            tokenUsage.totalCacheCreationTokens += tu.input_cache_creation || 0;
-            tokenUsage.totalCacheReadTokens += tu.input_cache_read || 0;
+            const usage = {
+              input: (tu.input_other || 0) + (tu.input_cache_read || 0) + (tu.input_cache_creation || 0),
+              output: tu.output || 0,
+              cacheCreation: tu.input_cache_creation || 0,
+              cacheRead: tu.input_cache_read || 0,
+            };
+            tokenUsage.totalInputTokens += usage.input;
+            tokenUsage.totalOutputTokens += usage.output;
+            tokenUsage.totalCacheCreationTokens += usage.cacheCreation;
+            tokenUsage.totalCacheReadTokens += usage.cacheRead;
+            hooks.emitTokenUsage('SubagentEvent.StatusUpdate', ts, usage, taskToolCallId);
           }
           if (subStatus.context_usage) hooks.peakContext(subStatus.context_usage);
         } else if (subType === 'ContentPart') {

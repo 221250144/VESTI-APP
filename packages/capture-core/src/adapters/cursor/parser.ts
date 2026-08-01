@@ -6,7 +6,7 @@
  */
 
 import type { ParsedMessage, ParsedSession, SessionTokenUsage } from '../../types/agent.js';
-import type { TokenUsage, ToolExecution } from '../../types/index.js';
+import type { ToolExecution } from '../../types/index.js';
 import { estimateTokensFromText } from './estimate.js';
 
 type SqliteDatabase = import('better-sqlite3').Database;
@@ -107,19 +107,6 @@ function uriPath(value: unknown): string {
   return '';
 }
 
-/**
- * Per-bubble usage: Cursor stamps assistant bubbles with
- * tokenCount = { inputTokens, outputTokens }. Recent builds write zeros
- * (usage moved server-side), so zeros are treated as "no data" rather than
- * a real measurement — sums stay honest either way.
- */
-function bubbleTokens(bubble: JsonObject): { input: number; output: number } {
-  const tc = record(bubble.tokenCount);
-  const input = typeof tc.inputTokens === 'number' && Number.isFinite(tc.inputTokens) ? tc.inputTokens : 0;
-  const output = typeof tc.outputTokens === 'number' && Number.isFinite(tc.outputTokens) ? tc.outputTokens : 0;
-  return { input: Math.max(0, input), output: Math.max(0, output) };
-}
-
 function extractThinking(bubble: JsonObject): string {
   if (typeof bubble.thinking === 'string') return bubble.thinking;
   const thinking = record(bubble.thinking);
@@ -134,6 +121,57 @@ function extractModel(data: JsonObject, bubbles: JsonObject[]): string | undefin
     if (typeof name === 'string' && name) return name;
   }
   return undefined;
+}
+
+function tokenNumber(...values: unknown[]): number {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return Math.max(0, Math.round(value));
+    }
+  }
+  return 0;
+}
+
+function extractBubbleUsage(
+  bubble: JsonObject,
+  fallbackModel?: string,
+): ParsedMessage['usage'] | undefined {
+  const tokenCount = record(bubble.tokenCount);
+  if (Object.keys(tokenCount).length === 0) return undefined;
+
+  const inputTokens = tokenNumber(
+    tokenCount.inputTokens,
+    tokenCount.input_tokens,
+    tokenCount.promptTokens,
+  );
+  const outputTokens = tokenNumber(
+    tokenCount.outputTokens,
+    tokenCount.output_tokens,
+    tokenCount.completionTokens,
+  );
+  const cacheCreationTokens = tokenNumber(
+    tokenCount.cacheCreationTokens,
+    tokenCount.cache_creation_input_tokens,
+  );
+  const cacheReadTokens = tokenNumber(
+    tokenCount.cacheReadTokens,
+    tokenCount.cachedInputTokens,
+    tokenCount.cached_input_tokens,
+  );
+  if (inputTokens + outputTokens + cacheCreationTokens + cacheReadTokens === 0) {
+    return undefined;
+  }
+
+  const bubbleModel = record(bubble.modelInfo).modelName;
+  return {
+    inputTokens,
+    outputTokens,
+    cacheCreationTokens,
+    cacheReadTokens,
+    model: typeof bubbleModel === 'string' && bubbleModel
+      ? bubbleModel
+      : fallbackModel || 'cursor-unknown',
+  };
 }
 
 export class CursorParser {
@@ -293,13 +331,30 @@ export class CursorParser {
       }
     }
 
+    // Cursor's older Composer layout stores the complete bubble list inline
+    // as `conversation[]`. Newer databases keep only headers here and place
+    // each bubble in cursorDiskKV. Support both without combining them, which
+    // would double-count messages and reported usage during migrations.
+    if (bubbleEntries.length === 0 && Array.isArray(data.conversation)) {
+      for (const value of data.conversation) {
+        const bubble = record(value);
+        if (Object.keys(bubble).length) bubbleEntries.push({ bubble, header: bubble });
+      }
+    }
+
     const messages: ParsedMessage[] = [];
     const toolExecutions: ToolExecution[] = [];
     const bubbles = bubbleEntries.map(entry => entry.bubble);
+    const model = extractModel(data, bubbles);
+    const tokenUsage: SessionTokenUsage = {
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalCacheCreationTokens: 0,
+      totalCacheReadTokens: 0,
+      models: new Set(model ? [model] : []),
+    };
     let firstPrompt = '';
     let sequence = 0;
-    let totalInputTokens = 0;
-    let totalOutputTokens = 0;
 
     for (const { bubble, header: bubbleHeader } of bubbleEntries) {
       const bubbleId = typeof bubble.bubbleId === 'string'
@@ -311,6 +366,14 @@ export class CursorParser {
       const text = typeof bubble.text === 'string' ? bubble.text.trim() : '';
       const thinking = extractThinking(bubble).trim();
       const tool = record(bubble.toolFormerData);
+      const usage = extractBubbleUsage(bubble, model);
+      if (usage) {
+        tokenUsage.totalInputTokens += usage.inputTokens;
+        tokenUsage.totalOutputTokens += usage.outputTokens;
+        tokenUsage.totalCacheCreationTokens += usage.cacheCreationTokens;
+        tokenUsage.totalCacheReadTokens += usage.cacheReadTokens;
+        tokenUsage.models.add(usage.model);
+      }
 
       if (role === 'user') {
         if (text) {
@@ -328,20 +391,6 @@ export class CursorParser {
         sequence++;
         continue;
       }
-
-      const tokens = bubbleTokens(bubble);
-      totalInputTokens += tokens.input;
-      totalOutputTokens += tokens.output;
-      const bubbleModel = record(bubble.modelInfo).modelName;
-      const usage: TokenUsage | undefined = tokens.input > 0 || tokens.output > 0
-        ? {
-            inputTokens: tokens.input,
-            outputTokens: tokens.output,
-            cacheCreationTokens: 0,
-            cacheReadTokens: 0,
-            model: typeof bubbleModel === 'string' ? bubbleModel : '',
-          }
-        : undefined;
 
       if (Object.keys(tool).length > 0) {
         const callId = String(tool.toolCallId ?? bubbleId);
@@ -411,32 +460,24 @@ export class CursorParser {
     const timestamps = messages.map(message => message.timestamp).filter(value => value > 0);
     const startTime = timestamps.length ? Math.min(...timestamps) : fallbackStart;
     const endTime = timestamps.length ? Math.max(...timestamps) : toTimestamp(data.lastUpdatedAt ?? header.lastUpdatedAt, startTime);
-    const model = extractModel(data, bubbles);
 
     // Recent Cursor builds write bubble.tokenCount as zeros; fall back to a
     // character-based estimate (flagged via meta.token_estimated) so cursor
     // sessions register real activity instead of a misleading 0.
     let tokenEstimated = false;
-    if (totalInputTokens === 0 && totalOutputTokens === 0) {
+    if (tokenUsage.totalInputTokens === 0 && tokenUsage.totalOutputTokens === 0) {
       for (const message of messages) {
         const inputText = (message.role === 'user' ? message.contentText ?? '' : '')
           + (message.toolResults ?? []).map(result => result.content).join('\n');
         const outputText = message.role === 'assistant'
           ? `${message.contentText ?? ''}\n${message.contentThinking ?? ''}`
           : '';
-        totalInputTokens += estimateTokensFromText(inputText);
-        totalOutputTokens += estimateTokensFromText(outputText);
+        tokenUsage.totalInputTokens += estimateTokensFromText(inputText);
+        tokenUsage.totalOutputTokens += estimateTokensFromText(outputText);
       }
-      tokenEstimated = totalInputTokens > 0 || totalOutputTokens > 0;
+      tokenEstimated = tokenUsage.totalInputTokens > 0 || tokenUsage.totalOutputTokens > 0;
     }
 
-    const tokenUsage: SessionTokenUsage = {
-      totalInputTokens,
-      totalOutputTokens,
-      totalCacheCreationTokens: 0,
-      totalCacheReadTokens: 0,
-      models: new Set(model ? [model] : []),
-    };
     const title = typeof data.name === 'string' && data.name.trim()
       ? data.name.trim()
       : typeof header.name === 'string' ? header.name.trim() : '';

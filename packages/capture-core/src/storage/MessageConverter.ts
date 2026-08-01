@@ -17,6 +17,7 @@ import type {
   ContextCompaction,
   ConvertedSession,
   MessageSource,
+  TokenUsageEvent,
 } from '../types/unified.js';
 import { classifyTool } from '../types/unified.js';
 import { stripInjectedContextBlocks } from '../utils/injectedBlocks.js';
@@ -158,6 +159,52 @@ export class MessageConverter {
       summary: c.summary,
     }));
 
+    // Prefer adapter-provided invocation/delta events. Claude Code and Cursor
+    // already attach usage to individual assistant messages, so derive the
+    // same normalized rows for adapters that do not need an explicit stream.
+    const parsedUsageEvents = session.tokenUsageEvents ?? [];
+    const tokenUsageEvents: TokenUsageEvent[] = parsedUsageEvents.length > 0
+      ? parsedUsageEvents
+          .filter(event => event.timestamp > 0 && (
+            event.inputTokens > 0 || event.outputTokens > 0 ||
+            event.cacheCreationTokens > 0 || event.cacheReadTokens > 0 ||
+            (event.reasoningTokens ?? 0) > 0
+          ))
+          .map(event => ({
+            id: `${sessionId}:token:${event.id}`,
+            sessionId,
+            dedupeKey: event.dedupeKey ?? `${sessionId}:token:${event.id}`,
+            sourceScope: session.sourceFileKey ?? event.sourceScope ?? '',
+            timestamp: event.timestamp,
+            inputTokens: event.inputTokens,
+            outputTokens: event.outputTokens,
+            cacheCreationTokens: event.cacheCreationTokens,
+            cacheReadTokens: event.cacheReadTokens,
+            reasoningTokens: event.reasoningTokens ?? 0,
+            model: event.model,
+            source: event.source,
+          }))
+      : messages
+          .filter(message => message.timestamp > 0 && (
+            (message.tokenInput ?? 0) > 0 || (message.tokenOutput ?? 0) > 0 ||
+            (message.tokenCacheCreation ?? 0) > 0 || (message.tokenCacheRead ?? 0) > 0 ||
+            (message.tokenReasoning ?? 0) > 0
+          ))
+          .map(message => ({
+            id: `${sessionId}:token:message:${message.id}`,
+            sessionId,
+            dedupeKey: `${sessionId}:token:message:${message.id}`,
+            sourceScope: session.sourceFileKey ?? '',
+            timestamp: message.timestamp,
+            inputTokens: message.tokenInput ?? 0,
+            outputTokens: message.tokenOutput ?? 0,
+            cacheCreationTokens: message.tokenCacheCreation ?? 0,
+            cacheReadTokens: message.tokenCacheRead ?? 0,
+            reasoningTokens: message.tokenReasoning ?? 0,
+            model: message.model,
+            source: 'message_usage',
+          }));
+
     // Build agent meta with peakContextUsage
     let agentMeta: string | undefined;
     if (session.meta || session.peakContextUsage || session.warnings?.length) {
@@ -231,6 +278,7 @@ export class MessageConverter {
       systemEvents,
       subagentLinks,
       contextCompactions,
+      tokenUsageEvents,
     };
   }
 

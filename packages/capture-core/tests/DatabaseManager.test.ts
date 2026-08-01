@@ -3,7 +3,7 @@ import path from 'node:path';
 import fs from 'fs-extra';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DatabaseManager } from '../src/storage/DatabaseManager.js';
-import type { WorkSession } from '../src/types/unified.js';
+import type { TokenUsageEvent, WorkSession } from '../src/types/unified.js';
 
 const tempDirs: string[] = [];
 
@@ -106,6 +106,240 @@ describe('DatabaseManager work-session token totals', () => {
       totalCacheReadTokens: 310_000_000,
     });
 
+    await manager.close();
+  });
+
+  it('groups Token usage by each event local day instead of session last activity', async () => {
+    const manager = await createManager();
+    const localNoonDaysAgo = (days: number): number => {
+      const value = new Date();
+      value.setHours(12, 0, 0, 0);
+      value.setDate(value.getDate() - days);
+      return value.getTime();
+    };
+    const firstDay = localNoonDaysAgo(5);
+    const secondDay = localNoonDaysAgo(3);
+    const lastActivityDay = localNoonDaysAgo(0);
+    manager.upsertWorkSession(session({
+      startedAt: firstDay,
+      lastActivityAt: lastActivityDay,
+      updatedAt: lastActivityDay,
+      // Simulate one logical conversation whose physical rollouts together
+      // report more than the legacy per-session MAX counter.
+      totalInputTokens: 800,
+      totalOutputTokens: 80,
+    }));
+
+    const firstEvent: TokenUsageEvent = {
+      id: 'codex:active-session:usage:first',
+      sessionId: 'codex:active-session',
+      dedupeKey: 'transition:first',
+      sourceScope: 'codex:native:C:/sessions/active.jsonl',
+      timestamp: firstDay,
+      inputTokens: 300,
+      outputTokens: 30,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 200,
+      reasoningTokens: 0,
+      model: 'gpt-test',
+      source: 'codex:token_count',
+    };
+    const secondEvent: TokenUsageEvent = {
+        ...firstEvent,
+        id: 'codex:active-session:usage:second',
+        dedupeKey: 'transition:second',
+        timestamp: secondDay,
+        inputTokens: 700,
+        outputTokens: 70,
+        cacheReadTokens: 600,
+      };
+    manager.replaceTokenUsageEvents(firstEvent.sourceScope, [
+      firstEvent,
+      secondEvent,
+    ]);
+
+    // Replaying the same stable event id updates it; it must not add a third
+    // copy to the daily total.
+    manager.replaceTokenUsageEvents(firstEvent.sourceScope, [
+      { ...firstEvent, inputTokens: 310, outputTokens: 31 },
+      secondEvent,
+    ]);
+
+    const stats = manager.getStats();
+    const usageByDate = Object.fromEntries(stats.dailyTokenUsage.map(row => [row.date, row]));
+    const localDate = (timestamp: number): string => {
+      const value = new Date(timestamp);
+      return [
+        value.getFullYear(),
+        String(value.getMonth() + 1).padStart(2, '0'),
+        String(value.getDate()).padStart(2, '0'),
+      ].join('-');
+    };
+    const firstDate = localDate(firstDay);
+    const secondDate = localDate(secondDay);
+    const lastActivityDate = localDate(lastActivityDay);
+    expect(usageByDate[firstDate]).toMatchObject({ inputTokens: 310, outputTokens: 31 });
+    expect(usageByDate[secondDate]).toMatchObject({ inputTokens: 700, outputTokens: 70 });
+    expect(usageByDate[lastActivityDate]).toBeUndefined();
+
+    // The all-time/platform totals use the larger of the legacy cumulative
+    // session value and the event sum, avoiding both rollout loss and a dip
+    // while an upgrade is still backfilling historical events.
+    expect(stats.totalInputTokens).toBe(1_010);
+    expect(stats.totalOutputTokens).toBe(101);
+    expect(stats.platformTokenBreakdown.codex).toMatchObject({
+      inputTokens: 1_010,
+      outputTokens: 101,
+    });
+
+    await manager.close();
+  });
+
+  it('atomically removes stale events when a physical source is shortened or rewritten', async () => {
+    const manager = await createManager();
+    manager.upsertWorkSession(session({ totalInputTokens: 0, totalOutputTokens: 0 }));
+    const scope = 'codex:native:C:/sessions/rewrite.jsonl';
+    const event = (id: string, inputTokens: number): TokenUsageEvent => ({
+      id,
+      sessionId: 'codex:active-session',
+      dedupeKey: id,
+      sourceScope: scope,
+      timestamp: Date.now(),
+      inputTokens,
+      outputTokens: 1,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      reasoningTokens: 0,
+      source: 'test',
+    });
+
+    manager.replaceTokenUsageEvents(scope, [event('old-a', 10), event('old-b', 20)]);
+    manager.replaceTokenUsageEvents(scope, [event('new-a', 7)]);
+    let stats = manager.getStats();
+    expect(stats.totalInputTokens).toBe(7);
+    expect(stats.totalOutputTokens).toBe(1);
+
+    manager.replaceTokenUsageEvents(scope, []);
+    stats = manager.getStats();
+    expect(stats.totalInputTokens).toBe(0);
+    expect(stats.dailyTokenUsage).toEqual([]);
+    await manager.close();
+  });
+
+  it('returns token time-series events only from the latest 30 local calendar days', async () => {
+    const manager = await createManager();
+    manager.upsertWorkSession(session({ totalInputTokens: 0, totalOutputTokens: 0 }));
+    const scope = 'codex:native:C:/sessions/window.jsonl';
+    const localNoonDaysAgo = (days: number): number => {
+      const value = new Date();
+      value.setHours(12, 0, 0, 0);
+      value.setDate(value.getDate() - days);
+      return value.getTime();
+    };
+    const base: TokenUsageEvent = {
+      id: 'recent', sessionId: 'codex:active-session', dedupeKey: 'recent', sourceScope: scope,
+      timestamp: localNoonDaysAgo(29), inputTokens: 3, outputTokens: 1,
+      cacheCreationTokens: 0, cacheReadTokens: 0, reasoningTokens: 0, source: 'test',
+    };
+    manager.replaceTokenUsageEvents(scope, [
+      base,
+      { ...base, id: 'old', dedupeKey: 'old', timestamp: localNoonDaysAgo(30), inputTokens: 99 },
+    ]);
+    expect(manager.getStats().dailyTokenUsage).toHaveLength(1);
+    expect(manager.getStats().dailyTokenUsage[0]).toMatchObject({ inputTokens: 3 });
+    await manager.close();
+  });
+
+  it('deduplicates replayed Codex fork transitions and keeps their earliest real day', async () => {
+    const manager = await createManager();
+    manager.upsertWorkSession(session({ totalInputTokens: 0, totalOutputTokens: 0 }));
+    const localNoonDaysAgo = (days: number): number => {
+      const value = new Date();
+      value.setHours(12, 0, 0, 0);
+      value.setDate(value.getDate() - days);
+      return value.getTime();
+    };
+    const mainScope = 'codex:native:C:/sessions/main.jsonl';
+    const forkScope = 'codex:native:C:/sessions/fork.jsonl';
+    const makeEvent = (
+      id: string,
+      dedupeKey: string,
+      sourceScope: string,
+      timestamp: number,
+      inputTokens: number,
+    ): TokenUsageEvent => ({
+      id,
+      dedupeKey,
+      sourceScope,
+      sessionId: 'codex:active-session',
+      timestamp,
+      inputTokens,
+      outputTokens: 1,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      reasoningTokens: 0,
+      source: 'codex:token_count',
+    });
+
+    manager.replaceTokenUsageEvents(mainScope, [
+      makeEvent('main-shared', 'transition:shared', mainScope, localNoonDaysAgo(5), 100),
+      makeEvent('main-tail', 'transition:main-tail', mainScope, localNoonDaysAgo(3), 50),
+    ]);
+    manager.replaceTokenUsageEvents(forkScope, [
+      // A fork replays the shared transition later. It must not move or add it.
+      makeEvent('fork-shared', 'transition:shared', forkScope, localNoonDaysAgo(1), 100),
+      makeEvent('fork-tail', 'transition:fork-tail', forkScope, localNoonDaysAgo(1), 70),
+    ]);
+
+    const stats = manager.getStats();
+    expect(stats.totalInputTokens).toBe(220);
+    expect(stats.totalOutputTokens).toBe(3);
+    const byDate = Object.fromEntries(stats.dailyTokenUsage.map(row => [row.date, row]));
+    const localDate = (timestamp: number): string => {
+      const value = new Date(timestamp);
+      return [value.getFullYear(), String(value.getMonth() + 1).padStart(2, '0'), String(value.getDate()).padStart(2, '0')].join('-');
+    };
+    expect(byDate[localDate(localNoonDaysAgo(5))]).toMatchObject({ inputTokens: 100, outputTokens: 1 });
+    expect(byDate[localDate(localNoonDaysAgo(3))]).toMatchObject({ inputTokens: 50, outputTokens: 1 });
+    expect(byDate[localDate(localNoonDaysAgo(1))]).toMatchObject({ inputTokens: 70, outputTokens: 1 });
+
+    await manager.close();
+  });
+
+  it('does not pull an old shared transition into the 30-day chart when a fork replays it today', async () => {
+    const manager = await createManager();
+    manager.upsertWorkSession(session({ totalInputTokens: 0, totalOutputTokens: 0 }));
+    const atLocalNoon = (daysAgo: number): number => {
+      const value = new Date();
+      value.setHours(12, 0, 0, 0);
+      value.setDate(value.getDate() - daysAgo);
+      return value.getTime();
+    };
+    const base: TokenUsageEvent = {
+      id: 'old-original',
+      sessionId: 'codex:active-session',
+      dedupeKey: 'shared-old-transition',
+      sourceScope: 'codex:native:C:/sessions/old.jsonl',
+      timestamp: atLocalNoon(40),
+      inputTokens: 100,
+      outputTokens: 10,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      reasoningTokens: 0,
+      source: 'codex:token_count',
+    };
+    manager.replaceTokenUsageEvents(base.sourceScope, [base]);
+    const replayScope = 'codex:native:C:/sessions/replay.jsonl';
+    manager.replaceTokenUsageEvents(replayScope, [{
+      ...base,
+      id: 'recent-replay',
+      sourceScope: replayScope,
+      timestamp: atLocalNoon(0),
+    }]);
+
+    const stats = manager.getStats();
+    expect(stats.totalInputTokens).toBe(100);
+    expect(stats.dailyTokenUsage).toEqual([]);
     await manager.close();
   });
 });

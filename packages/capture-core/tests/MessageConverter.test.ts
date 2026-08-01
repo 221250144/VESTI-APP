@@ -137,4 +137,80 @@ describe('MessageConverter', () => {
       expect(result.messages[0].source).toBe('tool_request');
     });
   });
+
+  describe('Token usage events', () => {
+    const baseSession = (): ParsedSession => ({
+      sessionId: 'token-session',
+      platform: 'claude-code',
+      projectPath: '/test',
+      messages: [{
+        uuid: 'assistant-1',
+        type: 'assistant',
+        role: 'assistant',
+        timestamp: Date.UTC(2026, 6, 21, 23, 59),
+        contentText: 'Response',
+        usage: {
+          inputTokens: 100,
+          outputTokens: 20,
+          cacheCreationTokens: 3,
+          cacheReadTokens: 40,
+          model: 'claude-test',
+        },
+        isToolResult: false,
+        depth: 0,
+      }],
+      toolExecutions: [],
+      subagents: [],
+      tokenUsage: {
+        totalInputTokens: 100,
+        totalOutputTokens: 20,
+        totalCacheCreationTokens: 3,
+        totalCacheReadTokens: 40,
+        models: new Set(['claude-test']),
+      },
+      startTime: Date.UTC(2026, 6, 21, 23, 59),
+    });
+
+    it('derives timestamped events from message-level usage', () => {
+      const result = MessageConverter.convertV2(baseSession());
+
+      expect(result.tokenUsageEvents).toHaveLength(1);
+      expect(result.tokenUsageEvents[0]).toMatchObject({
+        sessionId: 'claude-code:token-session',
+        timestamp: Date.UTC(2026, 6, 21, 23, 59),
+        inputTokens: 100,
+        outputTokens: 20,
+        cacheCreationTokens: 3,
+        cacheReadTokens: 40,
+        model: 'claude-test',
+        source: 'message_usage',
+      });
+    });
+
+    it('prefers explicit adapter events instead of double-counting message usage', () => {
+      const session = baseSession();
+      session.tokenUsageEvents = [{
+        id: 'reported-1',
+        timestamp: Date.UTC(2026, 6, 22, 0, 1),
+        inputTokens: 250,
+        outputTokens: 30,
+        cacheCreationTokens: 0,
+        cacheReadTokens: 200,
+        reasoningTokens: 9,
+        model: 'explicit-model',
+        source: 'reported_usage',
+      }];
+
+      const result = MessageConverter.convertV2(session);
+
+      expect(result.tokenUsageEvents).toHaveLength(1);
+      expect(result.tokenUsageEvents[0]).toMatchObject({
+        inputTokens: 250,
+        outputTokens: 30,
+        reasoningTokens: 9,
+        model: 'explicit-model',
+        source: 'reported_usage',
+      });
+    });
+  });
 });

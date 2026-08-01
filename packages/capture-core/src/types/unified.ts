@@ -159,6 +159,26 @@ export interface SessionMessage {
   createdAt: number;
 }
 
+// ==================== TokenUsageEvent ====================
+
+/** Normalized, idempotent Token usage event for time-series analytics. */
+export interface TokenUsageEvent {
+  id: string;
+  sessionId: string;
+  /** Logical identity for analytics; physical snapshots still use id. */
+  dedupeKey: string;
+  /** Stable physical-source scope used for atomic snapshot replacement. */
+  sourceScope: string;
+  timestamp: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  reasoningTokens: number;
+  model?: string;
+  source: string;
+}
+
 // ==================== ToolExecution (enhanced) ====================
 
 export interface UnifiedToolExecution {
@@ -231,6 +251,7 @@ export interface ConvertedSession {
   systemEvents: SystemEvent[];
   subagentLinks: SubagentLink[];
   contextCompactions: ContextCompaction[];
+  tokenUsageEvents: TokenUsageEvent[];
 }
 
 // ==================== Session Digest (P1.5) ====================
@@ -262,6 +283,10 @@ export interface SessionDigest {
   decisions: string[];
   openQuestions: string[];
   embedding?: Buffer | null;     // serialized Float32Array (little-endian)
+  embeddingProvider?: string | null;
+  embeddingModel?: string | null;
+  embeddingDimensions?: number | null;
+  embeddingVersion?: string | null;
   embeddingStatus: DigestEmbeddingStatus;
   digestVersion: number;
   messageCount: number;

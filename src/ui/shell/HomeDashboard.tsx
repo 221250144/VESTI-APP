@@ -91,7 +91,7 @@ const HOME_COPY: Record<SupportedLocale, HomeCopy> = {
     sources: "数据来源",
     sourcesHint: "已检测 / 已启用",
     tokenTrend: "Token 消耗趋势",
-    tokenTrendHint: "最近 30 天；累计型会话按最后活动日归集",
+    tokenTrendHint: "最近 30 天；按每次模型调用的真实发生时间统计",
     input: "输入 Token",
     output: "输出 Token",
     noTokenData: "捕获到真实 Token 后，趋势会显示在这里。",
@@ -129,7 +129,7 @@ const HOME_COPY: Record<SupportedLocale, HomeCopy> = {
     sources: "Sources",
     sourcesHint: "Detected / enabled",
     tokenTrend: "Token usage trend",
-    tokenTrendHint: "Last 30 days; cumulative sessions are assigned to their last-active day",
+    tokenTrendHint: "Last 30 days, grouped by each model call's actual time",
     input: "Input tokens",
     output: "Output tokens",
     noTokenData: "The trend will appear after real token usage is captured.",
@@ -167,7 +167,7 @@ const HOME_COPY: Record<SupportedLocale, HomeCopy> = {
     sources: "データソース",
     sourcesHint: "検出 / 有効",
     tokenTrend: "Token 使用推移",
-    tokenTrendHint: "直近30日。累積値は最終活動日に集計",
+    tokenTrendHint: "直近30日。各モデル呼び出しの実際の時刻で集計",
     input: "入力 Token",
     output: "出力 Token",
     noTokenData: "Token を取得すると推移が表示されます。",
@@ -205,7 +205,7 @@ const HOME_COPY: Record<SupportedLocale, HomeCopy> = {
     sources: "데이터 소스",
     sourcesHint: "감지 / 활성화",
     tokenTrend: "토큰 사용 추세",
-    tokenTrendHint: "최근 30일, 누적 세션은 마지막 활동일에 집계",
+    tokenTrendHint: "최근 30일, 각 모델 호출이 실제 발생한 시간으로 집계",
     input: "입력 토큰",
     output: "출력 토큰",
     noTokenData: "실제 토큰이 캡처되면 추세가 표시됩니다.",
@@ -289,6 +289,25 @@ export function HomeDashboard({
     }
   }, [copy.loadFailed]);
 
+  const syncAndLoad = useCallback(async () => {
+    setLoading(true);
+    try {
+      const summary = await window.vesti.sync();
+      if (summary.errors.length > 0) {
+        console.warn("[home-dashboard] Capture refresh completed with errors", summary.errors);
+      }
+      setOverview(await window.vesti.getOverview());
+      // A source-level parse error is reported in the console, but it must not
+      // hide a successfully refreshed overview from every other source.
+      setError(null);
+    } catch (syncError) {
+      console.error("[home-dashboard] Failed to refresh capture data", syncError);
+      setError(copy.loadFailed);
+    } finally {
+      setLoading(false);
+    }
+  }, [copy.loadFailed]);
+
   useEffect(() => {
     void load();
     const unsubscribe = window.vesti.onCaptureChanged(() => void load());
@@ -314,6 +333,16 @@ export function HomeDashboard({
   const dailyUsage = useMemo(
     () => fillDailyUsage(overview.analytics.dailyTokenUsage, 30),
     [overview.analytics.dailyTokenUsage],
+  );
+  const visibleTokenTotals = useMemo(
+    () => dailyUsage.reduce(
+      (sum, point) => ({
+        inputTokens: sum.inputTokens + point.inputTokens,
+        outputTokens: sum.outputTokens + point.outputTokens,
+      }),
+      { inputTokens: 0, outputTokens: 0 },
+    ),
+    [dailyUsage],
   );
   const recentSessions = useMemo(
     () => [...overview.sessions].sort((a, b) => b.lastActivityAt - a.lastActivityAt).slice(0, 6),
@@ -341,7 +370,7 @@ export function HomeDashboard({
             </div>
             <button
               type="button"
-              onClick={() => void load()}
+              onClick={() => void syncAndLoad()}
               disabled={loading}
               aria-label={copy.refresh}
               className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-border-subtle bg-bg-primary text-text-secondary transition-colors hover:border-border-default hover:text-text-primary disabled:opacity-50"
@@ -362,7 +391,7 @@ export function HomeDashboard({
         {error ? (
           <div className="mt-8 flex items-center justify-between rounded-card border border-danger/30 bg-danger/5 p-4 text-[13px] text-danger">
             <span>{error}</span>
-            <button type="button" onClick={() => void load()} className="font-medium underline underline-offset-4">
+            <button type="button" onClick={() => void syncAndLoad()} className="font-medium underline underline-offset-4">
               {copy.retry}
             </button>
           </div>
@@ -401,8 +430,8 @@ export function HomeDashboard({
         <div className="mt-4 grid min-h-[390px] gap-4 xl:grid-cols-[minmax(0,1.8fr)_minmax(320px,0.7fr)]">
           <Panel title={copy.tokenTrend} hint={copy.tokenTrendHint}>
             <div className="mb-4 flex items-center gap-5 text-[11px] text-text-tertiary">
-              <Legend color="#5269d9" label={copy.input} value={overview.totals.inputTokens} locale={locale} />
-              <Legend color="#c98548" label={copy.output} value={overview.totals.outputTokens} locale={locale} />
+              <Legend color="#5269d9" label={copy.input} value={visibleTokenTotals.inputTokens} locale={locale} />
+              <Legend color="#c98548" label={copy.output} value={visibleTokenTotals.outputTokens} locale={locale} />
             </div>
             <TokenTrendChart
               points={dailyUsage}

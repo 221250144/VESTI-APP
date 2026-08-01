@@ -65,6 +65,13 @@ export interface ParsedSession {
   /** Source host tag: 'native' or 'wsl:<distro>'. Set by SyncEngine from the file path. */
   host?: string;
 
+  /**
+   * Stable key for the physical sync candidate that produced this parsed
+   * session. SyncEngine owns this value; adapters should not derive it from a
+   * logical session id because one file may contain several sessions.
+   */
+  sourceFileKey?: string;
+
   messages: ParsedMessage[];
   toolExecutions: ToolExecution[];
   subagents: SubagentRef[];
@@ -81,6 +88,10 @@ export interface ParsedSession {
    */
   subagentOf?: { parentSessionId: string; agentId?: string; agentRole?: string; toolCallId?: string };
   tokenUsage: SessionTokenUsage;
+  /** Timestamped, non-cumulative usage samples used for calendar-day
+   * analytics. Adapters that only expose usage on messages may omit this;
+   * MessageConverter derives equivalent events from message usage. */
+  tokenUsageEvents?: ParsedTokenUsageEvent[];
 
   startTime: number;
   endTime?: number;
@@ -94,6 +105,28 @@ export interface ParsedSession {
    * Surfaced so "parsed OK but extracted nothing" never fails silently.
    */
   warnings?: string[];
+}
+
+/** One model invocation (or a cumulative counter delta) at its source time. */
+export interface ParsedTokenUsageEvent {
+  /** Stable within the physical source so rescans remain idempotent. */
+  id: string;
+  /** Logical identity used to deduplicate replayed Codex fork history. */
+  dedupeKey?: string;
+  timestamp: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  reasoningTokens?: number;
+  model?: string;
+  source: string;
+
+  /**
+   * Physical replacement scope assigned by SyncEngine. Adapter parsers may
+   * leave it unset; it is intentionally unrelated to the logical session id.
+   */
+  sourceScope?: string;
 }
 
 export interface ParsedMessage {

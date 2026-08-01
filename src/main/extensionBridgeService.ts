@@ -117,6 +117,9 @@ export interface BridgeAssociationRequest {
 
 export interface ExtensionBridgeOptions {
   appVersion: string;
+  /** Runtime entitlement guard. Requests are rejected even if a logout races
+   * with server shutdown. Omitted in tests and non-membership hosts. */
+  isAuthorized?: () => boolean;
   port?: number;
   host?: string;
   maxImportBodyBytes?: number;
@@ -297,6 +300,10 @@ export class ExtensionBridgeService {
 
   private async handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
+      if (this.options.isAuthorized?.() === false) {
+        this.sendJson(response, 403, { error: 'membership_required' });
+        return;
+      }
       const url = new URL(request.url ?? '/', 'http://127.0.0.1');
       // Private Network Access: Chrome extensions send a preflight before
       // calling a loopback service; answer it for the browser-facing routes.

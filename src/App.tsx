@@ -15,6 +15,8 @@ import { SettingsPage } from "./ui/shell/SettingsPage";
 import { TitleBar } from "./ui/shell/TitleBar";
 import { useUiTheme } from "./ui/shell/useUiTheme";
 import { useOnboarding } from "./ui/shell/useOnboarding";
+import { MembershipGate } from "./ui/membership/MembershipGate";
+import type { MembershipStatus } from "./shared/contracts";
 import { LOGO_BASE64 } from "./ui/logo";
 import { desktopStorage } from "./ui/storage/desktopStorage";
 import {
@@ -61,9 +63,18 @@ function LoadingState({ copy }: { copy: { title: string; hint: string } }) {
   );
 }
 
-function Shell() {
+function Shell({
+  membership,
+  onLogout,
+  themeMode,
+  toggleTheme,
+}: {
+  membership: MembershipStatus;
+  onLogout: () => Promise<void>;
+  themeMode: "light" | "dark";
+  toggleTheme: () => Promise<void>;
+}) {
   const { t, locale } = useI18n();
-  const { themeMode, toggleTheme } = useUiTheme();
   const [page, setPage] = useState<ShellPage>("home");
   // Home → library source deep link: one-shot platform filter request, handed
   // to VestiDashboard/LibraryTab and cleared once applied.
@@ -196,7 +207,12 @@ function Shell() {
         />
         <main className="h-full min-w-0 flex-1">
           {page === "settings" ? (
-            <SettingsPage themeMode={themeMode} onToggleTheme={() => void toggleTheme()} />
+            <SettingsPage
+              themeMode={themeMode}
+              onToggleTheme={() => void toggleTheme()}
+              membership={membership}
+              onLogout={onLogout}
+            />
           ) : page === "home" ? (
             <HomeDashboard
               onOpenLibrary={() => setPage("library")}
@@ -239,7 +255,16 @@ function Shell() {
 export function App() {
   return (
     <I18nProvider>
-      <Shell />
+      <MembershipGate>
+        {({ status, logout, themeMode, toggleTheme }) => (
+          <Shell
+            membership={status}
+            onLogout={logout}
+            themeMode={themeMode}
+            toggleTheme={toggleTheme}
+          />
+        )}
+      </MembershipGate>
     </I18nProvider>
   );
 }

@@ -91,7 +91,7 @@ export const zhTranslations = {
       description: "BYOK 与代理配置",
       privacyTitle: "哪些数据会离开本机",
       privacyDisclosure:
-        "捕获、本地存储与关键词搜索完全在本机完成。AI 功能（摘要、探索、向量化、提示词工具、圆桌）会把相关对话文本发送给所配置的模型 —— 默认经 Vesti 代理转发至 ModelScope。填入你自己的 API Key 即可直连。",
+        "捕获、本地存储与关键词搜索完全在本机完成。AI 功能（摘要、探索、向量化、提示词工具、圆桌）会把相关对话文本发送给所配置的模型。默认请求经 Vesti 代理路由，实际供应商和模型由代理服务选择；填入你自己的 API Key 后可按自定义 OpenAI 兼容接口直连。",
       useCustomApiKey: "使用自定义 API Key",
       byokDesc: "自带密钥，请求直连，不经代理",
       proxyActive: "代理已启用",

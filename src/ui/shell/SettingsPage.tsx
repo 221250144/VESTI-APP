@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type {
   AgentMcpTargetId,
   AgentMcpTargetStatus,
@@ -8,11 +8,13 @@ import type {
   CapturePlatform,
   ExtensionBridgeStatusView,
   ExtensionPairCodeView,
+  MembershipStatus,
   Overview,
   WslStatusView,
 } from "../../shared/contracts";
 import { useI18n } from "../i18n";
 import type { SupportedLocale } from "../i18n/locales";
+import { MembershipAccountCard } from "../membership/MembershipAccountCard";
 import { useUiPreference } from "./useUiPreference";
 import { DEFAULT_SKIN_ID, SKINS, resolveSkin } from "../../capsule/skins";
 import {
@@ -71,6 +73,17 @@ const PLATFORM_TONES: Record<string, string> = {
   "kimi-code": "#8459c8",
   "claude-code": "#c7663b",
 };
+
+const DEMO_PROXY_BASE_URL = "https://api.ccvg1218.online/api";
+const LEGACY_DEMO_PROXY_BASE_URL = "https://vesti-gate.vercel.app/api";
+const DEFAULT_BYOK_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+
+function isManagedDemoProxyBaseUrl(value: string): boolean {
+  const normalized = value.trim().replace(/\/+$/, "").toLowerCase();
+  return [DEMO_PROXY_BASE_URL, LEGACY_DEMO_PROXY_BASE_URL].some(
+    (url) => normalized === url.toLowerCase(),
+  );
+}
 
 // Desktop-only settings copy. Keep every supported locale complete so this
 // page never falls back to a different language than the rest of the shell.
@@ -150,6 +163,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     apiKeySaved: "(已安全保存,留空则不修改)",
     deleteApiKey: "删除已保存的 API Key",
     apiKeyNote: "API Key 由操作系统安全存储加密,前端页面不会读取已保存的明文。",
+    modelTestHint: "模型配置会自动保存;点击按钮可立即验证当前连接。",
     agentTitle: "洞察偏好",
     agentDesc: "决定 Summary / Explore 发送哪些内容,以及结果使用的默认语言。",
     outputLanguage: "输出语言",
@@ -342,6 +356,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     apiKeySaved: "(saved securely; leave blank to keep)",
     deleteApiKey: "Delete the saved API Key",
     apiKeyNote: "The API key is encrypted by the OS secure storage; the page never reads it back.",
+    modelTestHint: "Model settings save automatically. Use the button to verify the current connection.",
     agentTitle: "Insight Preferences",
     agentDesc: "Choose what Summary / Explore sends and the default output language.",
     outputLanguage: "Output language",
@@ -528,6 +543,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     apiKeySaved: "（安全に保存済み。空欄なら維持）",
     deleteApiKey: "保存済み API キーを削除",
     apiKeyNote: "API キーは OS の安全なストレージで暗号化され、この画面から平文を読み取ることはありません。",
+    modelTestHint: "モデル設定は自動保存されます。ボタンを押すと現在の接続を確認できます。",
     agentTitle: "インサイト設定",
     agentDesc: "Summary / Explore に渡す内容と、既定の出力言語を設定します。",
     outputLanguage: "出力言語",
@@ -702,6 +718,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     apiKeySaved: "(안전하게 저장됨, 비워 두면 유지)",
     deleteApiKey: "저장된 API 키 삭제",
     apiKeyNote: "API 키는 운영체제의 보안 저장소로 암호화되며 이 화면에서는 평문을 다시 읽지 않습니다.",
+    modelTestHint: "모델 설정은 자동 저장됩니다. 버튼을 눌러 현재 연결을 확인할 수 있습니다.",
     agentTitle: "인사이트 설정",
     agentDesc: "Summary / Explore에 보낼 내용과 기본 출력 언어를 설정합니다.",
     outputLanguage: "출력 언어",
@@ -844,6 +861,22 @@ function toDraft(settings: AppSettingsView): SettingsDraft {
   };
 }
 
+function toSettingsUpdate(draft: SettingsDraft): AppSettingsUpdate {
+  return {
+    dataDirectory: draft.dataDirectory,
+    general: draft.general,
+    capture: draft.capture,
+    network: draft.network,
+    agent: draft.agent,
+    llm: draft.llm,
+    upstream: draft.upstream,
+  };
+}
+
+function settingsFingerprint(draft: SettingsDraft): string {
+  return JSON.stringify(toSettingsUpdate(draft));
+}
+
 function Card({
   eyebrow,
   title,
@@ -946,9 +979,13 @@ const buttonDanger =
 export function SettingsPage({
   themeMode,
   onToggleTheme,
+  membership,
+  onLogout,
 }: {
   themeMode: "light" | "dark";
   onToggleTheme: () => void;
+  membership: MembershipStatus;
+  onLogout: () => Promise<void>;
 }) {
   const { locale, setLocale } = useI18n();
   const copy = { ...COPY.en, ...COPY[locale] };
@@ -967,7 +1004,8 @@ export function SettingsPage({
   const [overview, setOverview] = useState<Overview>(EMPTY_OVERVIEW);
   const [wslStatus, setWslStatus] = useState<WslStatusView | null>(null);
   const [wslBusy, setWslBusy] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [modelBusy, setModelBusy] = useState(false);
+  const [modelMessage, setModelMessage] = useState("");
   const [message, setMessage] = useState("");
   const [bridge, setBridge] = useState<ExtensionBridgeStatusView | null>(null);
   const [pairCode, setPairCode] = useState<ExtensionPairCodeView | null>(null);
@@ -1009,6 +1047,9 @@ export function SettingsPage({
       void loadMcpTargets();
     }
   }
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSavedFingerprintRef = useRef("");
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   const load = useCallback(async () => {
     const [settingsValue, overviewValue, wslValue, bridgeValue, upstreamStatsValue] = await Promise.all([
@@ -1018,8 +1059,10 @@ export function SettingsPage({
       window.vesti.getExtensionBridgeStatus(),
       getUpstreamExportStats().catch(() => null),
     ]);
+    const nextDraft = toDraft(settingsValue);
+    lastSavedFingerprintRef.current = settingsFingerprint(nextDraft);
     setSettings(settingsValue);
-    setDraft(toDraft(settingsValue));
+    setDraft(nextDraft);
     setOverview(overviewValue);
     setWslStatus(wslValue);
     setBridge(bridgeValue);
@@ -1029,7 +1072,13 @@ export function SettingsPage({
   useEffect(() => {
     void load();
     void loadMcpTargets();
-    const unsubscribeCapture = window.vesti.onCaptureChanged(() => void load());
+    const unsubscribeCapture = window.vesti.onCaptureChanged(() => {
+      void Promise.all([window.vesti.getOverview(), window.vesti.getWslStatus()])
+        .then(([overviewValue, wslValue]) => {
+          setOverview(overviewValue);
+          setWslStatus(wslValue);
+        });
+    });
     const unsubscribeBridge = window.vesti.onExtensionBridgeChanged(() => {
       void window.vesti.getExtensionBridgeStatus().then(setBridge);
     });
@@ -1038,6 +1087,25 @@ export function SettingsPage({
       unsubscribeBridge();
     };
   }, [load, loadMcpTargets]);
+
+  // App settings persist after a short idle period. Saving through a single
+  // queue prevents an older request from finishing after a newer edit and
+  // overwriting it. UI-only preferences (theme, language, skin, etc.) already
+  // use their own immediate preference bridge.
+  useEffect(() => {
+    if (!draft) return;
+    const fingerprint = settingsFingerprint(draft);
+    if (fingerprint === lastSavedFingerprintRef.current) return;
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    autoSaveTimerRef.current = setTimeout(() => {
+      autoSaveTimerRef.current = null;
+      void queueSettingsSave(draft);
+    }, 650);
+    return () => {
+      if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    };
+  }, [draft]);
 
   // 1s ticker for the pair-code and pairing-window countdowns.
   const pairingWindowOpen = Boolean(
@@ -1157,34 +1225,53 @@ export function SettingsPage({
     }
   }
 
-  async function saveSettings(testAfterSave = false): Promise<boolean> {
-    if (!draft) return false;
-    setBusy(true);
-    setMessage("");
-    try {
-      const result = await window.vesti.saveSettings({
-        dataDirectory: draft.dataDirectory,
-        general: draft.general,
-        capture: draft.capture,
-        network: draft.network,
-        agent: draft.agent,
-        llm: draft.llm,
-        upstream: draft.upstream,
-      });
-      setSettings(result.settings);
-      setDraft(toDraft(result.settings));
-      setMessage(result.restartRequired ? copy.savedRestart : copy.saved);
-      if (result.settings.upstream.obsidianAutoExport) scheduleUpstreamAutoExport();
-      if (testAfterSave) {
-        const tested = await window.vesti.testLlm();
-        setMessage(tested.message);
+  function queueSettingsSave(
+    snapshot: SettingsDraft,
+    feedback: "auto" | "model" | "upstream" = "auto",
+  ): Promise<boolean> {
+    const run = async (): Promise<boolean> => {
+      const snapshotFingerprint = settingsFingerprint(snapshot);
+      try {
+        const result = await window.vesti.saveSettings(toSettingsUpdate(snapshot));
+        const normalized = toDraft(result.settings);
+        lastSavedFingerprintRef.current = snapshotFingerprint;
+        setSettings(result.settings);
+        setDraft((current) => {
+          if (!current || settingsFingerprint(current) !== snapshotFingerprint) return current;
+          lastSavedFingerprintRef.current = settingsFingerprint(normalized);
+          return normalized;
+        });
+        if (result.settings.upstream.obsidianAutoExport) scheduleUpstreamAutoExport();
+        if (result.restartRequired) setMessage(copy.savedRestart);
+        if (feedback === "model") {
+          const tested = await window.vesti.testLlm();
+          setModelMessage(tested.message);
+        }
+        return true;
+      } catch (error) {
+        const text = errorMessage(error);
+        if (feedback === "model") setModelMessage(text);
+        else if (feedback === "upstream") setUpstreamNote(text);
+        else setMessage(text);
+        return false;
       }
-      return true;
-    } catch (error) {
-      setMessage(errorMessage(error));
-      return false;
+    };
+
+    const queued = saveQueueRef.current.then(run, run);
+    saveQueueRef.current = queued.then(() => undefined, () => undefined);
+    return queued;
+  }
+
+  async function saveAndTestModel(): Promise<void> {
+    if (!draft) return;
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+    autoSaveTimerRef.current = null;
+    setModelBusy(true);
+    setModelMessage("");
+    try {
+      await queueSettingsSave(draft, "model");
     } finally {
-      setBusy(false);
+      setModelBusy(false);
     }
   }
 
@@ -1201,10 +1288,14 @@ export function SettingsPage({
 
   async function verifyNotion() {
     setUpstreamBusy("verify");
+    setUpstreamNote("");
     try {
-      if (!(await saveSettings())) return;
+      if (!draft) return;
+      if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+      if (!(await queueSettingsSave(draft, "upstream"))) return;
       const tested = await window.vesti.testNotionConnection();
-      setMessage(tested.message);
+      setUpstreamNote(tested.message);
       await load();
     } catch (error) {
       setMessage(errorMessage(error));
@@ -1305,9 +1396,9 @@ export function SettingsPage({
               mode,
               baseUrl:
                 mode === "demo_proxy"
-                  ? "https://vesti-gate.vercel.app/api"
-                  : current.llm.baseUrl.includes("vesti-gate.vercel.app")
-                    ? "https://dashscope.aliyuncs.com/compatible-mode/v1"
+                  ? DEMO_PROXY_BASE_URL
+                  : isManagedDemoProxyBaseUrl(current.llm.baseUrl)
+                    ? DEFAULT_BYOK_BASE_URL
                     : current.llm.baseUrl,
             },
           }
@@ -1328,7 +1419,9 @@ export function SettingsPage({
 
   return (
     <div className="h-full overflow-y-auto overflow-x-hidden bg-bg-app px-8 py-8">
-      <div className="mx-auto flex max-w-[880px] flex-col gap-6 pb-24">
+      <div className="mx-auto flex max-w-[880px] flex-col gap-6 pb-8">
+        <MembershipAccountCard status={membership} onLogout={onLogout} locale={locale} />
+
         <Card eyebrow="GENERAL" title={copy.generalTitle} description={copy.generalDesc}>
           <div className="-mx-3 flex flex-col">
             <Toggle
@@ -1912,6 +2005,19 @@ export function SettingsPage({
             </label>
           )}
           <p className="mt-3 text-[12px] font-sans text-text-tertiary">{copy.apiKeyNote}</p>
+          <div className="mt-5 flex flex-col gap-3 border-t border-border-subtle pt-4 sm:flex-row sm:items-center sm:justify-between">
+            <p className="min-w-0 text-[12px] font-sans leading-relaxed text-text-secondary" role="status">
+              {modelMessage || copy.modelTestHint}
+            </p>
+            <button
+              type="button"
+              className={`${buttonPrimary} shrink-0`}
+              disabled={modelBusy}
+              onClick={() => void saveAndTestModel()}
+            >
+              {modelBusy ? copy.saving : copy.saveAndTest}
+            </button>
+          </div>
         </Card>
 
         <Card eyebrow="AGENT" title={copy.agentTitle} description={copy.agentDesc}>
@@ -2264,19 +2370,14 @@ export function SettingsPage({
         </Card>
       </div>
 
-      <div className="fixed bottom-0 left-[52px] right-0 border-t border-border-subtle bg-bg-app/90 px-8 py-3 backdrop-blur">
-        <div className="mx-auto flex max-w-[880px] items-center justify-between gap-4">
-          <p className="truncate text-[12px] font-sans text-text-secondary">{message}</p>
-          <div className="flex shrink-0 gap-2">
-            <button type="button" className={buttonSecondary} disabled={busy} onClick={() => void saveSettings(true)}>
-              {copy.saveAndTest}
-            </button>
-            <button type="button" className={buttonPrimary} disabled={busy} onClick={() => void saveSettings()}>
-              {busy ? copy.saving : copy.save}
-            </button>
-          </div>
+      {message ? (
+        <div
+          role="status"
+          className="fixed bottom-4 right-6 z-30 max-w-[420px] rounded-xl border border-border-subtle bg-bg-primary px-4 py-3 text-[12px] font-sans text-text-secondary shadow-popover"
+        >
+          {message}
         </div>
-      </div>
+      ) : null}
     </div>
   );
 }

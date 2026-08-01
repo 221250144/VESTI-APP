@@ -13,6 +13,7 @@ import {
 import { getAgentKindDefinition } from './agentPrompts';
 import type { CaptureService } from './captureService';
 import type { RuntimeAgentSettings, RuntimeLlmSettings, SettingsService } from './settingsService';
+import { fetchDemoProxy, type ProxyAttemptMetadata } from './proxyFetch';
 
 const MAX_TRANSCRIPT_CHARACTERS = 80_000;
 /** Settings upper bound for max_tokens (mirrors settingsService's 128–16_384
@@ -43,6 +44,24 @@ function effectiveMaxTokens(kind: string, configured: number): number {
     MAX_TOKENS_SETTINGS_CAP,
     Math.max(configured, KIND_MIN_MAX_TOKENS[kind] ?? 0)
   );
+}
+
+export class LlmGatewayError extends Error {
+  constructor(
+    message: string,
+    readonly details: {
+      status: number;
+      code?: string;
+      requestId?: string;
+      providerUsed?: string;
+      modelUsed?: string;
+      attempt?: number;
+      fallbackReason?: string;
+    },
+  ) {
+    super(message);
+    this.name = 'LlmGatewayError';
+  }
 }
 
 export class AgentService {
@@ -185,35 +204,64 @@ export class AgentService {
     const endpoint = settings.mode === 'demo_proxy'
       ? `${settings.baseUrl}/chat`
       : `${settings.baseUrl}/chat/completions`;
-    const headers: Record<string, string> = { 'content-type': 'application/json' };
-    if (settings.mode === 'demo_proxy') headers['x-vesti-service-token'] = settings.serviceToken;
-    else headers.authorization = `Bearer ${settings.apiKey}`;
+    const body = JSON.stringify({
+      model: settings.modelId,
+      messages,
+      temperature: settings.temperature,
+      max_tokens: settings.maxTokens,
+      stream: false,
+    });
 
     let response: Response;
+    let proxyMetadata: ProxyAttemptMetadata | undefined;
     try {
-      response = await net.fetch(endpoint, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          model: settings.modelId,
-          messages,
-          temperature: settings.temperature,
-          max_tokens: settings.maxTokens,
-          stream: false,
-        }),
-        signal: AbortSignal.timeout(90_000),
-      });
+      if (settings.mode === 'demo_proxy') {
+        const result = await fetchDemoProxy({
+          primaryBaseUrl: settings.baseUrl,
+          fallbackBaseUrl: settings.fallbackBaseUrl,
+          route: 'chat',
+          serviceToken: settings.serviceToken,
+          body,
+        }, (input, init) => net.fetch(input, init));
+        response = result.response;
+        proxyMetadata = result.metadata;
+      } else {
+        response = await net.fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${settings.apiKey}`,
+          },
+          body,
+          signal: AbortSignal.timeout(90_000),
+        });
+      }
     } catch (error) {
       throw await this.networkError(error, endpoint);
     }
     const payload = await response.json().catch(() => ({})) as {
       choices?: Array<{ message?: { content?: unknown } }>;
-      error?: { message?: string } | string;
+      error?: { code?: string; message?: string; requestId?: string } | string;
       message?: string;
     };
     if (!response.ok) {
       const detail = typeof payload.error === 'string' ? payload.error : payload.error?.message || payload.message;
-      throw new Error(detail || `模型请求失败（HTTP ${response.status}）`);
+      const requestId = response.headers.get('x-request-id')
+        || (typeof payload.error === 'object' ? payload.error?.requestId : undefined)
+        || proxyMetadata?.requestId;
+      const suffix = requestId ? `（请求 ID：${requestId}）` : '';
+      throw new LlmGatewayError(
+        `${detail || `模型请求失败（HTTP ${response.status}）`}${suffix}`,
+        {
+          status: response.status,
+          code: typeof payload.error === 'object' ? payload.error?.code : undefined,
+          requestId,
+          providerUsed: response.headers.get('x-proxy-provider-used') || proxyMetadata?.providerUsed,
+          modelUsed: response.headers.get('x-proxy-model-used') || proxyMetadata?.modelUsed,
+          attempt: proxyMetadata?.attempt,
+          fallbackReason: response.headers.get('x-proxy-fallback-reason') || proxyMetadata?.fallbackReason,
+        },
+      );
     }
     const value = payload.choices?.[0]?.message?.content;
     const content = typeof value === 'string'
