@@ -173,6 +173,14 @@ export class CodexParser {
     const fallbackId = path.basename(filePath, '.jsonl').match(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/i)?.[0]
       ?? path.basename(filePath, '.jsonl');
     const sessionId = String(meta.session_id ?? meta.id ?? fallbackId);
+    const sourceMeta = asRecord(meta.source);
+    const subagentSource = asRecord(sourceMeta.subagent);
+    const threadSpawnSource = asRecord(subagentSource.thread_spawn);
+    const isSpawnedThread = Object.keys(threadSpawnSource).length > 0
+      || (typeof meta.forked_from_id === 'string' && meta.forked_from_id.length > 0);
+    const spawnInvocationBoundaryIndex = isSpawnedThread
+      ? rows.findIndex(row => row.type === 'inter_agent_communication_metadata')
+      : -1;
 
     const messages: ParsedMessage[] = [];
     const toolExecutions: ToolExecution[] = [];
@@ -195,11 +203,21 @@ export class CodexParser {
       tokenEventOccurrences.set(key, occurrence + 1);
       return `codex-${sessionId}-${rolloutScope}-token-${key}-${occurrence}`;
     };
-    const hasCumulativeTokenRows = rows.some(row => {
+    // For thread_spawn rollouts, only inspect the child-owned section. The
+    // replayed parent can use cumulative rows even when the child invocation
+    // itself uses the older last_token_usage-only format.
+    const tokenFormatRows = isSpawnedThread
+      ? (spawnInvocationBoundaryIndex >= 0 ? rows.slice(spawnInvocationBoundaryIndex + 1) : [])
+      : rows;
+    const hasCumulativeTokenRows = tokenFormatRows.some(row => {
       if (row.type !== 'event_msg' || row.payload?.type !== 'token_count') return false;
       return tokenSnapshot(asRecord(row.payload.info).total_token_usage) !== undefined;
     });
     let previousCumulativeTokens: CodexTokenSnapshot | undefined;
+    // Current Codex thread_spawn files replay the parent's complete event
+    // stream before this marker. Those rows establish the cumulative
+    // baseline but are not new usage by the spawned thread.
+    let spawnedThreadUsageStarted = !isSpawnedThread;
     const contextCompactions: Array<{ sequence: number; compactedAt: number; summary?: string }> = [];
 
     let index = 0;
@@ -235,6 +253,11 @@ export class CodexParser {
     for (const row of rows) {
       const payload = asRecord(row.payload);
       const ts = asTimestamp(row.timestamp, stat.mtimeMs);
+
+      if (row.type === 'inter_agent_communication_metadata') {
+        spawnedThreadUsageStarted = true;
+        continue;
+      }
 
       if (row.type === 'turn_context') {
         if (typeof payload.cwd === 'string') projectPath = payload.cwd;
@@ -351,7 +374,10 @@ export class CodexParser {
           if (cumulative) {
             const delta = tokenDelta(cumulative, previousCumulativeTokens);
             const mergedCumulative = mergeTokenSnapshot(previousCumulativeTokens, cumulative);
-            if (delta.input || delta.output || delta.cacheRead || delta.reasoning) {
+            if (
+              spawnedThreadUsageStarted
+              && (delta.input || delta.output || delta.cacheRead || delta.reasoning)
+            ) {
               // Forked Codex rollouts replay the complete cumulative history.
               // Keep a physical event id for source replacement, but give the
               // same logical before->after transition the same analytics key.
@@ -376,7 +402,7 @@ export class CodexParser {
             // Missing fields mean "not reported", not zero. Preserve their
             // last cumulative values for the next snapshot that includes them.
             previousCumulativeTokens = mergedCumulative;
-          } else if (!hasCumulativeTokenRows) {
+          } else if (!hasCumulativeTokenRows && spawnedThreadUsageStarted) {
             // Older rollouts can omit total_token_usage entirely. Only in that
             // format is last_token_usage safe to use as a per-request event.
             const last = tokenSnapshot(info.last_token_usage);

@@ -290,7 +290,12 @@ export interface AgentResult {
   sessionTitle: string;
   question?: string;
   content: string;
+  /** Backward-compatible effective model identifier used for this result. */
   modelId: string;
+  /** Model identifier sent by the client before any gateway routing. */
+  requestedModelId?: string;
+  /** Effective model reported by the gateway/provider, when available. */
+  modelUsed?: string;
   createdAt: number;
 }
 

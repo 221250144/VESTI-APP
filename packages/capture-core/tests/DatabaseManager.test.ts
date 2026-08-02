@@ -191,13 +191,28 @@ describe('DatabaseManager work-session token totals', () => {
       inputTokens: 1_010,
       outputTokens: 101,
     });
+    expect(stats.modelTokenBreakdown['gpt-test']).toMatchObject({
+      inputTokens: 1_010,
+      outputTokens: 101,
+    });
+    expect(Object.values(stats.modelTokenBreakdown).reduce(
+      (sum, row) => sum + row.inputTokens,
+      0,
+    )).toBe(stats.totalInputTokens);
+    expect(Object.values(stats.modelTokenBreakdown).reduce(
+      (sum, row) => sum + row.outputTokens,
+      0,
+    )).toBe(stats.totalOutputTokens);
 
     await manager.close();
   });
 
-  it('atomically removes stale events when a physical source is shortened or rewritten', async () => {
+  it('atomically removes stale events and repairs inflated Codex session totals', async () => {
     const manager = await createManager();
-    manager.upsertWorkSession(session({ totalInputTokens: 0, totalOutputTokens: 0 }));
+    // Reproduces the pre-v11 state where replayed spawned-thread counters had
+    // already been persisted into the session summary. Corrected event
+    // replacement must be allowed to lower this derived value.
+    manager.upsertWorkSession(session({ totalInputTokens: 9_999, totalOutputTokens: 999 }));
     const scope = 'codex:native:C:/sessions/rewrite.jsonl';
     const event = (id: string, inputTokens: number): TokenUsageEvent => ({
       id,
@@ -214,8 +229,12 @@ describe('DatabaseManager work-session token totals', () => {
     });
 
     manager.replaceTokenUsageEvents(scope, [event('old-a', 10), event('old-b', 20)]);
-    manager.replaceTokenUsageEvents(scope, [event('new-a', 7)]);
     let stats = manager.getStats();
+    expect(stats.totalInputTokens).toBe(30);
+    expect(stats.totalOutputTokens).toBe(2);
+
+    manager.replaceTokenUsageEvents(scope, [event('new-a', 7)]);
+    stats = manager.getStats();
     expect(stats.totalInputTokens).toBe(7);
     expect(stats.totalOutputTokens).toBe(1);
 

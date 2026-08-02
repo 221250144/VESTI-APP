@@ -14,7 +14,7 @@ function runtime(overrides: Partial<RuntimeLlmSettings> = {}): RuntimeLlmSetting
     fallbackBaseUrl: 'https://vesti-gate.vercel.app/api',
     modelId: 'qwen-plus',
     temperature: 0.3,
-    maxTokens: 1600,
+    maxTokens: 0,
     apiKey: '',
     serviceToken: 'test-service-token',
     embeddingModel: 'text-embedding-v1',

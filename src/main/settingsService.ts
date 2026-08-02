@@ -16,13 +16,14 @@ import type {
 } from '../shared/contracts';
 import {
   CURRENT_SETTINGS_VERSION,
+  normalizeCustomBaseUrl,
   normalizeEnabledPlatforms,
+  normalizeMaxTokens,
   PRIMARY_CAPTURE_PLATFORMS,
 } from './settingsMigration';
 
 export const DEMO_BASE_URL = 'https://api.ccvg1218.online/api';
 export const LEGACY_DEMO_BASE_URL = 'https://vesti-gate.vercel.app/api';
-const CUSTOM_BASE_URL = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
 const DEMO_SERVICE_TOKEN = 'vesti-kcq-default-d850d4dcd610a0e2e919eb610f42066faff1e1c57c0c047c';
 export const DEFAULT_EMBEDDING_MODEL = 'text-embedding-v1';
 
@@ -53,7 +54,7 @@ interface StoredBridgeSettings {
 }
 
 interface StoredSettings {
-  version: 3;
+  version: 5;
   dataDirectory: string;
   general: GeneralSettings;
   capture: CaptureSettings;
@@ -200,8 +201,10 @@ export class SettingsService {
       agent: this.getRuntimeAgent(),
       llm: {
         mode,
-        baseUrl: mode === 'demo_proxy' ? DEMO_BASE_URL : this.settings.llm.customBaseUrl,
-        modelId: mode === 'demo_proxy' ? 'qwen-plus' : this.settings.llm.modelId,
+        // The renderer only needs the user-owned BYOK value. Demo Proxy's
+        // managed endpoint stays in the main process and is never displayed.
+        baseUrl: this.settings.llm.customBaseUrl,
+        modelId: this.settings.llm.modelId,
         temperature: this.settings.llm.temperature,
         maxTokens: this.settings.llm.maxTokens,
         apiKeyConfigured: Boolean(this.settings.llm.encryptedApiKey),
@@ -269,7 +272,7 @@ export class SettingsService {
       mode: this.settings.llm.mode,
       baseUrl: this.settings.llm.mode === 'demo_proxy' ? DEMO_BASE_URL : this.settings.llm.customBaseUrl,
       fallbackBaseUrl: LEGACY_DEMO_BASE_URL,
-      modelId: this.settings.llm.mode === 'demo_proxy' ? 'qwen-plus' : this.settings.llm.modelId,
+      modelId: this.settings.llm.modelId,
       temperature: this.settings.llm.temperature,
       maxTokens: this.settings.llm.maxTokens,
       apiKey,
@@ -285,8 +288,12 @@ export class SettingsService {
     await this.ensureWritableDirectory(dataDirectory);
 
     const mode = update.llm.mode;
+    const requestedCustomBaseUrl = update.llm.baseUrl.trim();
+    if (mode === 'custom_byok' && !requestedCustomBaseUrl) {
+      throw new Error('BYOK Base URL cannot be empty');
+    }
     const customBaseUrl = mode === 'custom_byok'
-      ? this.normalizeUrl(update.llm.baseUrl || CUSTOM_BASE_URL)
+      ? this.normalizeUrl(requestedCustomBaseUrl)
       : this.settings.llm.customBaseUrl;
     const modelId = update.llm.modelId.trim();
     if (!modelId) throw new Error('模型名称不能为空');
@@ -404,7 +411,7 @@ export class SettingsService {
       },
       llm: {
         mode: 'demo_proxy',
-        customBaseUrl: CUSTOM_BASE_URL,
+        customBaseUrl: '',
         modelId: 'qwen-plus',
         temperature: 0.3,
         // 0 = uncapped: no max_tokens is sent, the model's own default applies.
@@ -425,11 +432,21 @@ export class SettingsService {
   private merge(parsed: Partial<StoredSettings>): StoredSettings {
     const defaults = this.defaults();
     const llm = parsed.llm ?? defaults.llm;
-    let customBaseUrl = defaults.llm.customBaseUrl;
-    try {
-      customBaseUrl = this.normalizeUrl(llm.customBaseUrl || customBaseUrl);
-    } catch {
-      // Keep the safe default when a manually edited settings file contains an invalid URL.
+    const llmMode = llm.mode === 'custom_byok' ? 'custom_byok' : 'demo_proxy';
+    const migratedCustomBaseUrl = normalizeCustomBaseUrl(
+      llm.customBaseUrl,
+      llmMode,
+      typeof llm.encryptedApiKey === 'string' && Boolean(llm.encryptedApiKey),
+      parsed.version,
+    );
+    let customBaseUrl = '';
+    if (migratedCustomBaseUrl) {
+      try {
+        customBaseUrl = this.normalizeUrl(migratedCustomBaseUrl);
+      } catch {
+        // Invalid manually edited BYOK URLs are discarded instead of being
+        // replaced by a provider-specific default.
+      }
     }
     const general = parsed.general ?? defaults.general;
     const capture = parsed.capture ?? defaults.capture;
@@ -472,16 +489,11 @@ export class SettingsService {
         customInstructions: typeof agent.customInstructions === 'string' ? agent.customInstructions.trim().slice(0, 4_000) : '',
       },
       llm: {
-        mode: llm.mode === 'custom_byok' ? 'custom_byok' : 'demo_proxy',
+        mode: llmMode,
         customBaseUrl,
         modelId: llm.modelId?.trim() || defaults.llm.modelId,
         temperature: this.numberInRange(llm.temperature, 0, 2, defaults.llm.temperature),
-        // Legacy migration: 1600 was the old default cap (never user-chosen in
-        // practice); map it to 0 (uncapped). Any other explicit value survives.
-        maxTokens: (() => {
-          const stored = Math.round(this.numberInRange(llm.maxTokens, 0, 16_384, defaults.llm.maxTokens));
-          return stored === 1600 ? 0 : stored;
-        })(),
+        maxTokens: normalizeMaxTokens(llm.maxTokens, llmMode, parsed.version),
         encryptedApiKey: typeof llm.encryptedApiKey === 'string' ? llm.encryptedApiKey : undefined,
         embeddingModel: typeof llm.embeddingModel === 'string' && llm.embeddingModel.trim()
           ? llm.embeddingModel.trim()

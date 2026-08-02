@@ -1,5 +1,5 @@
-export const PROXY_TOTAL_TIMEOUT_MS = 90_000;
-export const PROXY_PRIMARY_ATTEMPT_TIMEOUT_MS = 60_000;
+export const PROXY_TOTAL_TIMEOUT_MS = 180_000;
+export const PROXY_PRIMARY_ATTEMPT_TIMEOUT_MS = 120_000;
 
 export type ProxyRoute = 'chat' | 'embeddings';
 

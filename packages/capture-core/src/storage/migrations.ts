@@ -453,8 +453,8 @@ export const MIGRATIONS: Migration[] = [
     version: 12,
     name: 'repair_token_usage_event_dedupe_key',
     up(db) {
-      // A development build briefly shipped migration 9 without dedupe_key.
-      // Migration tracking prevents v9 from running twice, so repair those
+      // A development build briefly shipped migration 11 without dedupe_key.
+      // Migration tracking prevents v11 from running twice, so repair those
       // databases under a new version before any event INSERT or stats query.
       if (!hasColumn(db, 'token_usage_events', 'dedupe_key')) {
         db.exec(`
@@ -471,6 +471,28 @@ export const MIGRATIONS: Migration[] = [
         DELETE FROM token_usage_events;
         DELETE FROM sync_state;
       `);
+    },
+  },
+  {
+    version: 13,
+    name: 'rebuild_codex_spawned_thread_token_usage',
+    up(db) {
+      // Existing event rows do not retain the Codex session_meta source kind,
+      // so they cannot be classified as root, guardian, or thread_spawn using
+      // SQL alone. Mark them inactive (without deleting history) and rewind
+      // Codex checkpoints. Each successfully reparsed physical source replaces
+      // its inactive snapshot atomically with corrected active events.
+      if (!hasColumn(db, 'token_usage_events', 'is_valid')) {
+        db.exec(
+          'ALTER TABLE token_usage_events ADD COLUMN is_valid INTEGER NOT NULL DEFAULT 1',
+        );
+      }
+      db.prepare(
+        "UPDATE token_usage_events SET is_valid = 0 WHERE session_id LIKE 'codex:%' OR source LIKE 'codex:%'",
+      ).run();
+      db.prepare(
+        "UPDATE sync_state SET last_position = -1, last_modified = 0 WHERE platform = 'codex'",
+      ).run();
     },
   },
 ];

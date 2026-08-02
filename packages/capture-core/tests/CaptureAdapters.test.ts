@@ -188,7 +188,7 @@ describe('capture adapters', () => {
     ]);
   });
 
-  it('gives replayed Codex fork history the same semantic transition keys', async () => {
+  it('counts only spawned-thread usage after the Codex replay boundary', async () => {
     const dir = await makeTempDir('vesti-codex-token-fork-dedupe-');
     const mainFile = path.join(dir, 'rollout-main.jsonl');
     const forkFile = path.join(dir, 'rollout-fork.jsonl');
@@ -202,10 +202,20 @@ describe('capture adapters', () => {
       { timestamp: '2026-07-02T01:00:00Z', type: 'event_msg', payload: usage(150, 15) },
     ];
     const forkRows = [
-      { timestamp: '2026-07-03T00:00:00Z', type: 'session_meta', payload: { id: 'child-rollout', session_id: 'logical-session' } },
+      {
+        timestamp: '2026-07-03T00:00:00Z',
+        type: 'session_meta',
+        payload: {
+          id: 'child-rollout',
+          session_id: 'logical-session',
+          forked_from_id: 'logical-session',
+          source: { subagent: { thread_spawn: { parent_thread_id: 'logical-session', depth: 1 } } },
+        },
+      },
       // The fork replays the main rollout's history with later timestamps.
       { timestamp: '2026-07-03T01:00:00Z', type: 'event_msg', payload: usage(100, 10) },
       { timestamp: '2026-07-03T01:00:01Z', type: 'event_msg', payload: usage(150, 15) },
+      { timestamp: '2026-07-03T01:00:01.500Z', type: 'inter_agent_communication_metadata', payload: {} },
       // This transition exists only in the child and must remain countable.
       { timestamp: '2026-07-03T01:00:02Z', type: 'event_msg', payload: usage(180, 19) },
     ];
@@ -216,11 +226,43 @@ describe('capture adapters', () => {
     const main = await parser.parseFile(mainFile);
     const fork = await parser.parseFile(forkFile);
 
-    expect(fork.tokenUsageEvents?.slice(0, 2).map(event => event.dedupeKey))
-      .toEqual(main.tokenUsageEvents?.map(event => event.dedupeKey));
-    expect(fork.tokenUsageEvents?.[2].dedupeKey)
+    expect(fork.tokenUsageEvents).toHaveLength(1);
+    expect(fork.tokenUsageEvents?.[0].dedupeKey)
       .not.toBe(main.tokenUsageEvents?.[1].dedupeKey);
-    expect(fork.tokenUsageEvents?.map(event => event.inputTokens)).toEqual([100, 50, 30]);
+    expect(fork.tokenUsageEvents?.map(event => [event.inputTokens, event.outputTokens]))
+      .toEqual([[30, 4]]);
+    expect(fork.tokenUsage).toMatchObject({ totalInputTokens: 30, totalOutputTokens: 4 });
+  });
+
+  it('keeps a Codex guardian first cumulative snapshot as real usage', async () => {
+    const dir = await makeTempDir('vesti-codex-token-guardian-');
+    const file = path.join(dir, 'rollout-guardian.jsonl');
+    const rows = [
+      {
+        timestamp: '2026-07-03T00:00:00Z',
+        type: 'session_meta',
+        payload: {
+          id: 'guardian-thread',
+          session_id: 'logical-session',
+          source: { subagent: { other: 'guardian' } },
+        },
+      },
+      {
+        timestamp: '2026-07-03T00:00:01Z',
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: { total_token_usage: { input_tokens: 25, output_tokens: 3 } },
+        },
+      },
+    ];
+    await fs.writeFile(file, rows.map(row => JSON.stringify(row)).join('\n') + '\n');
+
+    const guardian = await new CodexParser().parseFile(file);
+
+    expect(guardian.tokenUsageEvents?.map(event => [event.inputTokens, event.outputTokens]))
+      .toEqual([[25, 3]]);
+    expect(guardian.tokenUsage).toMatchObject({ totalInputTokens: 25, totalOutputTokens: 3 });
   });
 
   it('uses Codex last_token_usage only when cumulative totals are unavailable', async () => {

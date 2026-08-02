@@ -425,6 +425,9 @@ function validSettingsUpdate(value: unknown): value is AppSettingsUpdate {
     && typeof update.llm.modelId === 'string'
     && typeof update.llm.temperature === 'number'
     && typeof update.llm.maxTokens === 'number'
+    && Number.isSafeInteger(update.llm.maxTokens)
+    && update.llm.maxTokens >= 0
+    && update.llm.maxTokens <= 16_384
     && (update.llm.apiKey === undefined || typeof update.llm.apiKey === 'string')
     && (update.llm.clearApiKey === undefined || typeof update.llm.clearApiKey === 'boolean')
     && typeof update.general.launchAtLogin === 'boolean'

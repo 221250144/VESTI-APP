@@ -2,16 +2,16 @@ import { net, session } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import {
-  DEMO_PROXY_MODEL_IDS,
-  type AgentResult,
-  type AgentRunRequest,
-  type LlmTestResult,
-  type SessionDetail,
-  type SessionMessage,
+import type {
+  AgentResult,
+  AgentRunRequest,
+  LlmTestResult,
+  SessionDetail,
+  SessionMessage,
 } from '../shared/contracts';
 import { getAgentKindDefinition } from './agentPrompts';
 import type { CaptureService } from './captureService';
+import { buildChatCompletionBody } from './chatRequest';
 import type { RuntimeAgentSettings, RuntimeLlmSettings, SettingsService } from './settingsService';
 import { fetchDemoProxy, type ProxyAttemptMetadata } from './proxyFetch';
 
@@ -49,6 +49,7 @@ function effectiveMaxTokens(kind: string, configured: number): number {
     Math.max(configured, KIND_MIN_MAX_TOKENS[kind] ?? 0)
   );
 }
+export const BYOK_CHAT_TIMEOUT_MS = 180_000;
 
 export class LlmGatewayError extends Error {
   constructor(
@@ -93,7 +94,11 @@ export class AgentService {
     llm.modelId = this.resolveModelId(llm, request.modelId);
     const question = request.question?.trim();
     const definition = getAgentKindDefinition(request.kind);
-    const raw = await this.complete(llm, definition.buildPrompt({ transcript, question, template: request.template, preferences }));
+    const completion = await this.complete(
+      llm,
+      definition.buildPrompt({ transcript, question, template: request.template, preferences }),
+    );
+    const raw = completion.content;
     const content = definition.parse ? definition.parse(raw) : raw;
     const result: AgentResult = {
       id: randomUUID(),
@@ -102,7 +107,9 @@ export class AgentService {
       sessionTitle: detail?.session.title ?? '',
       question: request.kind === 'explore' ? question : undefined,
       content,
-      modelId: llm.modelId,
+      modelId: completion.modelUsed,
+      requestedModelId: llm.modelId,
+      modelUsed: completion.modelUsed,
       createdAt: Date.now(),
     };
     if (options?.persist !== false) await this.prependResult(result);
@@ -112,11 +119,14 @@ export class AgentService {
   async test(): Promise<LlmTestResult> {
     try {
       const llm = this.settings.getRuntimeLlm();
-      await this.complete(llm, [
+      const completion = await this.complete(llm, [
         { role: 'system', content: 'You are a connection test. Answer with only OK.' },
         { role: 'user', content: 'ping' },
       ]);
-      return { ok: true, message: `连接成功：${llm.modelId}` };
+      const modelLabel = completion.modelUsed === llm.modelId
+        ? llm.modelId
+        : `${llm.modelId} → ${completion.modelUsed}`;
+      return { ok: true, message: `连接成功：${modelLabel}` };
     } catch (error) {
       return { ok: false, message: error instanceof Error ? error.message : '连接失败' };
     }
@@ -140,20 +150,14 @@ export class AgentService {
     return path.join(this.capture.activeDataDirectory, 'agent-results', 'results.json');
   }
 
-  /**
-   * Per-request model override (capsule quick-ask picker). In demo-proxy mode
-   * only the gateway whitelist may be sent — anything else is REJECTED rather
-   * than passed through, because the gateway would silently fall back to
-   * qwen-plus while the UI showed the requested name. BYOK accepts any
-   * non-empty id.
+  /** Per-request model override (capsule quick-ask picker).
+   * The current proxy forwards model ids, so Demo and BYOK share the same
+   * non-empty pass-through behaviour. The response model remains recorded
+   * separately because an upstream provider can still route to another model.
    */
   private resolveModelId(llm: RuntimeLlmSettings, requested: string | undefined): string {
     const override = requested?.trim().slice(0, 100);
-    if (!override) return llm.modelId;
-    if (llm.mode === 'demo_proxy' && !(DEMO_PROXY_MODEL_IDS as readonly string[]).includes(override)) {
-      throw new Error(`演示代理暂不支持模型「${override}」，可选：${DEMO_PROXY_MODEL_IDS.join('、')}`);
-    }
-    return override;
+    return override || llm.modelId;
   }
 
   private buildTranscript(detail: SessionDetail, preferences: RuntimeAgentSettings): string {
@@ -201,21 +205,14 @@ export class AgentService {
   private async complete(
     settings: RuntimeLlmSettings,
     messages: Array<{ role: string; content: string }>,
-  ): Promise<string> {
+  ): Promise<{ content: string; modelUsed: string }> {
     if (settings.mode === 'custom_byok' && !settings.apiKey) {
       throw new Error('请先在设置中填写 API Key');
     }
     const endpoint = settings.mode === 'demo_proxy'
       ? `${settings.baseUrl}/chat`
       : `${settings.baseUrl}/chat/completions`;
-    const body = JSON.stringify({
-      model: settings.modelId,
-      messages,
-      temperature: settings.temperature,
-      // 0 = uncapped: omit max_tokens entirely, the model's default applies.
-      ...(settings.maxTokens > 0 ? { max_tokens: settings.maxTokens } : {}),
-      stream: false,
-    });
+    const body = buildChatCompletionBody(settings, messages);
 
     let response: Response;
     let proxyMetadata: ProxyAttemptMetadata | undefined;
@@ -238,7 +235,7 @@ export class AgentService {
             authorization: `Bearer ${settings.apiKey}`,
           },
           body,
-          signal: AbortSignal.timeout(90_000),
+          signal: AbortSignal.timeout(BYOK_CHAT_TIMEOUT_MS),
         });
       }
     } catch (error) {
@@ -248,6 +245,7 @@ export class AgentService {
       choices?: Array<{ message?: { content?: unknown } }>;
       error?: { code?: string; message?: string; requestId?: string } | string;
       message?: string;
+      model?: unknown;
     };
     if (!response.ok) {
       const detail = typeof payload.error === 'string' ? payload.error : payload.error?.message || payload.message;
@@ -276,7 +274,12 @@ export class AgentService {
         : '';
     const cleaned = content.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
     if (!cleaned) throw new Error('模型没有返回可显示的内容');
-    return cleaned;
+    const responseModel = typeof payload.model === 'string' ? payload.model.trim() : '';
+    const modelUsed = response.headers.get('x-proxy-model-used')?.trim()
+      || proxyMetadata?.modelUsed?.trim()
+      || responseModel
+      || settings.modelId;
+    return { content: cleaned, modelUsed };
   }
 
   private async networkError(error: unknown, endpoint: string): Promise<Error> {

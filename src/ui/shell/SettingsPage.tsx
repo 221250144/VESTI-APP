@@ -74,19 +74,15 @@ const PLATFORM_TONES: Record<string, string> = {
   "claude-code": "#c7663b",
 };
 
-const DEMO_PROXY_BASE_URL = "https://api.ccvg1218.online/api";
-const LEGACY_DEMO_PROXY_BASE_URL = "https://vesti-gate.vercel.app/api";
-const DEFAULT_BYOK_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1";
-
-function isManagedDemoProxyBaseUrl(value: string): boolean {
-  const normalized = value.trim().replace(/\/+$/, "").toLowerCase();
-  return [DEMO_PROXY_BASE_URL, LEGACY_DEMO_PROXY_BASE_URL].some(
-    (url) => normalized === url.toLowerCase(),
-  );
-}
-
 // Desktop-only settings copy. Keep every supported locale complete so this
 // page never falls back to a different language than the rest of the shell.
+const BYOK_BASE_URL_REQUIRED: Record<SupportedLocale, string> = {
+  zh: "使用自定义 / BYOK 时必须填写 Base URL。",
+  en: "A Base URL is required for Custom / BYOK mode.",
+  ja: "カスタム / BYOK を使用するには Base URL が必要です。",
+  ko: "사용자 지정 / BYOK 모드에는 Base URL이 필요합니다.",
+};
+
 const COPY: Record<SupportedLocale, Record<string, string>> = {
   zh: {
     loading: "正在读取设置…",
@@ -153,7 +149,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     llmTitle: "模型服务",
     llmDesc: "配置方式与浏览器插件一致:可使用 Vesti Demo Proxy,或连接 OpenAI 兼容接口并使用自己的 API Key。",
     demoProxy: "Demo Proxy",
-    demoProxyDesc: "用于快速体验,默认 qwen-plus",
+    demoProxyDesc: "开箱即用，模型名称原样透传",
     byok: "自定义 / BYOK",
     byokDesc: "OpenAI 兼容 API",
     baseUrl: "Base URL",
@@ -349,7 +345,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     llmTitle: "Model Service",
     llmDesc: "Same as the browser extension: use the Vesti Demo Proxy, or bring your own OpenAI-compatible API key.",
     demoProxy: "Demo Proxy",
-    demoProxyDesc: "Quick start, defaults to qwen-plus",
+    demoProxyDesc: "Ready to use; model names pass through unchanged",
     byok: "Custom / BYOK",
     byokDesc: "OpenAI-compatible API",
     baseUrl: "Base URL",
@@ -539,7 +535,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     llmTitle: "モデルサービス",
     llmDesc: "ブラウザー拡張機能と同様に、Vesti Demo Proxy または独自の OpenAI 互換 API キーを使用できます。",
     demoProxy: "Demo Proxy",
-    demoProxyDesc: "すぐに試せます。既定は qwen-plus",
+    demoProxyDesc: "すぐに利用可能。モデル名はそのまま送信",
     byok: "カスタム / BYOK",
     byokDesc: "OpenAI 互換 API",
     baseUrl: "Base URL",
@@ -717,7 +713,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     llmTitle: "모델 서비스",
     llmDesc: "브라우저 확장 프로그램과 동일하게 Vesti Demo Proxy를 사용하거나 OpenAI 호환 API 키를 직접 연결할 수 있습니다.",
     demoProxy: "Demo Proxy",
-    demoProxyDesc: "빠른 체험용, 기본값 qwen-plus",
+    demoProxyDesc: "바로 사용 가능, 모델 이름을 그대로 전달",
     byok: "사용자 지정 / BYOK",
     byokDesc: "OpenAI 호환 API",
     baseUrl: "Base URL",
@@ -1243,6 +1239,12 @@ export function SettingsPage({
   ): Promise<boolean> {
     const run = async (): Promise<boolean> => {
       const snapshotFingerprint = settingsFingerprint(snapshot);
+      if (snapshot.llm.mode === "custom_byok" && !snapshot.llm.baseUrl.trim()) {
+        const text = BYOK_BASE_URL_REQUIRED[locale];
+        if (feedback === "model") setModelMessage(text);
+        else setMessage(text);
+        return false;
+      }
       try {
         const result = await window.vesti.saveSettings(toSettingsUpdate(snapshot));
         const normalized = toDraft(result.settings);
@@ -1406,12 +1408,6 @@ export function SettingsPage({
             llm: {
               ...current.llm,
               mode,
-              baseUrl:
-                mode === "demo_proxy"
-                  ? DEMO_PROXY_BASE_URL
-                  : isManagedDemoProxyBaseUrl(current.llm.baseUrl)
-                    ? DEFAULT_BYOK_BASE_URL
-                    : current.llm.baseUrl,
             },
           }
         : current,
@@ -1956,16 +1952,17 @@ export function SettingsPage({
             ))}
           </div>
           <div className="grid gap-4 md:grid-cols-2">
-            <Field label={copy.baseUrl} wide>
-              <input
-                className={inputClass}
-                value={draft.llm.baseUrl}
-                readOnly={draft.llm.mode === "demo_proxy"}
-                onChange={(event) =>
-                  setDraft({ ...draft, llm: { ...draft.llm, baseUrl: event.target.value } })
-                }
-              />
-            </Field>
+            {draft.llm.mode === "custom_byok" && (
+              <Field label={copy.baseUrl} wide>
+                <input
+                  className={inputClass}
+                  value={draft.llm.baseUrl}
+                  onChange={(event) =>
+                    setDraft({ ...draft, llm: { ...draft.llm, baseUrl: event.target.value } })
+                  }
+                />
+              </Field>
+            )}
             <Field label={copy.model}>
               <input
                 className={inputClass}

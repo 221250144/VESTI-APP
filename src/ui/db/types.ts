@@ -758,7 +758,7 @@ export interface LlmConfig {
   apiKey: string
   modelId: string
   temperature: number
-  maxTokens: number
+  maxTokens: number | null
   updatedAt: number
   mode?: LlmAccessMode
   proxyBaseUrl?: string

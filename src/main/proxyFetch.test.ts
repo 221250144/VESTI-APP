@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { fetchDemoProxy } from './proxyFetch';
+import {
+  fetchDemoProxy,
+  PROXY_PRIMARY_ATTEMPT_TIMEOUT_MS,
+  PROXY_TOTAL_TIMEOUT_MS,
+} from './proxyFetch';
 
 const primary = 'https://api.ccvg1218.online/api';
 const fallback = 'https://vesti-gate.vercel.app/api';
@@ -17,6 +21,11 @@ function options(route: 'chat' | 'embeddings' = 'chat') {
 }
 
 describe('fetchDemoProxy', () => {
+  it('allows long proxy requests while reserving time for fallback', () => {
+    expect(PROXY_PRIMARY_ATTEMPT_TIMEOUT_MS).toBe(120_000);
+    expect(PROXY_TOTAL_TIMEOUT_MS).toBe(180_000);
+  });
+
   it('uses the new /api/chat route, service header and non-stream body', async () => {
     const fetchImpl = vi.fn<[string, RequestInit], Promise<Response>>(async () => new Response('{}', {
       status: 200,

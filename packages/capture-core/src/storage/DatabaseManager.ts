@@ -644,6 +644,9 @@ export class DatabaseManager {
       throw new Error('Token usage event source scope does not match replacement scope');
     }
     const db = this.getDb();
+    const sourceSessions = db.prepare(
+      'SELECT DISTINCT session_id FROM token_usage_events WHERE source_scope = ?',
+    );
     const remove = db.prepare('DELETE FROM token_usage_events WHERE source_scope = ?');
     const stmt = db.prepare(`
       INSERT INTO token_usage_events (
@@ -668,7 +671,46 @@ export class DatabaseManager {
         model = excluded.model,
         source = excluded.source
     `);
+    const sessionPlatform = db.prepare('SELECT platform FROM work_sessions WHERE id = ?');
+    const invalidEventCount = db.prepare(
+      'SELECT COUNT(*) AS count FROM token_usage_events WHERE session_id = ? AND is_valid = 0',
+    );
+    const correctedCodexTotals = db.prepare(`
+      SELECT
+        COUNT(*) AS event_count,
+        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+        COALESCE(SUM(output_tokens), 0) AS output_tokens,
+        COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+        COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens
+      FROM (
+        SELECT events.*,
+               ROW_NUMBER() OVER (
+                 PARTITION BY session_id, dedupe_key
+                 ORDER BY timestamp ASC, id ASC
+               ) AS dedupe_rank
+        FROM token_usage_events events
+        WHERE events.session_id = ? AND events.is_valid = 1
+      )
+      WHERE dedupe_rank = 1
+    `);
+    const updateCodexTotals = db.prepare(`
+      UPDATE work_sessions
+      SET total_input_tokens = @inputTokens,
+          total_output_tokens = @outputTokens,
+          total_cache_creation_tokens = @cacheCreationTokens,
+          total_cache_read_tokens = @cacheReadTokens
+      WHERE id = @sessionId AND platform = 'codex'
+    `);
     const replaceAll = db.transaction((items: TokenUsageEvent[]) => {
+      // Keep track of the logical sessions represented by both the old and
+      // corrected physical-source snapshots. This also covers a source whose
+      // corrected snapshot is empty.
+      const affectedSessionIds = new Set(
+        (sourceSessions.all(sourceScope) as Array<{ session_id: string }>)
+          .map(row => row.session_id),
+      );
+      for (const event of items) affectedSessionIds.add(event.sessionId);
+
       remove.run(sourceScope);
       for (const event of items) {
         stmt.run({
@@ -684,6 +726,34 @@ export class DatabaseManager {
           reasoningTokens: event.reasoningTokens,
           model: event.model ?? null,
           source: event.source,
+        });
+      }
+
+      // Codex thread-spawn replay once inflated the session summary. Its
+      // normal upsert uses MAX for streaming safety, so a corrected rescan
+      // could never lower that stale value. Reconcile only after every old
+      // snapshot for this logical session has been replaced (no invalid rows
+      // remain). A failed or missing source therefore keeps the old summary
+      // as a safe fallback; a successfully replaced source may legitimately
+      // reduce the corrected aggregate all the way to zero.
+      for (const sessionId of affectedSessionIds) {
+        const platform = sessionPlatform.get(sessionId) as { platform?: string } | undefined;
+        if (platform?.platform !== 'codex') continue;
+        const invalid = invalidEventCount.get(sessionId) as { count: number };
+        if (invalid.count > 0) continue;
+        const totals = correctedCodexTotals.get(sessionId) as {
+          event_count: number;
+          input_tokens: number;
+          output_tokens: number;
+          cache_creation_tokens: number;
+          cache_read_tokens: number;
+        };
+        updateCodexTotals.run({
+          sessionId,
+          inputTokens: totals.input_tokens,
+          outputTokens: totals.output_tokens,
+          cacheCreationTokens: totals.cache_creation_tokens,
+          cacheReadTokens: totals.cache_read_tokens,
         });
       }
     });
@@ -1922,6 +1992,7 @@ export class DatabaseManager {
                    ORDER BY timestamp ASC, id ASC
                  ) AS dedupe_rank
           FROM token_usage_events events
+          WHERE events.is_valid = 1
         ) WHERE dedupe_rank = 1
       ),
       event_totals AS (
@@ -1953,6 +2024,7 @@ export class DatabaseManager {
                    ORDER BY timestamp ASC, id ASC
                  ) AS dedupe_rank
           FROM token_usage_events events
+          WHERE events.is_valid = 1
         ) WHERE dedupe_rank = 1
       ),
       event_totals AS (
@@ -1987,12 +2059,72 @@ export class DatabaseManager {
     }
 
     const modelRows = db.prepare(`
+      WITH deduped_events AS (
+        SELECT * FROM (
+          SELECT events.*,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY session_id, dedupe_key
+                   ORDER BY timestamp ASC, id ASC
+                 ) AS dedupe_rank
+          FROM token_usage_events events
+          WHERE events.is_valid = 1
+        ) WHERE dedupe_rank = 1
+      ),
+      event_totals AS (
+        SELECT session_id,
+               COALESCE(SUM(input_tokens), 0) AS ti,
+               COALESCE(SUM(output_tokens), 0) AS ot
+        FROM deduped_events
+        GROUP BY session_id
+      ),
+      event_model_usage AS (
+        SELECT events.session_id,
+               COALESCE(NULLIF(events.model, ''), NULLIF(sessions.model, ''), '<unknown>') AS model,
+               COALESCE(SUM(events.input_tokens), 0) AS ti,
+               COALESCE(SUM(events.output_tokens), 0) AS ot
+        FROM deduped_events events
+        INNER JOIN work_sessions sessions ON sessions.id = events.session_id
+        WHERE sessions.session_type = 'conversation'
+        GROUP BY events.session_id,
+                 COALESCE(NULLIF(events.model, ''), NULLIF(sessions.model, ''), '<unknown>')
+      ),
+      residual_usage AS (
+        SELECT sessions.id AS session_id,
+               COALESCE(NULLIF(sessions.model, ''), '<unknown>') AS model,
+               MAX(
+                 COALESCE(sessions.total_input_tokens, 0) - COALESCE(events.ti, 0),
+                 0
+               ) AS ti,
+               MAX(
+                 COALESCE(sessions.total_output_tokens, 0) - COALESCE(events.ot, 0),
+                 0
+               ) AS ot
+        FROM work_sessions sessions
+        LEFT JOIN event_totals events ON events.session_id = sessions.id
+        WHERE sessions.session_type = 'conversation'
+          AND (
+            events.session_id IS NULL
+            OR COALESCE(sessions.total_input_tokens, 0) > COALESCE(events.ti, 0)
+            OR COALESCE(sessions.total_output_tokens, 0) > COALESCE(events.ot, 0)
+          )
+          AND (
+            NULLIF(sessions.model, '') IS NOT NULL
+            OR COALESCE(sessions.total_input_tokens, 0) > 0
+            OR COALESCE(sessions.total_output_tokens, 0) > 0
+          )
+      ),
+      usage_rows AS (
+        SELECT session_id, model, ti, ot FROM event_model_usage
+        UNION ALL
+        SELECT session_id, model, ti, ot FROM residual_usage
+      )
       SELECT model,
-             SUM(CASE WHEN id NOT IN ${SUB_CHILDREN} THEN 1 ELSE 0 END) as c,
-             COALESCE(SUM(total_input_tokens), 0) as ti,
-             COALESCE(SUM(total_output_tokens), 0) as ot
-      FROM work_sessions
-      WHERE session_type = 'conversation' AND model IS NOT NULL AND model != ''
+             COUNT(DISTINCT CASE
+               WHEN session_id NOT IN ${SUB_CHILDREN} THEN session_id
+             END) AS c,
+             COALESCE(SUM(ti), 0) AS ti,
+             COALESCE(SUM(ot), 0) AS ot
+      FROM usage_rows
       GROUP BY model
     `).all() as any[];
     const modelBreakdown: Record<string, number> = {};
@@ -2033,6 +2165,7 @@ export class DatabaseManager {
                    ORDER BY timestamp ASC, id ASC
                  ) AS dedupe_rank
           FROM token_usage_events events
+          WHERE events.is_valid = 1
         ) WHERE dedupe_rank = 1
       )
       SELECT date(events.timestamp / 1000, 'unixepoch', 'localtime') as d,
