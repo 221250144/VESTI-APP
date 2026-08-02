@@ -135,6 +135,7 @@ export interface LlmSettingsView {
   baseUrl: string;
   modelId: string;
   temperature: number;
+  /** 0 = no max_tokens sent — the model's own default output cap applies. */
   maxTokens: number;
   apiKeyConfigured: boolean;
 }
@@ -184,6 +185,7 @@ export interface AppSettingsUpdate {
     baseUrl: string;
     modelId: string;
     temperature: number;
+    /** 0 = no max_tokens sent — the model's own default output cap applies. */
     maxTokens: number;
     apiKey?: string;
     clearApiKey?: boolean;

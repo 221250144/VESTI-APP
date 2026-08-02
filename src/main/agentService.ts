@@ -16,15 +16,16 @@ import type { RuntimeAgentSettings, RuntimeLlmSettings, SettingsService } from '
 import { fetchDemoProxy, type ProxyAttemptMetadata } from './proxyFetch';
 
 const MAX_TRANSCRIPT_CHARACTERS = 80_000;
-/** Settings upper bound for max_tokens (mirrors settingsService's 128–16_384
- * range); per-kind floors below can never push past it. */
+/** Settings upper bound for max_tokens (mirrors settingsService's 0–16_384
+ * range, where 0 means "don't send max_tokens"); per-kind floors below can
+ * never push past it. */
 const MAX_TOKENS_SETTINGS_CAP = 16_384;
 /**
  * Per-kind output-token floors. Kinds that answer with a long structured
- * document are silently degraded by the global default (1600): the relay pack
+ * document are degraded when the user configured a small cap: the relay pack
  * either truncates mid-JSON (parse then throws) or the model guts sections to
- * fit. The user setting wins when it is higher; kinds not listed keep it
- * verbatim.
+ * fit. Only applies to an explicit positive user setting — with 0 (uncapped)
+ * no max_tokens is sent at all, so there is nothing to protect against.
  */
 const KIND_MIN_MAX_TOKENS: Record<string, number> = {
   // Relay V2 pack: goal + state + decisions + failed paths + verification +
@@ -32,14 +33,17 @@ const KIND_MIN_MAX_TOKENS: Record<string, number> = {
   relay: 4096,
   // Daily journal (P4c upgrade): the two-pass pipeline answers with either a
   // per-cluster structured brief (pass 1) or a full achievement-oriented
-  // work-record document (pass 2); the global default (1600) truncates both.
+  // work-record document (pass 2); small caps truncate both.
   daily: 4096,
   // Learn route synthesis (V4): title + 2-4 sentence interpretation + next
-  // steps as one JSON document per route; 1600 risks mid-JSON truncation.
+  // steps as one JSON document per route; small caps risk mid-JSON truncation.
   'learn-synthesis': 2048,
 };
 
 function effectiveMaxTokens(kind: string, configured: number): number {
+  // 0 = uncapped: the request carries no max_tokens; the model's own default
+  // applies and per-kind floors are moot.
+  if (configured <= 0) return 0;
   return Math.min(
     MAX_TOKENS_SETTINGS_CAP,
     Math.max(configured, KIND_MIN_MAX_TOKENS[kind] ?? 0)
@@ -208,7 +212,8 @@ export class AgentService {
       model: settings.modelId,
       messages,
       temperature: settings.temperature,
-      max_tokens: settings.maxTokens,
+      // 0 = uncapped: omit max_tokens entirely, the model's default applies.
+      ...(settings.maxTokens > 0 ? { max_tokens: settings.maxTokens } : {}),
       stream: false,
     });
 

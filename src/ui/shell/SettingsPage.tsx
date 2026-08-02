@@ -160,6 +160,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     model: "模型",
     temperature: "Temperature",
     maxTokens: "最大输出 Token",
+    maxTokensHint: "0 = 不限（按模型默认上限），长文档不会被截断",
     apiKeySaved: "(已安全保存,留空则不修改)",
     deleteApiKey: "删除已保存的 API Key",
     apiKeyNote: "API Key 由操作系统安全存储加密,前端页面不会读取已保存的明文。",
@@ -355,6 +356,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     model: "Model",
     temperature: "Temperature",
     maxTokens: "Max output tokens",
+    maxTokensHint: "0 = uncapped (model default); long documents won't be truncated",
     apiKeySaved: "(saved securely; leave blank to keep)",
     deleteApiKey: "Delete the saved API Key",
     apiKeyNote: "The API key is encrypted by the OS secure storage; the page never reads it back.",
@@ -544,6 +546,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     model: "モデル",
     temperature: "Temperature",
     maxTokens: "最大出力 Token",
+    maxTokensHint: "0 = 無制限（モデルのデフォルト上限）、長文が途中で切れません",
     apiKeySaved: "（安全に保存済み。空欄なら維持）",
     deleteApiKey: "保存済み API キーを削除",
     apiKeyNote: "API キーは OS の安全なストレージで暗号化され、この画面から平文を読み取ることはありません。",
@@ -721,6 +724,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     model: "모델",
     temperature: "Temperature",
     maxTokens: "최대 출력 토큰",
+    maxTokensHint: "0 = 제한 없음(모델 기본 상한) — 긴 문서가 잘리지 않습니다",
     apiKeySaved: "(안전하게 저장됨, 비워 두면 유지)",
     deleteApiKey: "저장된 API 키 삭제",
     apiKeyNote: "API 키는 운영체제의 보안 저장소로 암호화되며 이 화면에서는 평문을 다시 읽지 않습니다.",
@@ -1988,7 +1992,7 @@ export function SettingsPage({
               <input
                 className={inputClass}
                 type="number"
-                min="128"
+                min="0"
                 max="16384"
                 step="128"
                 value={draft.llm.maxTokens}
@@ -1996,6 +2000,7 @@ export function SettingsPage({
                   setDraft({ ...draft, llm: { ...draft.llm, maxTokens: Number(event.target.value) } })
                 }
               />
+              <p className="mt-1 text-[11px] font-sans text-text-tertiary">{copy.maxTokensHint}</p>
             </Field>
             {draft.llm.mode === "custom_byok" && (
               <Field label={`API Key ${draft.apiKeyConfigured ? copy.apiKeySaved : ""}`} wide>

@@ -352,7 +352,7 @@ export class SettingsService {
         customBaseUrl,
         modelId,
         temperature: this.numberInRange(update.llm.temperature, 0, 2, 0.3),
-        maxTokens: Math.round(this.numberInRange(update.llm.maxTokens, 128, 16_384, 1600)),
+        maxTokens: Math.round(this.numberInRange(update.llm.maxTokens, 0, 16_384, 0)),
         encryptedApiKey,
         // Not editable from the settings UI yet; keep any value present in settings.json.
         embeddingModel: this.settings.llm.embeddingModel,
@@ -407,7 +407,9 @@ export class SettingsService {
         customBaseUrl: CUSTOM_BASE_URL,
         modelId: 'qwen-plus',
         temperature: 0.3,
-        maxTokens: 1600,
+        // 0 = uncapped: no max_tokens is sent, the model's own default applies.
+        // A per-request 1600 cap silently truncated relay packs and daily logs.
+        maxTokens: 0,
       },
       upstream: {
         obsidianVaultPath: '',
@@ -474,7 +476,12 @@ export class SettingsService {
         customBaseUrl,
         modelId: llm.modelId?.trim() || defaults.llm.modelId,
         temperature: this.numberInRange(llm.temperature, 0, 2, defaults.llm.temperature),
-        maxTokens: Math.round(this.numberInRange(llm.maxTokens, 128, 16_384, defaults.llm.maxTokens)),
+        // Legacy migration: 1600 was the old default cap (never user-chosen in
+        // practice); map it to 0 (uncapped). Any other explicit value survives.
+        maxTokens: (() => {
+          const stored = Math.round(this.numberInRange(llm.maxTokens, 0, 16_384, defaults.llm.maxTokens));
+          return stored === 1600 ? 0 : stored;
+        })(),
         encryptedApiKey: typeof llm.encryptedApiKey === 'string' ? llm.encryptedApiKey : undefined,
         embeddingModel: typeof llm.embeddingModel === 'string' && llm.embeddingModel.trim()
           ? llm.embeddingModel.trim()
