@@ -40,7 +40,11 @@ export const DREAM_EXTRACT_DELAY_MS = 300;
 export const DREAM_EXISTING_LIMIT = 500;
 /** Candidates per maintain round; large sweeps run at most two rounds. */
 export const DREAM_MAINTAIN_ROUND_SIZE = 30;
-export const DREAM_MAINTAIN_MAX_ROUNDS = 2;
+// Rounds scale with the deduped candidate count (first full runs produce
+// hundreds); the cap only guards a pathological library. 30/round ≈ 15k
+// chars — well under the dream-maintain IPC budget, and op quality held up
+// in probes.
+export const DREAM_MAINTAIN_MAX_ROUNDS = 12;
 /** Keep the maintain transcript comfortably under the 30K IPC cap. */
 const DREAM_MAINTAIN_TRANSCRIPT_BUDGET = 26_000;
 
@@ -292,6 +296,28 @@ function randomIdSuffix(): string {
 
 function dedupeStrings(items: string[]): string[] {
   return [...new Set(items)];
+}
+
+/**
+ * Pre-maintain candidate dedupe. 130 extract batches see heavily overlapping
+ * conversations, so identical facts recur dozens of times; merging them here
+ * (tag + punctuation-insensitive fact text) is what keeps the maintain round
+ * count proportional to *unique* facts instead of batch count.
+ */
+export function dedupeDreamCandidates(
+  items: DreamMemoryCandidate[],
+): DreamMemoryCandidate[] {
+  const seen = new Set<string>();
+  const out: DreamMemoryCandidate[] = [];
+  for (const item of items) {
+    const key = `${item.tag}:${item.fact
+      .toLowerCase()
+      .replace(/[\s\p{P}\p{S}]+/gu, "")}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
 }
 
 /**
@@ -627,18 +653,30 @@ export async function runDreamPipeline(
           message: `正在提取记忆（完成 ${finished}/${batches.length}）…`,
         });
         const startedAt = deps.now();
+        const extractBatch = async () =>
+          parseDreamExtractResult(
+            (
+              await api.runAgent({
+                kind: "dream-extract",
+                sessionId: batchAnchor(batches[index]),
+                transcriptOverride: batches[index].text,
+                persist: false,
+              })
+            ).content,
+          );
         try {
-          const result = await api.runAgent({
-            kind: "dream-extract",
-            sessionId: batchAnchor(batches[index]),
-            transcriptOverride: batches[index].text,
-            persist: false,
-          });
-          laneResults[index] = parseDreamExtractResult(result.content);
+          laneResults[index] = await extractBatch();
         } catch (error) {
-          failures += 1;
-          warnings.push(`批次 ${index + 1} 提取失败：${errorMessage(error)}`);
-          laneResults[index] = [];
+          // One retry per batch — a transient gateway 400/504 would otherwise
+          // silently lose every session packed into this batch.
+          try {
+            await deps.sleep(DREAM_EXTRACT_DELAY_MS);
+            laneResults[index] = await extractBatch();
+          } catch {
+            failures += 1;
+            warnings.push(`批次 ${index + 1} 提取失败：${errorMessage(error)}`);
+            laneResults[index] = [];
+          }
         }
         finished += 1;
         console.info(`[dream] extract batch ${index + 1}/${batches.length} done in ${Math.round((deps.now() - startedAt) / 1000)}s (${laneResults[index]?.length ?? 0} candidates)`);
@@ -668,25 +706,30 @@ export async function runDreamPipeline(
     const updatedEntries: MemoryEntryView[] = [];
     if (candidates.length > 0) {
       progress({ phase: "maintain", message: "正在合并长期记忆…" });
-      console.info(`[dream] maintain: ${candidates.length} candidates`);
+      const uniqueCandidates = dedupeDreamCandidates(candidates);
+      console.info(
+        `[dream] maintain: ${candidates.length} candidates (${uniqueCandidates.length} after dedupe)`,
+      );
       const existing = await api
         .listMemoryEntries({ kind: "dream", status: "active", limit: DREAM_EXISTING_LIMIT })
         .catch(() => [] as MemoryEntryView[]);
       const byId = new Map(existing.map((entry) => [entry.id, entry]));
       const sourceSessionIds = dedupeStrings(
-        candidates.flatMap((candidate) => candidate.session_ids),
+        uniqueCandidates.flatMap((candidate) => candidate.session_ids),
       ).slice(0, 100);
-      const rounds = chunkArray(candidates, DREAM_MAINTAIN_ROUND_SIZE).slice(
+      const rounds = chunkArray(uniqueCandidates, DREAM_MAINTAIN_ROUND_SIZE).slice(
         0,
         DREAM_MAINTAIN_MAX_ROUNDS,
       );
       const overflow =
-        candidates.length - DREAM_MAINTAIN_ROUND_SIZE * DREAM_MAINTAIN_MAX_ROUNDS;
+        uniqueCandidates.length - DREAM_MAINTAIN_ROUND_SIZE * DREAM_MAINTAIN_MAX_ROUNDS;
       if (overflow > 0) {
-        warnings.push(`候选记忆超出两轮合并容量，丢弃 ${overflow} 条`);
+        warnings.push(
+          `候选记忆超出合并容量（${DREAM_MAINTAIN_MAX_ROUNDS} 轮上限），丢弃 ${overflow} 条`,
+        );
       }
       for (let round = 0; round < rounds.length; round += 1) {
-        try {
+        const runRound = async () => {
           const result = await api.runAgent({
             kind: "dream-maintain",
             sessionId: batchAnchor(batches[0]),
@@ -696,23 +739,38 @@ export async function runDreamPipeline(
             ),
             persist: false,
           });
-          const applied = applyDreamMaintainOps(
+          return applyDreamMaintainOps(
             parseDreamMaintainResult(result.content),
             byId,
             { today, sourceSessionIds, now: deps.now() },
           );
-          for (const entry of applied.upserts) await api.upsertMemoryEntry(entry);
-          for (const id of applied.deletes) await api.deleteMemoryEntry(id);
-          counts.added += applied.counts.added;
-          counts.updated += applied.counts.updated;
-          counts.deleted += applied.counts.deleted;
-          counts.noop += applied.counts.noop;
-          orphans += applied.orphans;
-          addedEntries.push(...applied.addedEntries);
-          updatedEntries.push(...applied.updatedEntries);
-        } catch (error) {
-          warnings.push(`第 ${round + 1} 轮记忆合并失败：${errorMessage(error)}`);
+        };
+        let applied: DreamApplyResult | null = null;
+        let roundError: unknown = null;
+        for (let attempt = 0; attempt < 2 && applied === null; attempt += 1) {
+          try {
+            applied = await runRound();
+          } catch (error) {
+            roundError = error;
+          }
         }
+        if (applied === null) {
+          warnings.push(`第 ${round + 1} 轮记忆合并失败：${errorMessage(roundError)}`);
+          console.info(`[dream] maintain round ${round + 1}/${rounds.length} failed`);
+          continue;
+        }
+        for (const entry of applied.upserts) await api.upsertMemoryEntry(entry);
+        for (const id of applied.deletes) await api.deleteMemoryEntry(id);
+        counts.added += applied.counts.added;
+        counts.updated += applied.counts.updated;
+        counts.deleted += applied.counts.deleted;
+        counts.noop += applied.counts.noop;
+        orphans += applied.orphans;
+        addedEntries.push(...applied.addedEntries);
+        updatedEntries.push(...applied.updatedEntries);
+        console.info(
+          `[dream] maintain round ${round + 1}/${rounds.length} done: +${applied.counts.added} ~${applied.counts.updated} -${applied.counts.deleted} =${applied.counts.noop}`,
+        );
       }
     }
 

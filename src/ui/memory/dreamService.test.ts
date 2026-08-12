@@ -483,18 +483,21 @@ describe("runDreamPipeline", () => {
     expect(calls.metaSets).toEqual([["dream.lastRunAt", String(FIXED_NOW)]]);
   });
 
-  it("tolerates a failed extract batch and records the warning in the journal", async () => {
+  it("retries a failed extract batch once and only records the warning when both attempts fail", async () => {
     const bigSessions = [makeSession({ id: 1 }), makeSession({ id: 2 })];
     const bigMessages = {
       1: [{ role: "user" as const, contentText: `甲${"长".repeat(30_000)}` }],
       2: [{ role: "user" as const, contentText: `乙${"长".repeat(30_000)}` }],
     };
-    let extractCalls = 0;
     const { calls } = makeVestiMock({
       onRunAgent: (request) => {
         if (request.kind === "dream-extract") {
-          extractCalls += 1;
-          if (extractCalls === 1) throw new Error("网关超时");
+          // Batch 1 (marked by its 甲 payload) fails every attempt; batch 2
+          // succeeds first try. Failing by payload keeps the intent stable
+          // under the lanes' concurrent call interleaving.
+          if (String(request.transcriptOverride).includes("甲")) {
+            throw new Error("网关超时");
+          }
           return { content: JSON.stringify([{ tag: "profile", fact: "用户是开发者", evidence: "", session_ids: ["cli-2"] }]) };
         }
         return { content: JSON.stringify([{ op: "NOOP", target_id: null, tag: null, title: "", content: "", reason: "重复" }]) };
@@ -504,12 +507,52 @@ describe("runDreamPipeline", () => {
     expect(result.ok).toBe(true);
     expect(result.noop).toBe(1);
     expect(calls.agentRequests.map((r) => r.kind)).toEqual([
+      // Batch 1 fails both attempts; batch 2 succeeds on its first.
+      "dream-extract",
       "dream-extract",
       "dream-extract",
       "dream-maintain",
     ]);
     const journal = calls.upserts[calls.upserts.length - 1];
     expect(journal.contentMarkdown).toContain("批次 1 提取失败：网关超时");
+  });
+
+  it("recovers a flaky extract batch via retry without a warning", async () => {
+    let extractCalls = 0;
+    const { calls } = makeVestiMock({
+      onRunAgent: (request) => {
+        if (request.kind === "dream-extract") {
+          extractCalls += 1;
+          if (extractCalls === 1) throw new Error("瞬时 504");
+          return { content: JSON.stringify([{ tag: "profile", fact: "用户是开发者", evidence: "", session_ids: ["cli-1"] }]) };
+        }
+        return { content: JSON.stringify([{ op: "NOOP", target_id: null, tag: null, title: "", content: "", reason: "重复" }]) };
+      },
+    });
+    const result = await runDreamPipeline({ mode: "auto" }, makeDeps(sessions, messages));
+    expect(result.ok).toBe(true);
+    expect(extractCalls).toBe(2);
+    const journal = calls.upserts[calls.upserts.length - 1];
+    expect(journal.contentMarkdown).not.toContain("提取失败");
+  });
+
+  it("recovers a flaky maintain round via retry without a warning", async () => {
+    let maintainCalls = 0;
+    const { calls } = makeVestiMock({
+      onRunAgent: (request) => {
+        if (request.kind === "dream-extract") {
+          return { content: JSON.stringify([{ tag: "event", fact: "用户发布了 1.0", evidence: "", session_ids: ["cli-1"] }]) };
+        }
+        maintainCalls += 1;
+        if (maintainCalls === 1) throw new Error("模型没有返回可显示的内容");
+        return { content: JSON.stringify([{ op: "ADD", target_id: null, tag: "event", title: "发布 1.0", content: "用户发布了 Vesti 1.0", reason: "里程碑" }]) };
+      },
+    });
+    const result = await runDreamPipeline({ mode: "auto" }, makeDeps(sessions, messages));
+    expect(result).toMatchObject({ ok: true, added: 1 });
+    expect(maintainCalls).toBe(2);
+    const journal = calls.upserts[calls.upserts.length - 1];
+    expect(journal.contentMarkdown).not.toContain("合并失败");
   });
 
   it("fails the run without touching watermarks when every batch fails", async () => {
@@ -555,7 +598,7 @@ describe("runDreamPipeline", () => {
     expect(journal.contentMarkdown).toContain("丢弃孤儿操作 1");
   });
 
-  it("splits >60 candidates into two maintain rounds, the second seeing the first's adds", async () => {
+  it("splits >60 candidates into three maintain rounds, the second seeing the first's adds", async () => {
     const candidates = Array.from({ length: 65 }, (_, index) => ({
       tag: "profile",
       fact: `事实 ${index}`,
@@ -571,20 +614,68 @@ describe("runDreamPipeline", () => {
     const result = await runDreamPipeline({ mode: "auto" }, makeDeps(sessions, messages));
     expect(result.ok).toBe(true);
     const maintainRequests = calls.agentRequests.filter((r) => r.kind === "dream-maintain");
-    expect(maintainRequests).toHaveLength(2);
+    expect(maintainRequests).toHaveLength(3);
     const roundOne = JSON.parse(maintainRequests[0].transcriptOverride as string) as { candidates: unknown[] };
     const roundTwo = JSON.parse(maintainRequests[1].transcriptOverride as string) as {
       existing: Array<{ id: string }>;
       candidates: unknown[];
     };
+    const roundThree = JSON.parse(maintainRequests[2].transcriptOverride as string) as { candidates: unknown[] };
     expect(roundOne.candidates).toHaveLength(30);
     expect(roundTwo.candidates).toHaveLength(30);
+    expect(roundThree.candidates).toHaveLength(5);
     // Round 2's existing list includes round 1's ADD.
     const roundOneAdded = calls.upserts.find((entry) => entry.kind === "dream");
     expect(roundTwo.existing.map((entry) => entry.id)).toContain(roundOneAdded?.id);
-    // The 5 overflow candidates are counted as a warning in the journal.
+    // 65 candidates fit within the round budget — nothing is dropped.
+    const journal = calls.upserts[calls.upserts.length - 1];
+    expect(journal.contentMarkdown).not.toContain("丢弃 ");
+  });
+
+  it("caps maintain at 12 rounds and records the overflow as a journal warning", async () => {
+    const candidates = Array.from({ length: 365 }, (_, index) => ({
+      tag: "profile",
+      fact: `事实 ${index}`,
+      evidence: "",
+      session_ids: ["cli-1"],
+    }));
+    const { calls } = makeVestiMock({
+      onRunAgent: (request) => {
+        if (request.kind === "dream-extract") return { content: JSON.stringify(candidates) };
+        return { content: JSON.stringify([{ op: "ADD", target_id: null, tag: "profile", title: "新条目", content: "内容", reason: "r" }]) };
+      },
+    });
+    const result = await runDreamPipeline({ mode: "auto" }, makeDeps(sessions, messages));
+    expect(result.ok).toBe(true);
+    const maintainRequests = calls.agentRequests.filter((r) => r.kind === "dream-maintain");
+    expect(maintainRequests).toHaveLength(12);
+    // 365 - 12×30 = 5 candidates overflow into the warning.
     const journal = calls.upserts[calls.upserts.length - 1];
     expect(journal.contentMarkdown).toContain("丢弃 5 条");
+  });
+
+  it("dedupes identical candidate facts before maintain", async () => {
+    const candidates = [
+      { tag: "goal", fact: "用户在开发 VESTI", evidence: "a", session_ids: ["s1"] },
+      { tag: "goal", fact: "用户在开发VESTI ", evidence: "b", session_ids: ["s2"] },
+      { tag: "goal", fact: "用户，在开发VESTI！", evidence: "c", session_ids: ["s3"] },
+      { tag: "preference", fact: "用户在开发 VESTI", evidence: "d", session_ids: ["s4"] },
+    ];
+    const { calls } = makeVestiMock({
+      onRunAgent: (request) => {
+        if (request.kind === "dream-extract") return { content: JSON.stringify(candidates) };
+        return { content: JSON.stringify([{ op: "NOOP", target_id: null, tag: null, title: "", content: "", reason: "重复" }]) };
+      },
+    });
+    const result = await runDreamPipeline({ mode: "auto" }, makeDeps(sessions, messages));
+    expect(result.ok).toBe(true);
+    const maintainRequests = calls.agentRequests.filter((r) => r.kind === "dream-maintain");
+    expect(maintainRequests).toHaveLength(1);
+    const round = JSON.parse(maintainRequests[0].transcriptOverride as string) as {
+      candidates: unknown[];
+    };
+    // 4 candidates → 2 unique keys (tag + punctuation-insensitive fact).
+    expect(round.candidates).toHaveLength(2);
   });
 
   it("upserts over the same-day journal on a second run", async () => {
