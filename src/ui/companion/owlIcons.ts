@@ -13,10 +13,19 @@ const modules = import.meta.glob("../assets/owl/*.png", {
   import: "default",
 }) as Record<string, string>;
 
+const MOODS: readonly CompanionMood[] = [
+  "calm",
+  "thinking",
+  "delighted",
+  "spark",
+  "sleepy",
+  "warm",
+];
+
 const ICONS = {} as Record<CompanionMood, string>;
 for (const [path, url] of Object.entries(modules)) {
   const id = path.split("/").pop()?.replace(/\.png$/, "");
-  if (id && id in ICONS) ICONS[id as CompanionMood] = url;
+  if (id && (MOODS as readonly string[]).includes(id)) ICONS[id as CompanionMood] = url;
 }
 
 /** Owl mood-icon URLs keyed by mood id (calm/thinking/delighted/spark/sleepy/warm). */
