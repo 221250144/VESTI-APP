@@ -388,7 +388,9 @@ describe("askCompanion", () => {
     );
     expect(calls.memoryQueries).toEqual([]);
     expect(calls.recallQueries).toEqual([]);
-    expect(calls.agentRequests[0].transcriptOverride).toBe("");
+    // A blank context must not reach the main process verbatim: it rejects
+    // agent runs with neither a capture session nor a transcript.
+    expect(calls.agentRequests[0].transcriptOverride).toBe("（暂无可参考的记忆或对话前文）");
   });
 
   it("scope 'memory' keeps memories but skips recall", async () => {

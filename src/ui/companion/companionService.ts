@@ -384,7 +384,10 @@ export async function askCompanion(
     sessionId,
     question,
     template: persona,
-    transcriptOverride: context,
+    // The main process rejects an agent run that resolves neither a capture
+    // session nor a transcript — so an empty context (本场对话 scope on a
+    // fresh session) still needs a non-blank placeholder riding the channel.
+    transcriptOverride: context.trim() ? context : "（暂无可参考的记忆或对话前文）",
     persist: false,
   });
   const { mood, body } = splitCompanionResult(result.content);
