@@ -1,5 +1,6 @@
 import type { DistillTemplate } from '../shared/contracts';
 import { parseDepositMaintainPayload } from '../shared/depositMaintain';
+import { parseDreamExtractPayload, parseDreamMaintainPayload } from '../shared/dreamMaintain';
 import type { RuntimeAgentSettings } from './settingsService';
 
 export interface AgentPromptInput {
@@ -1212,5 +1213,131 @@ registerAgentKind('prompt-continue', {
     const cleaned = raw.trim();
     if (!cleaned) throw new Error('prompt-continue 输出为空');
     return cleaned.slice(0, PROMPT_CONTINUE_MAX_CHARS);
+  },
+});
+
+// ---- 梦境 (Dream memory) ----
+// Two kinds backing the memory-space dream pipeline. dream-extract reads a
+// batch of compressed conversations and answers {"memories": [...]};
+// dream-maintain merges those candidates into the library and answers
+// {"ops": [...]}. Both parse through the shared dreamMaintain validators and
+// re-serialize (the orchestration side parses them back) so the
+// string->string AgentKindDefinition.parse signature is kept.
+
+registerAgentKind('dream-extract', {
+  buildPrompt({ transcript, preferences }) {
+    const { language, custom } = promptAffixes(preferences);
+    return [
+      {
+        role: 'system',
+        content: `你是 Vesti 的「梦境」记忆提取器——在用户与 AI 的对话中寻找关于用户本人的长期记忆。只依据提供的内容，不补造事实。${language}${custom}`,
+      },
+      {
+        role: 'user',
+        content: `下面是一批用户与 AI 的对话记录（用户消息完整保留，AI 回复已压缩截断）。请提取关于「用户本人」的持久记忆事实。
+
+提取类别（tag 字段只能取其一）：
+- profile：身份与背景（职业、角色、技术栈、经验水平、所在领域）
+- preference：偏好与习惯（代码风格、沟通方式、工具偏好、工作节奏、审美偏好）
+- goal：目标与意图（正在推进的事、长期规划、想达到的状态）
+- emotion：情绪与状态（疲惫、兴奋、焦虑、成就感、兴趣点的变化）
+- relationship：与 AI 的协作模式（委托习惯、对 AI 的期待、交互偏好）
+- event：重要事件（里程碑、发布、转折、生活变化）
+
+规则：
+1. 只记录有持久价值的事实——一次性问答、纯技术排错过程不记。
+2. 每条事实必须自包含（脱离对话也能看懂），一句话为主；evidence 给一句简短依据。
+3. 宁缺毋滥，没有新事实就输出空数组。同一事实只记一次。
+4. fact 用用户的语言书写（默认中文）。
+
+严格只输出一个 JSON 对象（不要 Markdown 代码块，不要任何额外文字）：
+{"memories": [{"tag": "preference", "fact": "...", "evidence": "...", "session_ids": ["..."]}]}
+
+对话记录：
+${transcript}`,
+      },
+    ];
+  },
+  parse(raw) {
+    return JSON.stringify(parseDreamExtractPayload(raw));
+  },
+});
+
+/** Render one existing memory entry for the maintain prompt: `id | tag | 内容`. */
+function renderDreamExistingList(existing: unknown): string {
+  if (!Array.isArray(existing) || existing.length === 0) return '（空）';
+  return existing.map((item) => {
+    const entry = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
+    const id = typeof entry.id === 'string' && entry.id ? entry.id : '?';
+    const tag = typeof entry.tag === 'string' && entry.tag ? entry.tag : '-';
+    const content = typeof entry.content === 'string' && entry.content
+      ? entry.content
+      : (typeof entry.title === 'string' ? entry.title : '');
+    return `- ${id} | ${tag} | ${content}`;
+  }).join('\n');
+}
+
+/** Render one extracted candidate for the maintain prompt: `[tag] fact（依据：…）`. */
+function renderDreamCandidateList(candidates: unknown): string {
+  if (!Array.isArray(candidates) || candidates.length === 0) return '（空）';
+  return candidates.map((item) => {
+    const entry = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
+    const tag = typeof entry.tag === 'string' && entry.tag ? entry.tag : '-';
+    const fact = typeof entry.fact === 'string' ? entry.fact : '';
+    const evidence = typeof entry.evidence === 'string' ? entry.evidence.trim() : '';
+    return evidence ? `- [${tag}] ${fact}（依据：${evidence}）` : `- [${tag}] ${fact}`;
+  }).join('\n');
+}
+
+registerAgentKind('dream-maintain', {
+  buildPrompt({ transcript, preferences }) {
+    const { language, custom } = promptAffixes(preferences);
+    // The transcript slot carries the orchestrator-serialized
+    // {"existing": [...], "candidates": [...]} JSON; non-JSON input is embedded
+    // verbatim instead of being forced into the template.
+    let existingList: string | null = null;
+    let candidateList: string | null = null;
+    try {
+      const payload = JSON.parse(transcript) as unknown;
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        throw new Error('not an object');
+      }
+      const input = payload as { existing?: unknown; candidates?: unknown };
+      existingList = renderDreamExistingList(input.existing);
+      candidateList = renderDreamCandidateList(input.candidates);
+    } catch { /* 原文嵌入 */ }
+    return [
+      {
+        role: 'system',
+        content: `你是 Vesti 记忆空间的维护者，负责把新提取的记忆合并进用户的长期记忆库，保持它精炼、准确、不过时。${language}${custom}`,
+      },
+      {
+        role: 'user',
+        content: existingList === null || candidateList === null
+          ? transcript
+          : `现有记忆条目（id | tag | 内容）：
+${existingList}
+
+新提取的候选记忆：
+${candidateList}
+
+对每条候选逐一判定，输出维护操作：
+- ADD：候选是全新事实 → 新建条目。
+- UPDATE：候选与某条目同主题且带来新信息或修正 → 更新该条目，content 输出合并后的完整新内容（不是增量）。
+- DELETE：候选证明某条目已过时或错误 → 删除该条目。
+- NOOP：候选与已有条目重复或无持久价值 → 跳过。
+另外：若两个现有条目冗余重复，可 UPDATE 保留者并 DELETE 另一者；若某条目明显过时也可主动 DELETE。
+
+要求：
+1. 合并后条目保持自包含、一两句话为主；title 为 4-12 字概括。
+2. tag 只能是 profile / preference / goal / emotion / relationship / event。
+3. 每条 op 附一句 reason。
+4. 严格只输出一个 JSON 对象（不要 Markdown 代码块）：
+{"ops": [{"op": "ADD|UPDATE|DELETE|NOOP", "target_id": "现有条目id或null", "tag": "...", "title": "...", "content": "...", "reason": "..."}]}`,
+      },
+    ];
+  },
+  parse(raw) {
+    return JSON.stringify(parseDreamMaintainPayload(raw));
   },
 });

@@ -798,3 +798,88 @@ describe('roundtable kinds (AI 圆桌)', () => {
     expect(() => definition.parse?.('  \n ')).toThrow('learn-deepen 输出为空');
   });
 });
+
+describe('dream-extract agent kind', () => {
+  it('builds the extractor prompt with the six tags and the strict-JSON contract', () => {
+    const messages = getAgentKindDefinition('dream-extract').buildPrompt({
+      transcript: 'TRANSCRIPT',
+      preferences: zhPreferences,
+    });
+    expect(messages[0].role).toBe('system');
+    expect(messages[0].content).toContain('「梦境」记忆提取器');
+    expect(messages[0].content).toContain('使用清晰、简洁的中文 Markdown。');
+    const prompt = messages[1].content;
+    expect(prompt).toContain('profile');
+    expect(prompt).toContain('preference');
+    expect(prompt).toContain('goal');
+    expect(prompt).toContain('emotion');
+    expect(prompt).toContain('relationship');
+    expect(prompt).toContain('event');
+    expect(prompt).toContain('{"memories"');
+    expect(prompt.endsWith('TRANSCRIPT')).toBe(true);
+  });
+
+  it('parse round-trips through the shared validator and re-serializes', () => {
+    const definition = getAgentKindDefinition('dream-extract');
+    const raw = '```json\n' + JSON.stringify({
+      memories: [
+        { tag: 'preference', fact: '偏好 pnpm', evidence: '多次指定 corepack', session_ids: ['s1'] },
+        { tag: 'bogus', fact: '会被丢弃', evidence: '', session_ids: [] },
+      ],
+    }) + '\n```';
+    const parsed = definition.parse?.(raw);
+    expect(JSON.parse(parsed ?? '')).toEqual([
+      { tag: 'preference', fact: '偏好 pnpm', evidence: '多次指定 corepack', session_ids: ['s1'] },
+    ]);
+    expect(() => definition.parse?.('不是 JSON')).toThrow('dream-extract 输出不是 JSON');
+  });
+});
+
+describe('dream-maintain agent kind', () => {
+  it('renders the serialized existing/candidates JSON into readable lists', () => {
+    const transcript = JSON.stringify({
+      existing: [
+        { id: 'dream:1', tag: 'preference', content: '偏好中文交流' },
+        { id: 'dream:2', tag: 'goal', title: '推进记忆空间' },
+      ],
+      candidates: [
+        { tag: 'goal', fact: '正在实现记忆空间存储层', evidence: '连续开发记录', session_ids: ['s1'] },
+      ],
+    });
+    const messages = getAgentKindDefinition('dream-maintain').buildPrompt({
+      transcript,
+      preferences: zhPreferences,
+    });
+    expect(messages[0].role).toBe('system');
+    expect(messages[0].content).toContain('记忆空间的维护者');
+    const prompt = messages[1].content;
+    expect(prompt).toContain('- dream:1 | preference | 偏好中文交流');
+    expect(prompt).toContain('- dream:2 | goal | 推进记忆空间');
+    expect(prompt).toContain('- [goal] 正在实现记忆空间存储层（依据：连续开发记录）');
+    expect(prompt).toContain('{"ops"');
+    expect(prompt).toContain('ADD：候选是全新事实');
+  });
+
+  it('falls back to embedding the transcript verbatim when it is not JSON', () => {
+    const messages = getAgentKindDefinition('dream-maintain').buildPrompt({
+      transcript: '随便一段原文',
+      preferences: zhPreferences,
+    });
+    expect(messages[1]).toEqual({ role: 'user', content: '随便一段原文' });
+  });
+
+  it('parse round-trips through the shared validator and re-serializes', () => {
+    const definition = getAgentKindDefinition('dream-maintain');
+    const raw = JSON.stringify({
+      ops: [
+        { op: 'ADD', target_id: null, tag: 'goal', title: '推进记忆空间', content: '正在实现存储层', reason: '新事实' },
+        { op: 'UPDATE', target_id: null, reason: '缺 target_id，丢弃' },
+      ],
+    });
+    const parsed = definition.parse?.(raw);
+    expect(JSON.parse(parsed ?? '')).toEqual([
+      { op: 'ADD', target_id: null, tag: 'goal', title: '推进记忆空间', content: '正在实现存储层', reason: '新事实' },
+    ]);
+    expect(() => definition.parse?.('   ')).toThrow('dream-maintain 输出不是 JSON');
+  });
+});

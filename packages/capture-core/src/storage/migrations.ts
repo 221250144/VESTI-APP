@@ -495,4 +495,68 @@ export const MIGRATIONS: Migration[] = [
       ).run();
     },
   },
+  {
+    version: 14,
+    name: 'memory_entries',
+    up(db) {
+      // 记忆空间 (memory space): unified long-term memory entries — deposits
+      // migrated out of the renderer's IndexedDB, dream memories, dream run
+      // logs and free notes — so the main process (and later MCP) can read
+      // them. memory_meta is a small kv table (migration watermarks etc.).
+      // FTS follows migration 5's tokenizer decision: unicode61 indexes a
+      // whole unspaced CJK run as ONE token, making Chinese facts
+      // unsearchable; use trigram when the build supports it.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS memory_entries (
+          id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL,
+          title TEXT NOT NULL DEFAULT '',
+          content_markdown TEXT NOT NULL DEFAULT '',
+          summary TEXT,
+          scope TEXT,
+          template TEXT,
+          source_session_ids TEXT NOT NULL DEFAULT '[]',
+          tags TEXT NOT NULL DEFAULT '[]',
+          version INTEGER NOT NULL DEFAULT 1,
+          prev_id TEXT,
+          last_ops TEXT,
+          status TEXT NOT NULL DEFAULT 'active',
+          entry_date TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_entries_kind ON memory_entries(kind, status, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_memory_entries_date ON memory_entries(entry_date);
+        CREATE TABLE IF NOT EXISTS memory_meta (key TEXT PRIMARY KEY, value TEXT);
+      `);
+      const tokenizer = probeFtsTokenizer(db, 'trigram') ? `,\n          tokenize='trigram'` : '';
+      db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS memory_entries_fts USING fts5(
+          title, content_markdown, tags,
+          content='memory_entries', content_rowid='rowid'${tokenizer}
+        )
+      `);
+      // Same trigger pattern as DatabaseManager.createFTS (messages_fts).
+      db.exec(`
+        CREATE TRIGGER IF NOT EXISTS mem_fts_insert AFTER INSERT ON memory_entries BEGIN
+          INSERT INTO memory_entries_fts(rowid, title, content_markdown, tags)
+          VALUES (new.rowid, new.title, new.content_markdown, new.tags);
+        END
+      `);
+      db.exec(`
+        CREATE TRIGGER IF NOT EXISTS mem_fts_delete AFTER DELETE ON memory_entries BEGIN
+          INSERT INTO memory_entries_fts(memory_entries_fts, rowid, title, content_markdown, tags)
+          VALUES ('delete', old.rowid, old.title, old.content_markdown, old.tags);
+        END
+      `);
+      db.exec(`
+        CREATE TRIGGER IF NOT EXISTS mem_fts_update AFTER UPDATE ON memory_entries BEGIN
+          INSERT INTO memory_entries_fts(memory_entries_fts, rowid, title, content_markdown, tags)
+          VALUES ('delete', old.rowid, old.title, old.content_markdown, old.tags);
+          INSERT INTO memory_entries_fts(rowid, title, content_markdown, tags)
+          VALUES (new.rowid, new.title, new.content_markdown, new.tags);
+        END
+      `);
+    },
+  },
 ];

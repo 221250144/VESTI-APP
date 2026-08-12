@@ -10,7 +10,7 @@ import path from 'path';
 import { MIGRATIONS, hasColumn } from './migrations.js';
 import { deriveProjectKey, projectBasis, projectLabel } from './projectRegistry.js';
 import { buildConversationTree, type ConversationTree } from '../tree/TreeIndex.js';
-import { recallSessions, type SessionRecallHit, type SessionRecallOptions } from '../search/SessionRecall.js';
+import { recallSessions, toFtsQuery, type SessionRecallHit, type SessionRecallOptions } from '../search/SessionRecall.js';
 import { detectForksByMessageOverlap } from '../tree/forks.js';
 import { buildProjectState, listProjectKeys } from '../state/projectState.js';
 import { getFileTimeline, type FileTimelineQuery } from '../state/fileTimeline.js';
@@ -37,6 +37,7 @@ import type {
   ProjectBrief,
   FileTimelineEvent,
   TokenUsageEvent,
+  MemoryEntry,
 } from '../types/unified.js';
 
 type Database = import('better-sqlite3').Database;
@@ -1960,6 +1961,172 @@ export class DatabaseManager {
       for (const id of sessionIds) stmt.run(id);
     });
     bump();
+  }
+
+  // ==================== Memory Entries (记忆空间, v14) ====================
+
+  upsertMemoryEntry(e: MemoryEntry): void {
+    this.getDb().prepare(`
+      INSERT INTO memory_entries (
+        id, kind, title, content_markdown, summary, scope, template,
+        source_session_ids, tags, version, prev_id, last_ops, status, entry_date,
+        created_at, updated_at
+      ) VALUES (
+        @id, @kind, @title, @contentMarkdown, @summary, @scope, @template,
+        @sourceSessionIds, @tags, @version, @prevId, @lastOps, @status, @entryDate,
+        @createdAt, @updatedAt
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        kind = excluded.kind,
+        title = excluded.title,
+        content_markdown = excluded.content_markdown,
+        summary = excluded.summary,
+        scope = excluded.scope,
+        template = excluded.template,
+        source_session_ids = excluded.source_session_ids,
+        tags = excluded.tags,
+        version = excluded.version,
+        prev_id = excluded.prev_id,
+        last_ops = excluded.last_ops,
+        status = excluded.status,
+        entry_date = excluded.entry_date,
+        created_at = excluded.created_at,
+        updated_at = excluded.updated_at
+    `).run({
+      id: e.id,
+      kind: e.kind,
+      title: e.title,
+      contentMarkdown: e.contentMarkdown,
+      summary: e.summary ?? null,
+      scope: e.scope ?? null,
+      template: e.template ?? null,
+      sourceSessionIds: JSON.stringify(e.sourceSessionIds ?? []),
+      tags: JSON.stringify(e.tags ?? []),
+      version: e.version,
+      prevId: e.prevId ?? null,
+      lastOps: e.lastOps ?? null,
+      status: e.status,
+      entryDate: e.entryDate ?? null,
+      createdAt: e.createdAt,
+      updatedAt: e.updatedAt,
+    });
+  }
+
+  getMemoryEntry(id: string): MemoryEntry | null {
+    const row = this.getDb().prepare('SELECT * FROM memory_entries WHERE id = ?').get(id) as any;
+    return row ? this.rowToMemoryEntry(row) : null;
+  }
+
+  listMemoryEntries(opts?: { kind?: string; status?: string; limit?: number; offset?: number }): MemoryEntry[] {
+    let sql = 'SELECT * FROM memory_entries WHERE 1=1';
+    const params: any[] = [];
+
+    if (opts?.kind) {
+      sql += ' AND kind = ?';
+      params.push(opts.kind);
+    }
+    if (opts?.status) {
+      sql += ' AND status = ?';
+      params.push(opts.status);
+    }
+    sql += ' ORDER BY updated_at DESC';
+    if (opts?.limit) {
+      sql += ' LIMIT ?';
+      params.push(opts.limit);
+    }
+    if (opts?.offset) {
+      sql += ' OFFSET ?';
+      params.push(opts.offset);
+    }
+
+    return (this.getDb().prepare(sql).all(...params) as any[]).map(r => this.rowToMemoryEntry(r));
+  }
+
+  /**
+   * FTS5 over title/content_markdown/tags. The query is escaped through
+   * toFtsQuery (each word token quoted, OR-combined) so user text can never
+   * break MATCH syntax; on builds where the FTS table is unusable the LIKE
+   * fallback keeps search working.
+   */
+  searchMemoryEntries(query: string, limit = 20): MemoryEntry[] {
+    const db = this.getDb();
+    const ftsQuery = toFtsQuery(query);
+    if (!ftsQuery) return [];
+    try {
+      const rows = db.prepare(`
+        SELECT e.*, rank
+        FROM memory_entries_fts fts
+        JOIN memory_entries e ON e.rowid = fts.rowid
+        WHERE memory_entries_fts MATCH ?
+        ORDER BY rank
+        LIMIT ?
+      `).all(ftsQuery, limit) as any[];
+      return rows.map(r => this.rowToMemoryEntry(r));
+    } catch {
+      // Fallback to LIKE
+      const pattern = `%${query}%`;
+      const rows = db.prepare(`
+        SELECT * FROM memory_entries
+        WHERE title LIKE ? OR content_markdown LIKE ? OR tags LIKE ?
+        ORDER BY updated_at DESC
+        LIMIT ?
+      `).all(pattern, pattern, pattern, limit) as any[];
+      return rows.map(r => this.rowToMemoryEntry(r));
+    }
+  }
+
+  /** Hard delete — archiving is an UPDATE of status, not a delete. */
+  deleteMemoryEntry(id: string): void {
+    this.getDb().prepare('DELETE FROM memory_entries WHERE id = ?').run(id);
+  }
+
+  countMemoryEntries(kind?: string): number {
+    const row = (kind
+      ? this.getDb().prepare('SELECT COUNT(*) AS c FROM memory_entries WHERE kind = ?').get(kind)
+      : this.getDb().prepare('SELECT COUNT(*) AS c FROM memory_entries').get()) as any;
+    return row?.c ?? 0;
+  }
+
+  getMemoryMeta(key: string): string | null {
+    const row = this.getDb().prepare('SELECT value FROM memory_meta WHERE key = ?').get(key) as any;
+    return row?.value ?? null;
+  }
+
+  setMemoryMeta(key: string, value: string): void {
+    this.getDb().prepare(`
+      INSERT INTO memory_meta (key, value) VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(key, value);
+  }
+
+  private rowToMemoryEntry(row: any): MemoryEntry {
+    const parseArray = (value: unknown): string[] => {
+      if (typeof value !== 'string' || !value) return [];
+      try {
+        const parsed = JSON.parse(value) as unknown;
+        return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
+      } catch {
+        return [];
+      }
+    };
+    return {
+      id: row.id,
+      kind: row.kind,
+      title: row.title ?? '',
+      contentMarkdown: row.content_markdown ?? '',
+      summary: row.summary ?? null,
+      scope: row.scope ?? null,
+      template: row.template ?? null,
+      sourceSessionIds: parseArray(row.source_session_ids),
+      tags: parseArray(row.tags),
+      version: row.version ?? 1,
+      prevId: row.prev_id ?? null,
+      lastOps: row.last_ops ?? null,
+      status: row.status ?? 'active',
+      entryDate: row.entry_date ?? null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
   }
 
   // ==================== Stats ====================

@@ -87,14 +87,14 @@ export function recencyFactor(lastActivityAt: number, now: number, tauDays: numb
 }
 
 /**
- * Detect the tokenizer of messages_fts ('trigram' on schema v5+, the
- * unicode61 default on older DBs). One cheap sqlite_master lookup per recall.
+ * Detect the tokenizer of an FTS table ('trigram' on schema v5+ messages_fts,
+ * the unicode61 default on older DBs). One cheap sqlite_master lookup per call.
  */
-export function detectFtsTokenizer(db: VestiDatabase): string {
+export function detectFtsTokenizer(db: VestiDatabase, ftsTable: string = 'messages_fts'): string {
   try {
     const row = db
-      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'")
-      .get() as { sql?: string } | undefined;
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(ftsTable) as { sql?: string } | undefined;
     return row?.sql?.toLowerCase().includes('trigram') ? 'trigram' : 'unicode61';
   } catch {
     return 'unicode61';

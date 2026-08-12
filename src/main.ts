@@ -62,6 +62,7 @@ import {
   type MembershipCredentials,
   type MembershipErrorCode,
   type MembershipStatus,
+  type MemoryEntryView,
   type NotionExportRequest,
   type RelayOutboxEnqueueRequest,
   type RelayPrepareCliRequest,
@@ -403,7 +404,7 @@ function validSessionId(value: unknown): value is string {
 function validAgentRequest(value: unknown): value is AgentRunRequest {
   if (!value || typeof value !== 'object') return false;
   const request = value as Partial<AgentRunRequest>;
-  return (request.kind === 'summary' || request.kind === 'explore' || request.kind === 'digest' || request.kind === 'classify' || request.kind === 'relay' || request.kind === 'extract' || request.kind === 'distill' || request.kind === 'deposit-maintain' || request.kind === 'daily' || request.kind === 'persona' || request.kind === 'roundtable-turn' || request.kind === 'roundtable-synthesis' || request.kind === 'learn-deepen' || request.kind === 'prompt-improve' || request.kind === 'prompt-continue')
+  return (request.kind === 'summary' || request.kind === 'explore' || request.kind === 'digest' || request.kind === 'classify' || request.kind === 'relay' || request.kind === 'extract' || request.kind === 'distill' || request.kind === 'deposit-maintain' || request.kind === 'daily' || request.kind === 'persona' || request.kind === 'roundtable-turn' || request.kind === 'roundtable-synthesis' || request.kind === 'learn-deepen' || request.kind === 'learn-synthesis' || request.kind === 'prompt-improve' || request.kind === 'prompt-continue' || request.kind === 'dream-extract' || request.kind === 'dream-maintain')
     && validSessionId(request.sessionId)
     && (request.question === undefined || typeof request.question === 'string')
     && (request.template === undefined || (typeof request.template === 'string' && request.template.length <= 64))
@@ -494,6 +495,52 @@ function validRelayOutboxEnqueueRequest(value: unknown): value is RelayOutboxEnq
   return typeof request.prompt === 'string'
     && request.prompt.trim().length > 0
     && request.prompt.length <= MAX_OUTBOX_PROMPT_CHARS;
+}
+
+// ---- 记忆空间 (memory_entries) IPC validation ----
+
+const MEMORY_ENTRY_KINDS = ['deposit', 'dream', 'dream-log', 'note'] as const;
+
+function validMemoryId(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 240 && /^[\w:.-]+$/.test(value);
+}
+
+function validMemoryMetaKey(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 200;
+}
+
+function isOptionalShortText(value: unknown, maxChars: number): boolean {
+  return value === undefined || value === null
+    || (typeof value === 'string' && value.length <= maxChars);
+}
+
+function isStringArray(value: unknown, maxItems: number): boolean {
+  return Array.isArray(value) && value.length <= maxItems
+    && value.every(item => typeof item === 'string');
+}
+
+function validMemoryEntry(value: unknown): value is MemoryEntryView {
+  if (!value || typeof value !== 'object') return false;
+  const entry = value as Partial<MemoryEntryView>;
+  return validMemoryId(entry.id)
+    && MEMORY_ENTRY_KINDS.includes(entry.kind as (typeof MEMORY_ENTRY_KINDS)[number])
+    && typeof entry.title === 'string' && entry.title.length <= 200
+    && typeof entry.contentMarkdown === 'string' && entry.contentMarkdown.length <= 100_000
+    && isOptionalShortText(entry.summary, 500)
+    && isOptionalShortText(entry.scope, 500)
+    && isOptionalShortText(entry.template, 500)
+    && isOptionalShortText(entry.entryDate, 500)
+    && isStringArray(entry.sourceSessionIds, 100)
+    && isStringArray(entry.tags, 100)
+    && Number.isInteger(entry.version) && (entry.version as number) >= 1
+    && (entry.prevId === undefined || entry.prevId === null || typeof entry.prevId === 'string')
+    && (entry.lastOps === undefined || entry.lastOps === null || typeof entry.lastOps === 'string')
+    && (entry.status === 'active' || entry.status === 'archived')
+    // 时间戳由主进程补（导入迁移路径除外，见 memoryImport handler）。
+    && (entry.createdAt === undefined
+      || (typeof entry.createdAt === 'number' && Number.isSafeInteger(entry.createdAt) && entry.createdAt >= 0))
+    && (entry.updatedAt === undefined
+      || (typeof entry.updatedAt === 'number' && Number.isSafeInteger(entry.updatedAt) && entry.updatedAt >= 0));
 }
 
 // CLIs the relay panel offers one-click launch commands for.
@@ -906,6 +953,72 @@ function registerIpc(): void {
     );
   });
   memberIpcHandle(IPC.extensionBridgeStatus, () => extensionBridge.getStatus());
+  // ---- 记忆空间 (memory_entries) ----
+  memberIpcHandle(IPC.memoryList, (_event, opts: unknown) => {
+    const input = (opts ?? {}) as { kind?: unknown; status?: unknown; limit?: unknown; offset?: unknown };
+    if (input.kind !== undefined
+      && !MEMORY_ENTRY_KINDS.includes(input.kind as (typeof MEMORY_ENTRY_KINDS)[number])) {
+      throw new Error('记忆条目请求无效');
+    }
+    if (input.status !== undefined && input.status !== 'active' && input.status !== 'archived') {
+      throw new Error('记忆条目请求无效');
+    }
+    if (input.limit !== undefined
+      && (!Number.isInteger(input.limit) || (input.limit as number) < 1 || (input.limit as number) > 500)) {
+      throw new Error('记忆条目请求无效');
+    }
+    if (input.offset !== undefined && (!Number.isInteger(input.offset) || (input.offset as number) < 0)) {
+      throw new Error('记忆条目请求无效');
+    }
+    return capture.listMemoryEntries({
+      kind: input.kind as MemoryEntryView['kind'] | undefined,
+      status: input.status as MemoryEntryView['status'] | undefined,
+      limit: input.limit as number | undefined,
+      offset: input.offset as number | undefined,
+    });
+  });
+  memberIpcHandle(IPC.memoryGet, (_event, ids: unknown) => {
+    if (!Array.isArray(ids) || ids.length > 50 || !ids.every(validMemoryId)) {
+      throw new Error('记忆条目请求无效');
+    }
+    return capture.getMemoryEntries(ids);
+  });
+  memberIpcHandle(IPC.memoryUpsert, (_event, entry: unknown) => {
+    if (!validMemoryEntry(entry)) throw new Error('记忆条目无效');
+    const now = Date.now();
+    capture.upsertMemoryEntry({ ...entry, createdAt: entry.createdAt ?? now, updatedAt: now });
+  });
+  memberIpcHandle(IPC.memoryDelete, (_event, id: unknown) => {
+    if (!validMemoryId(id)) throw new Error('记忆条目请求无效');
+    capture.deleteMemoryEntry(id);
+  });
+  memberIpcHandle(IPC.memorySearch, (_event, query: unknown, limit: unknown) => {
+    if (typeof query !== 'string' || !query.trim()) throw new Error('记忆检索请求无效');
+    const capped = typeof limit === 'number' && Number.isInteger(limit) && limit >= 1 && limit <= 20 ? limit : 10;
+    return capture.searchMemoryEntries(query.trim(), capped);
+  });
+  memberIpcHandle(IPC.memoryImport, (_event, entries: unknown) => {
+    // Dexie 沉淀的一次性迁移：批量 upsert，保留原始时间戳。
+    if (!Array.isArray(entries) || entries.length > 200 || !entries.every(validMemoryEntry)) {
+      throw new Error('记忆条目导入请求无效');
+    }
+    const now = Date.now();
+    return capture.importMemoryEntries(entries.map(entry => ({
+      ...entry,
+      createdAt: entry.createdAt ?? now,
+      updatedAt: entry.updatedAt ?? now,
+    })));
+  });
+  memberIpcHandle(IPC.memoryMetaGet, (_event, key: unknown) => {
+    if (!validMemoryMetaKey(key)) throw new Error('记忆元数据请求无效');
+    return capture.getMemoryMeta(key);
+  });
+  memberIpcHandle(IPC.memoryMetaSet, (_event, key: unknown, value: unknown) => {
+    if (!validMemoryMetaKey(key) || typeof value !== 'string' || value.length > 4_000) {
+      throw new Error('记忆元数据请求无效');
+    }
+    capture.setMemoryMeta(key, value);
+  });
   memberIpcHandle(IPC.extensionPairCodeCreate, () => extensionBridge.createPairCode());
   memberIpcHandle(IPC.extensionPairingWindowOpen, () => extensionBridge.openPairingWindow());
   memberIpcHandle(IPC.extensionClientDisconnect, (_event, clientId: unknown) => {

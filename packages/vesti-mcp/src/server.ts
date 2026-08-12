@@ -9,6 +9,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 import type { VestiDatabase } from './db.js';
+import { vestiMemoryGet, vestiMemorySearch } from './memory.js';
 import { vestiGetHandoffContext, vestiGetProjectContext } from './projectContext.js';
 import { vestiGetTurns, vestiProjectBrief, vestiSearch, vestiTimeline } from './tools.js';
 
@@ -23,6 +24,7 @@ const SERVER_INSTRUCTIONS = [
   'MERGE / CROSS-PROJECT WORK: pass every involved project path to vesti_get_project_context at once — besides per-project packs it returns cross-project links (shared files, shared topics, overlapping work windows).',
   'HANDOFF to another agent or session: call vesti_get_handoff_context, then assemble the handoff from its file anchors, open questions and verify-first hints; the receiving side must re-verify before trusting it.',
   'HISTORY DETAILS: vesti_search (keywords) → vesti_timeline (pick turns) → vesti_get_turns (only those turns). Never call vesti_get_turns without narrowing first — it is the expensive layer. confidence:"low" search hits are leads, not facts.',
+  'MEMORY SPACE (long-term memory about the user and their work): vesti_memory_search (keywords, or no query to browse newest) → vesti_memory_get (full documents by id). Kinds: deposit = the user’s long-term deposit documents (profile, project state, writing style); dream = durable facts about the user themself (preferences, goals, emotions) extracted by the dream pass; dream-log = per-run logs of that memory-consolidation pass.',
   'vesti_project_brief(project) fuzzy-matches a project name when you do not know its path.',
 ].join('\n');
 
@@ -66,6 +68,18 @@ const HANDOFF_CONTEXT_DESCRIPTION = [
   'Returns the project context block plus recent_user_messages (newest user intents across the project’s sessions), file_anchors (deterministic active-file timeline) and verify_first seeds (open questions to re-confirm, last failing steps to re-run) — every entry grounded in stored data, nothing invented.',
   'Resolve the project by session_id (its project), path, or neither (most recently active project).',
   'Then assemble the handoff yourself following the relay v2 shape (goal / state / files / decisions / verification / verifyFirst / handoffPrompt); heavy transcript compression is the VESTI app relay pipeline’s job, not this tool’s.',
+].join(' ');
+
+const MEMORY_SEARCH_DESCRIPTION = [
+  'Memory-space layer 1 of 2 — search VESTI’s long-term memory entries: deposit documents (kind "deposit"), durable facts about the user (kind "dream"), dream-run logs (kind "dream-log") and free notes (kind "note").',
+  'With a query: FTS over title/content/tags, returning up to limit index entries — id, kind, title, summary, entry_date, tags, updated_at and a ~160-char snippet.',
+  'Without a query: browse mode, newest entries first (updated_at DESC). kind and entry_date (YYYY-MM-DD) filter either mode.',
+  'Only active entries by default; pass include_archived for archived ones. Then call vesti_memory_get with the ids you actually want to read in full.',
+].join(' ');
+
+const MEMORY_GET_DESCRIPTION = [
+  'Memory-space layer 2 of 2 — full memory documents by id (ids come from vesti_memory_search).',
+  'Returns complete content_markdown, parsed source_session_ids and tags, the version chain (version, prev_id) and timestamps for up to 10 ids; unknown or filtered-out ids come back in missing.',
 ].join(' ');
 
 export function createVestiMcpServer(db: VestiDatabase): Server {
@@ -217,6 +231,59 @@ export function createVestiMcpServer(db: VestiDatabase): Server {
           },
         },
       },
+      {
+        name: 'vesti_memory_search',
+        description: MEMORY_SEARCH_DESCRIPTION,
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              description: 'Keywords to match over memory entries (FTS). Omit to browse newest first.',
+            },
+            kind: {
+              type: 'string',
+              enum: ['deposit', 'dream', 'dream-log', 'note'],
+              description: 'Restrict to one memory kind.',
+            },
+            entry_date: {
+              type: 'string',
+              description: 'Restrict to one entry date, YYYY-MM-DD.',
+            },
+            limit: {
+              type: 'integer',
+              description: 'Max entries to return (default 10, max 20).',
+              default: 10,
+            },
+            include_archived: {
+              type: 'boolean',
+              description: 'Include archived entries (default false — active only).',
+              default: false,
+            },
+          },
+        },
+      },
+      {
+        name: 'vesti_memory_get',
+        description: MEMORY_GET_DESCRIPTION,
+        inputSchema: {
+          type: 'object',
+          properties: {
+            ids: {
+              type: 'array',
+              items: { type: 'string' },
+              maxItems: 10,
+              description: 'Memory entry ids from vesti_memory_search (max 10).',
+            },
+            include_archived: {
+              type: 'boolean',
+              description: 'Also resolve archived ids (default false — they land in missing).',
+              default: false,
+            },
+          },
+          required: ['ids'],
+        },
+      },
     ],
   }));
 
@@ -242,6 +309,12 @@ export function createVestiMcpServer(db: VestiDatabase): Server {
           break;
         case 'vesti_get_handoff_context':
           payload = vestiGetHandoffContext(db, (args ?? {}) as Parameters<typeof vestiGetHandoffContext>[1]);
+          break;
+        case 'vesti_memory_search':
+          payload = vestiMemorySearch(db, (args ?? {}) as Parameters<typeof vestiMemorySearch>[1]);
+          break;
+        case 'vesti_memory_get':
+          payload = vestiMemoryGet(db, (args ?? {}) as Parameters<typeof vestiMemoryGet>[1]);
           break;
         default:
           return {

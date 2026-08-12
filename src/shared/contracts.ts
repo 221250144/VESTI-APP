@@ -249,7 +249,7 @@ export interface NotionExportResult {
   url: string;
 }
 
-export type AgentKind = 'summary' | 'explore' | 'digest' | 'classify' | 'relay' | 'extract' | 'distill' | 'deposit-maintain' | 'daily' | 'persona' | 'roundtable-turn' | 'roundtable-synthesis' | 'learn-deepen' | 'learn-synthesis' | 'prompt-improve' | 'prompt-continue';
+export type AgentKind = 'summary' | 'explore' | 'digest' | 'classify' | 'relay' | 'extract' | 'distill' | 'deposit-maintain' | 'daily' | 'persona' | 'roundtable-turn' | 'roundtable-synthesis' | 'learn-deepen' | 'learn-synthesis' | 'prompt-improve' | 'prompt-continue' | 'dream-extract' | 'dream-maintain';
 
 /** P4b deposit distillation templates ('custom' carries the user's own
  * instruction in AgentRunRequest.question). */
@@ -394,6 +394,39 @@ export interface FileTimelineEventView {
   toolCategory: string;
   isError: boolean;
   timestamp: number;
+}
+
+// ---- 记忆空间 (memory_entries, migration v14) ----
+// Field-for-field mirror of capture-core's MemoryEntry, redeclared here so
+// the renderer never imports the Node-only capture core.
+
+export type MemoryEntryKind = 'deposit' | 'dream' | 'dream-log' | 'note';
+
+export interface MemoryEntryView {
+  id: string;
+  kind: MemoryEntryKind;
+  title: string;
+  contentMarkdown: string;
+  summary?: string | null;
+  scope?: string | null;
+  template?: string | null;
+  sourceSessionIds: string[];
+  tags: string[];
+  version: number;
+  prevId?: string | null;
+  lastOps?: string | null;
+  status: 'active' | 'archived';
+  /** YYYY-MM-DD */
+  entryDate?: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MemoryEntryListOptions {
+  kind?: MemoryEntryKind;
+  status?: 'active' | 'archived';
+  limit?: number;
+  offset?: number;
 }
 
 export interface SessionRecallHit {
@@ -572,6 +605,14 @@ export const IPC = {
   agentMcpStatus: 'vesti:agent-mcp-status',
   agentMcpRegister: 'vesti:agent-mcp-register',
   agentMcpUnregister: 'vesti:agent-mcp-unregister',
+  memoryList: 'vesti:memory-list',
+  memoryGet: 'vesti:memory-get',
+  memoryUpsert: 'vesti:memory-upsert',
+  memoryDelete: 'vesti:memory-delete',
+  memorySearch: 'vesti:memory-search',
+  memoryImport: 'vesti:memory-import',
+  memoryMetaGet: 'vesti:memory-meta-get',
+  memoryMetaSet: 'vesti:memory-meta-set',
 } as const;
 
 // ---- Desktop floating capsule ----
@@ -999,6 +1040,16 @@ export interface VestiDesktopApi {
   enqueueRelayOutbox(request: RelayOutboxEnqueueRequest): Promise<RelayOutboxEnqueueResult>;
   getRelaySessionContexts(sessionIds: string[]): Promise<RelaySessionContext[]>;
   getRelayFileTouches(sessionIds: string[]): Promise<RelayFileTouchRow[]>;
+  // ---- 记忆空间 (memory_entries) ----
+  listMemoryEntries(options?: MemoryEntryListOptions): Promise<MemoryEntryView[]>;
+  getMemoryEntries(ids: string[]): Promise<MemoryEntryView[]>;
+  upsertMemoryEntry(entry: MemoryEntryView): Promise<void>;
+  deleteMemoryEntry(id: string): Promise<void>;
+  searchMemoryEntries(query: string, limit?: number): Promise<MemoryEntryView[]>;
+  /** One-shot Dexie deposit migration; preserves original timestamps. */
+  importMemoryEntries(entries: MemoryEntryView[]): Promise<number>;
+  getMemoryMeta(key: string): Promise<string | null>;
+  setMemoryMeta(key: string, value: string): Promise<void>;
 }
 
 /** Authentication bridge available before the product shell is unlocked. */

@@ -255,6 +255,127 @@ export function createFixtureDb(): Fixture {
   };
 }
 
+export const MEM_DEPOSIT = 'mem-deposit-1';
+export const MEM_DREAM = 'mem-dream-1';
+export const MEM_DREAM_LOG = 'mem-dreamlog-1';
+export const MEM_NOTE = 'mem-note-1';
+/** An archived dream entry — invisible unless include_archived is passed. */
+export const MEM_ARCHIVED = 'mem-archived-1';
+
+export const MEM_TIMES = {
+  deposit: Date.UTC(2026, 0, 5, 12, 0, 0),
+  dream: Date.UTC(2026, 0, 8, 12, 0, 0),
+  dreamLog: Date.UTC(2026, 0, 9, 12, 0, 0),
+  note: Date.UTC(2026, 0, 10, 12, 0, 0),
+  archived: Date.UTC(2026, 0, 6, 12, 0, 0),
+} as const;
+
+/**
+ * Upgrade a fixture database to the schema-v14 memory space: memory_entries +
+ * memory_meta + memory_entries_fts with the same triggers (and the same
+ * trigram-tokenizer probe) as capture-core migration 14, seeded with one
+ * entry per kind plus an archived one. Opens and closes its own connection.
+ */
+export function upgradeFixtureToMemorySpace(dbPath: string): void {
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS memory_entries (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      title TEXT NOT NULL DEFAULT '',
+      content_markdown TEXT NOT NULL DEFAULT '',
+      summary TEXT,
+      scope TEXT,
+      template TEXT,
+      source_session_ids TEXT NOT NULL DEFAULT '[]',
+      tags TEXT NOT NULL DEFAULT '[]',
+      version INTEGER NOT NULL DEFAULT 1,
+      prev_id TEXT,
+      last_ops TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      entry_date TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_memory_entries_kind ON memory_entries(kind, status, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_memory_entries_date ON memory_entries(entry_date);
+    CREATE TABLE IF NOT EXISTS memory_meta (key TEXT PRIMARY KEY, value TEXT);
+  `);
+  let tokenizer = '';
+  try {
+    db.exec("CREATE VIRTUAL TABLE _fts_tokenizer_probe USING fts5(x, tokenize='trigram')");
+    db.exec('DROP TABLE _fts_tokenizer_probe');
+    tokenizer = ",\n  tokenize='trigram'";
+  } catch {
+    try { db.exec('DROP TABLE IF EXISTS _fts_tokenizer_probe'); } catch { /* probe best-effort */ }
+  }
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS memory_entries_fts USING fts5(
+      title, content_markdown, tags,
+      content='memory_entries', content_rowid='rowid'${tokenizer}
+    )
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS mem_fts_insert AFTER INSERT ON memory_entries BEGIN
+      INSERT INTO memory_entries_fts(rowid, title, content_markdown, tags)
+      VALUES (new.rowid, new.title, new.content_markdown, new.tags);
+    END;
+    CREATE TRIGGER IF NOT EXISTS mem_fts_delete AFTER DELETE ON memory_entries BEGIN
+      INSERT INTO memory_entries_fts(memory_entries_fts, rowid, title, content_markdown, tags)
+      VALUES ('delete', old.rowid, old.title, old.content_markdown, old.tags);
+    END;
+    CREATE TRIGGER IF NOT EXISTS mem_fts_update AFTER UPDATE ON memory_entries BEGIN
+      INSERT INTO memory_entries_fts(memory_entries_fts, rowid, title, content_markdown, tags)
+      VALUES ('delete', old.rowid, old.title, old.content_markdown, old.tags);
+      INSERT INTO memory_entries_fts(rowid, title, content_markdown, tags)
+      VALUES (new.rowid, new.title, new.content_markdown, new.tags);
+    END;
+  `);
+
+  const insert = db.prepare(
+    `INSERT INTO memory_entries (id, kind, title, content_markdown, summary, scope, template,
+                                 source_session_ids, tags, version, prev_id, last_ops, status,
+                                 entry_date, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  insert.run(
+    MEM_DEPOSIT, 'deposit', '个人背景与写作风格',
+    '# 个人背景\n\n用户是独立开发者，笔名小蜂。写作风格：短句，口语化，先结论后论证。\n\n当前项目：VESTI（本地 AI 会话记忆工具）。',
+    '个人背景、写作风格与当前项目状态', 'personal', 'profile',
+    '[]', JSON.stringify(['profile', 'writing']), 3, null, '[]', 'active',
+    '2026-01-05', MEM_TIMES.deposit, MEM_TIMES.deposit,
+  );
+  insert.run(
+    MEM_DREAM, 'dream', '用户偏好：简洁输出',
+    '用户多次要求输出保持简洁、先给结论，对冗长解释表现出不耐烦。涉及性能话题时情绪明显更投入。',
+    '偏好简洁、结论先行的回答', null, null,
+    JSON.stringify([SESSION_A]), JSON.stringify(['preference', 'communication']), 1, null, '[]', 'active',
+    '2026-01-08', MEM_TIMES.dream, MEM_TIMES.dream,
+  );
+  insert.run(
+    MEM_DREAM_LOG, 'dream-log', '梦境整理日志 2026-01-09',
+    '本次做梦处理了 3 个会话，提取 1 条长期记忆，归档 0 条。耗时 42 秒。',
+    null, null, null,
+    JSON.stringify([SESSION_A, SESSION_B]), '[]', 1, null, '[]', 'active',
+    '2026-01-09', MEM_TIMES.dreamLog, MEM_TIMES.dreamLog,
+  );
+  insert.run(
+    MEM_NOTE, 'note', '随手记：MCP 工具命名',
+    '记忆空间的 MCP 工具命名定为 vesti_memory_search / vesti_memory_get。',
+    null, null, null,
+    '[]', JSON.stringify(['vesti']), 1, null, '[]', 'active',
+    '2026-01-10', MEM_TIMES.note, MEM_TIMES.note,
+  );
+  insert.run(
+    MEM_ARCHIVED, 'dream', '旧记忆：已归档的偏好',
+    '这条关于旧编辑器快捷键的记忆已经过时并被归档 (deprecated)。',
+    null, null, null,
+    '[]', JSON.stringify(['preference']), 2, MEM_DREAM, '[]', 'archived',
+    '2026-01-06', MEM_TIMES.archived, MEM_TIMES.archived,
+  );
+  db.close();
+}
+
 export const PROJECT_KEY = 'cli-path-key-vesti';
 
 /**

@@ -352,6 +352,36 @@ export interface FileTimelineEvent {
   timestamp: number;             // ms epoch
 }
 
+// ==================== Memory Entries (记忆空间, migration v14) ====================
+
+/**
+ * 记忆空间条目：沉淀（deposit）、梦境记忆（dream）、梦境运行日志（dream-log）
+ * 与自由笔记（note）的统一存储。渲染侧的沉淀区原先存在 IndexedDB，主进程与
+ * MCP 都看不到；migration v14 起统一落 SQLite。kind/status 在 TS 侧收窄，
+ * SQLite 侧存字符串。
+ *
+ * `version` 每次维护（dream-maintain 合并等）递增；`prevId` 指向被取代的
+ * 前一条目；`lastOps` 保存最近一次维护操作的 JSON ops 日志。
+ */
+export interface MemoryEntry {
+  id: string;
+  kind: 'deposit' | 'dream' | 'dream-log' | 'note';
+  title: string;
+  contentMarkdown: string;
+  summary?: string | null;
+  scope?: string | null;
+  template?: string | null;
+  sourceSessionIds: string[];    // stored as a JSON array
+  tags: string[];                // stored as a JSON array
+  version: number;
+  prevId?: string | null;
+  lastOps?: string | null;
+  status: 'active' | 'archived';
+  entryDate?: string | null;     // YYYY-MM-DD
+  createdAt: number;             // ms epoch
+  updatedAt: number;             // ms epoch
+}
+
 // ==================== Project Registry (P1.5) ====================
 
 export interface ProjectRegistryEntry {

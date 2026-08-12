@@ -97,6 +97,15 @@ const api: VestiDesktopApi = {
   enqueueRelayOutbox: request => ipcRenderer.invoke(IPC.relayOutboxEnqueue, request),
   getRelaySessionContexts: sessionIds => ipcRenderer.invoke(IPC.relaySessionContexts, sessionIds),
   getRelayFileTouches: sessionIds => ipcRenderer.invoke(IPC.relayFileTouches, sessionIds),
+  // ---- 记忆空间 (memory_entries) ----
+  listMemoryEntries: options => ipcRenderer.invoke(IPC.memoryList, options),
+  getMemoryEntries: ids => ipcRenderer.invoke(IPC.memoryGet, ids),
+  upsertMemoryEntry: entry => ipcRenderer.invoke(IPC.memoryUpsert, entry),
+  deleteMemoryEntry: id => ipcRenderer.invoke(IPC.memoryDelete, id),
+  searchMemoryEntries: (query, limit) => ipcRenderer.invoke(IPC.memorySearch, query, limit),
+  importMemoryEntries: entries => ipcRenderer.invoke(IPC.memoryImport, entries),
+  getMemoryMeta: key => ipcRenderer.invoke(IPC.memoryMetaGet, key),
+  setMemoryMeta: (key, value) => ipcRenderer.invoke(IPC.memoryMetaSet, key, value),
 };
 
 const uiPrefs: VestiUiPrefsApi = {

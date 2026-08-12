@@ -9,6 +9,8 @@ export type {
   TurnContent,
   TurnToolExecution,
 } from './tools.js';
+export { hasMemorySpace, vestiMemoryGet, vestiMemorySearch } from './memory.js';
+export type { MemoryEntryFull, MemorySearchEntry } from './memory.js';
 export {
   normalizeProjectPath,
   deriveProjectKey,

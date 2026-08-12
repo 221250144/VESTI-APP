@@ -12,8 +12,10 @@ The agent registers this package as a local stdio MCP server. On session start i
 | 3 | `vesti_get_turns(session_id, turn_ids \| range, max_chars=8000)` | bounded by `max_chars` | Full user/assistant message text + tool-call summaries for the selected turns; sets `truncated: true` when the budget cuts output |
 | — | `vesti_project_brief(project)` | one card + one doc | Project memory by fuzzy name: L0 "current state card" + L2 LLM-maintained brief. Prefer `vesti_get_project_context` when you know the path. |
 | — | `vesti_get_handoff_context(path \| session_id, user_messages=8)` | one pack | Light handoff material aligned with the app's relay v2 schema: the project block + newest user messages + file anchors + `verify_first` seeds (open questions to re-confirm, last failing steps to re-run). All machine-extracted; heavy transcript compression stays in the desktop app. |
+| M1 | `vesti_memory_search(query?, kind?, entry_date?, limit=10)` | ~150 tokens/entry | **Memory space** (schema v14) index entries: `id`, kind, title, summary, entry_date, tags, updated_at, ~160-char snippet. With a query it FTS-matches title/content/tags; without one it browses newest first. `kind` ∈ `deposit` / `dream` / `dream-log` / `note`; active entries only unless `include_archived`. |
+| M2 | `vesti_memory_get(ids, include_archived?)` | full docs | Full memory documents by id (max 10): complete `content_markdown`, parsed `source_session_ids`/`tags`, version chain (`version`, `prev_id`), timestamps. Unknown ids come back in `missing`. |
 
-The server's MCP `instructions` tell the connecting agent the behavior contract directly: call `vesti_get_project_context` with its cwd at session start, use multi-path mode for merges, `vesti_get_handoff_context` before handing off, and never call `vesti_get_turns` without narrowing through search + timeline first.
+The server's MCP `instructions` tell the connecting agent the behavior contract directly: call `vesti_get_project_context` with its cwd at session start, use multi-path mode for merges, `vesti_get_handoff_context` before handing off, and never call `vesti_get_turns` without narrowing through search + timeline first. The memory space has the same two-step discipline: `vesti_memory_search` (or browse) → `vesti_memory_get` only for the ids worth reading in full. `deposit` entries are the user's long-term deposit documents (profile, project state, writing style); `dream` entries are durable facts about the user themself (preferences, goals, emotions) extracted by the dream pass; `dream-log` entries are the per-run logs of that pass. On a pre-v14 database the memory tools answer with a friendly "memory space not set up" message instead of an error stack.
 
 Recall is FTS5-based (over `messages_fts` + `sessions_fts`, RRF-fused — the same ranking as capture-core's `SessionRecall`). Digest embeddings are only fused when an embedding service supplies a query vector; the MCP server has none, so it degrades to pure FTS exactly as `SessionRecall` does without a vector.
 
@@ -96,6 +98,10 @@ work; it also reports cross-project links). Only then fill the gaps:
 1. `vesti_search` with a few keywords → session candidates (~100 tokens each).
 2. `vesti_timeline` on the best session_id → turn outline; locate the passage.
 3. `vesti_get_turns` with only the turn seq numbers you need → full content.
+
+Long-term memory about me (profile, preferences, project state, dream-pass
+logs) lives in the memory space: `vesti_memory_search` (keywords, or no query
+to browse) → `vesti_memory_get` with only the ids worth reading in full.
 
 Before handing work to another agent/session, `vesti_get_handoff_context`
 ships file anchors, recent user messages and verify-first seeds. Never call
@@ -234,11 +240,64 @@ sessions comes back in `unmatched_paths` with the known projects in `hints`.
 }
 ```
 
+`vesti_memory_search({ query: "写作风格" })` →
+
+```json
+{
+  "query": "写作风格",
+  "kind": null,
+  "count": 1,
+  "results": [
+    {
+      "id": "mem-deposit-1",
+      "kind": "deposit",
+      "title": "个人背景与写作风格",
+      "summary": "个人背景、写作风格与当前项目状态",
+      "entry_date": "2026-01-05",
+      "tags": ["profile", "writing"],
+      "updated_at": "2026-01-05T12:00:00.000Z",
+      "snippet": "# 个人背景 用户是独立开发者，笔名小蜂。写作风格：短句，口语化，先结论后论证。 当前项目：VESTI（本地 AI 会话记忆工具）。"
+    }
+  ]
+}
+```
+
+`vesti_memory_get({ ids: ["mem-dream-1", "mem-nope"] })` →
+
+```json
+{
+  "requested": 2,
+  "count": 1,
+  "missing": ["mem-nope"],
+  "entries": [
+    {
+      "id": "mem-dream-1",
+      "kind": "dream",
+      "title": "用户偏好：简洁输出",
+      "content_markdown": "用户多次要求输出保持简洁、先给结论，对冗长解释表现出不耐烦。涉及性能话题时情绪明显更投入。",
+      "summary": "偏好简洁、结论先行的回答",
+      "scope": null,
+      "template": null,
+      "source_session_ids": ["ws-aaa-001"],
+      "tags": ["preference", "communication"],
+      "version": 1,
+      "prev_id": null,
+      "last_ops": "[]",
+      "status": "active",
+      "entry_date": "2026-01-08",
+      "created_at": "2026-01-08T12:00:00.000Z",
+      "updated_at": "2026-01-08T12:00:00.000Z"
+    }
+  ]
+}
+```
+
 ## Layout
 
 - `src/db.ts` — db path resolution (`VESTI_DB_PATH` → `~/.vesti/db/vesti.db`) and database open (write policy: only digest access-count bumps)
 - `src/recall.ts` — FTS5 + RRF recall (port of capture-core `SessionRecall`, pure-FTS path)
 - `src/tools.ts` — the three layer implementations + `vesti_project_brief`
+- `src/memory.ts` — the memory-space pair `vesti_memory_search` / `vesti_memory_get` (schema v14, same tokenizer-aware FTS strategy as recall)
 - `src/projectContext.ts` — `vesti_get_project_context` / `vesti_get_handoff_context`: project key derivation (port of capture-core `projectRegistry`), per-key memory-layer merge, cross-project links
 - `src/server.ts` — MCP wiring on the official `@modelcontextprotocol/sdk` (low-level `Server`, hand-written JSON Schemas, no zod), including the session-start behavior contract in `instructions`
 - `src/cli.ts` — stdio entry (`bin: vesti-mcp`)

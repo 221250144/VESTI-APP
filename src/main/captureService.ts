@@ -10,6 +10,7 @@ import {
   workSessionToVestiConversation,
   type ConversationTree,
   type FileTimelineEvent,
+  type MemoryEntry,
   type ProjectBrief,
   type ProjectState,
   type SessionDigest,
@@ -360,6 +361,50 @@ export class CaptureService {
 
   getFileTimeline(query: { projectKey?: string; filePath: string; limit?: number }): FileTimelineEvent[] {
     return this.db.getFileTimeline(query);
+  }
+
+  // ---- 记忆空间 (memory_entries, v14): renderer bridge surface ----
+
+  upsertMemoryEntry(entry: MemoryEntry): void {
+    this.db.upsertMemoryEntry(entry);
+  }
+
+  getMemoryEntry(id: string): MemoryEntry | null {
+    return this.db.getMemoryEntry(id);
+  }
+
+  /** Batch variant of getMemoryEntry: misses are dropped, order preserved. */
+  getMemoryEntries(ids: string[]): MemoryEntry[] {
+    return ids.flatMap(id => {
+      const entry = this.db.getMemoryEntry(id);
+      return entry ? [entry] : [];
+    });
+  }
+
+  /** Bulk upsert for the one-shot Dexie deposit migration (keeps timestamps). */
+  importMemoryEntries(entries: MemoryEntry[]): number {
+    for (const entry of entries) this.db.upsertMemoryEntry(entry);
+    return entries.length;
+  }
+
+  listMemoryEntries(opts?: { kind?: string; status?: string; limit?: number; offset?: number }): MemoryEntry[] {
+    return this.db.listMemoryEntries(opts);
+  }
+
+  searchMemoryEntries(query: string, limit: number): MemoryEntry[] {
+    return this.db.searchMemoryEntries(query, limit);
+  }
+
+  deleteMemoryEntry(id: string): void {
+    this.db.deleteMemoryEntry(id);
+  }
+
+  getMemoryMeta(key: string): string | null {
+    return this.db.getMemoryMeta(key);
+  }
+
+  setMemoryMeta(key: string, value: string): void {
+    this.db.setMemoryMeta(key, value);
   }
 
   /**
