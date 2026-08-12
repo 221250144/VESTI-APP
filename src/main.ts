@@ -405,12 +405,15 @@ function validSessionId(value: unknown): value is string {
 function validAgentRequest(value: unknown): value is AgentRunRequest {
   if (!value || typeof value !== 'object') return false;
   const request = value as Partial<AgentRunRequest>;
+  // dream batches pack many sessions per LLM call for throughput and get a
+  // raised override budget; every other kind keeps the original 30K cap.
+  const transcriptCap = request.kind === 'dream-extract' || request.kind === 'dream-maintain' ? 60_000 : 30_000;
   return (request.kind === 'summary' || request.kind === 'explore' || request.kind === 'digest' || request.kind === 'classify' || request.kind === 'relay' || request.kind === 'extract' || request.kind === 'distill' || request.kind === 'deposit-maintain' || request.kind === 'daily' || request.kind === 'persona' || request.kind === 'roundtable-turn' || request.kind === 'roundtable-synthesis' || request.kind === 'learn-deepen' || request.kind === 'learn-synthesis' || request.kind === 'prompt-improve' || request.kind === 'prompt-continue' || request.kind === 'dream-extract' || request.kind === 'dream-maintain' || request.kind === 'companion')
     && validSessionId(request.sessionId)
     && (request.question === undefined || typeof request.question === 'string')
     && (request.template === undefined || (typeof request.template === 'string' && request.template.length <= 64))
     && (request.transcriptOverride === undefined
-      || (typeof request.transcriptOverride === 'string' && request.transcriptOverride.length <= 30_000))
+      || (typeof request.transcriptOverride === 'string' && request.transcriptOverride.length <= transcriptCap))
     && (request.persist === undefined || typeof request.persist === 'boolean')
     && (request.modelId === undefined
       || (typeof request.modelId === 'string' && request.modelId.length <= 100));

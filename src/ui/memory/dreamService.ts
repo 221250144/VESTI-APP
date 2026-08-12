@@ -24,13 +24,18 @@ import { pad2, toLocalDateString, todayDateString } from "../daily/dailyActivity
 
 // ---- Tunables ----------------------------------------------------------------
 
-/** Per-batch transcript budget. The main process caps transcriptOverride at
- * 30K; 24K leaves headroom for the prompt template around it. */
-export const DREAM_BATCH_BUDGET_CHARS = 24_000;
+/** Per-batch transcript budget. dream-extract/dream-maintain get a raised
+ * 60K transcriptOverride cap in main.ts's validAgentRequest (other kinds stay
+ * at 30K); 48K leaves headroom for the prompt template around it. */
+export const DREAM_BATCH_BUDGET_CHARS = 48_000;
 /** AI turns are truncated to this many chars; user turns stay whole. */
 export const DREAM_ASSISTANT_SNIPPET_CHARS = 300;
-/** Pause between extract batches so a full sweep doesn't flood the gateway. */
-export const DREAM_EXTRACT_DELAY_MS = 500;
+/** Concurrent extract lanes. A first full sweep means dozens of batches and
+ * the LLM endpoint tolerates a few parallel calls; 3 keeps the gateway calm
+ * while cutting wall time ~3x. */
+export const DREAM_EXTRACT_LANES = 3;
+/** Pause between extract batches per lane so a full sweep doesn't flood the gateway. */
+export const DREAM_EXTRACT_DELAY_MS = 300;
 /** Existing-library cap fed into the maintain step. */
 export const DREAM_EXISTING_LIMIT = 500;
 /** Candidates per maintain round; large sweeps run at most two rounds. */
@@ -601,29 +606,52 @@ export async function runDreamPipeline(
     const batches = packDreamBatches(blocks);
 
     // ---- extract --------------------------------------------------------------
+    // Parallel lanes: batches are independent; results are collected per batch
+    // index so candidate order stays deterministic. `cursor++` between awaits
+    // is safe (JS runs to completion between suspension points).
+    console.info(`[dream] collect done: ${blocks.length} sessions -> ${batches.length} batches, extract with ${Math.min(DREAM_EXTRACT_LANES, batches.length)} lanes`);
     const candidates: DreamMemoryCandidate[] = [];
     const warnings: string[] = [];
-    for (let index = 0; index < batches.length; index += 1) {
-      progress({
-        phase: "extract",
-        batchIndex: index,
-        batchCount: batches.length,
-        message: `正在提取记忆（${index + 1}/${batches.length}）…`,
-      });
-      try {
-        const result = await api.runAgent({
-          kind: "dream-extract",
-          sessionId: batchAnchor(batches[index]),
-          transcriptOverride: batches[index].text,
-          persist: false,
+    const laneResults: Array<DreamMemoryCandidate[] | null> = new Array(batches.length).fill(null);
+    let cursor = 0;
+    let finished = 0;
+    let failures = 0;
+    const worker = async (): Promise<void> => {
+      while (cursor < batches.length) {
+        const index = cursor;
+        cursor += 1;
+        progress({
+          phase: "extract",
+          batchIndex: finished,
+          batchCount: batches.length,
+          message: `正在提取记忆（完成 ${finished}/${batches.length}）…`,
         });
-        candidates.push(...parseDreamExtractResult(result.content));
-      } catch (error) {
-        warnings.push(`批次 ${index + 1} 提取失败：${errorMessage(error)}`);
+        const startedAt = deps.now();
+        try {
+          const result = await api.runAgent({
+            kind: "dream-extract",
+            sessionId: batchAnchor(batches[index]),
+            transcriptOverride: batches[index].text,
+            persist: false,
+          });
+          laneResults[index] = parseDreamExtractResult(result.content);
+        } catch (error) {
+          failures += 1;
+          warnings.push(`批次 ${index + 1} 提取失败：${errorMessage(error)}`);
+          laneResults[index] = [];
+        }
+        finished += 1;
+        console.info(`[dream] extract batch ${index + 1}/${batches.length} done in ${Math.round((deps.now() - startedAt) / 1000)}s (${laneResults[index]?.length ?? 0} candidates)`);
+        if (cursor < batches.length) await deps.sleep(DREAM_EXTRACT_DELAY_MS);
       }
-      if (index + 1 < batches.length) await deps.sleep(DREAM_EXTRACT_DELAY_MS);
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(DREAM_EXTRACT_LANES, batches.length) }, () => worker()),
+    );
+    for (const laneResult of laneResults) {
+      if (laneResult) candidates.push(...laneResult);
     }
-    if (candidates.length === 0 && warnings.length === batches.length) {
+    if (candidates.length === 0 && failures === batches.length) {
       // Total extract outage: fail the run without touching the watermarks,
       // so the sessions are retried on the next pass.
       return {
@@ -640,6 +668,7 @@ export async function runDreamPipeline(
     const updatedEntries: MemoryEntryView[] = [];
     if (candidates.length > 0) {
       progress({ phase: "maintain", message: "正在合并长期记忆…" });
+      console.info(`[dream] maintain: ${candidates.length} candidates`);
       const existing = await api
         .listMemoryEntries({ kind: "dream", status: "active", limit: DREAM_EXISTING_LIMIT })
         .catch(() => [] as MemoryEntryView[]);
@@ -727,6 +756,7 @@ export async function runDreamPipeline(
     await api.setMemoryMeta(META_LAST_RUN_AT, String(deps.now()));
     await api.setMemoryMeta(META_LAST_SESSION_TS, String(maxSessionTs));
     await api.setMemoryMeta(META_FIRST_FULL_DONE, "1");
+    console.info(`[dream] run done: ${summary}${warnings.length ? `, ${warnings.length} warnings` : ""}`);
 
     // Announce the finished run on the capsule bubble. Best-effort: a hidden
     // capsule, an open panel, or a partial window.vesti mock all fail silently

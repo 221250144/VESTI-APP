@@ -192,19 +192,21 @@ describe("renderDreamSessionBlock", () => {
 
 describe("packDreamBatches", () => {
   it("packs small blocks together up to the budget", () => {
-    // 11999 + 2 (separator) + 11999 = 24000 exactly → one batch.
-    const [batch] = packDreamBatches([makeBlock("a", 11_999), makeBlock("b", 11_999)]);
+    // half + 2 (separator) + half = budget exactly → one batch.
+    const half = (DREAM_BATCH_BUDGET_CHARS - 2) / 2;
+    const [batch] = packDreamBatches([makeBlock("a", half), makeBlock("b", half)]);
     expect(batch.sessionIds).toEqual(["a", "b"]);
     expect(batch.text.length).toBe(DREAM_BATCH_BUDGET_CHARS);
   });
 
   it("opens a new batch when the next block would cross the budget", () => {
-    const batches = packDreamBatches([makeBlock("a", 12_000), makeBlock("b", 12_000)]);
+    const half = DREAM_BATCH_BUDGET_CHARS / 2;
+    const batches = packDreamBatches([makeBlock("a", half), makeBlock("b", half)]);
     expect(batches.map((b) => b.sessionIds)).toEqual([["a"], ["b"]]);
   });
 
   it("hard-cuts a single oversized session into budget-sized batches", () => {
-    const big = makeBlock("big", 50_000);
+    const big = makeBlock("big", DREAM_BATCH_BUDGET_CHARS * 2 + 10_000);
     const batches = packDreamBatches([big]);
     expect(batches).toHaveLength(3);
     for (const batch of batches) {
@@ -225,7 +227,7 @@ describe("packDreamBatches", () => {
   it("flushes the current batch around an oversized block", () => {
     const batches = packDreamBatches([
       makeBlock("a", 100),
-      makeBlock("big", 50_000),
+      makeBlock("big", DREAM_BATCH_BUDGET_CHARS * 2 + 10_000),
       makeBlock("b", 100),
     ]);
     expect(batches.map((batch) => batch.sessionIds)).toEqual([
@@ -484,8 +486,8 @@ describe("runDreamPipeline", () => {
   it("tolerates a failed extract batch and records the warning in the journal", async () => {
     const bigSessions = [makeSession({ id: 1 }), makeSession({ id: 2 })];
     const bigMessages = {
-      1: [{ role: "user" as const, contentText: `甲${"长".repeat(19_000)}` }],
-      2: [{ role: "user" as const, contentText: `乙${"长".repeat(19_000)}` }],
+      1: [{ role: "user" as const, contentText: `甲${"长".repeat(30_000)}` }],
+      2: [{ role: "user" as const, contentText: `乙${"长".repeat(30_000)}` }],
     };
     let extractCalls = 0;
     const { calls } = makeVestiMock({
