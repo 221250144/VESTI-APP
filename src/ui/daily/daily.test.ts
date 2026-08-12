@@ -14,6 +14,7 @@ import {
   computeDailyStreak,
   lastNDates,
   localDayRange,
+  rollupSubagentActivityTimes,
   toLocalDateString,
   type DailyConversationInput,
   type DailyDigestInput,
@@ -175,6 +176,46 @@ describe("collectDailyActivity", () => {
       summaries: [],
     });
     expect(activity.items.map((item) => item.id)).toEqual([1, 2]);
+  });
+});
+
+// ---- Subagent activity roll-up --------------------------------------------------
+
+describe("rollupSubagentActivityTimes", () => {
+  it("rolls a folded subagent's activity into its parent's effective time", () => {
+    const parentAt = localTs(2026, 7, 17, 10);
+    const subAt = localTs(2026, 7, 18, 16);
+    const rolled = rollupSubagentActivityTimes([
+      { id: 1, updated_at: parentAt, _cli_id: "kimi-code:session-p1" },
+      { id: 2, updated_at: subAt, _subagent_of: "kimi-code:session-p1" },
+      { id: 3, updated_at: localTs(2026, 7, 10, 8), _subagent_of: "kimi-code:session-p1" },
+    ]);
+    // Parent inherits the newest subagent time; subs keep their own time
+    // (they are filtered out of the daily inputs downstream).
+    expect(rolled.get(1)).toBe(subAt);
+    expect(rolled.get(2)).toBe(subAt);
+  });
+
+  it("leaves parents untouched when their own activity is newer", () => {
+    const parentAt = localTs(2026, 7, 19, 9);
+    const rolled = rollupSubagentActivityTimes([
+      { id: 1, updated_at: parentAt, _cli_id: "claude-code:abc" },
+      { id: 2, updated_at: localTs(2026, 7, 18, 12), _subagent_of: "claude-code:abc" },
+    ]);
+    expect(rolled.get(1)).toBe(parentAt);
+  });
+
+  it("ignores records without a resolvable parent link", () => {
+    const at = localTs(2026, 7, 18, 12);
+    const rolled = rollupSubagentActivityTimes([
+      { id: 1, updated_at: at, _cli_id: "codex:x" },
+      { id: 2, updated_at: localTs(2026, 7, 19, 1), _subagent_of: "codex:someone-else" },
+      { id: 3, updated_at: at }, // no _cli_id — browser record, never rolled
+      { updated_at: at, _subagent_of: "codex:x" }, // no numeric id
+    ]);
+    expect(rolled.get(1)).toBe(at);
+    expect(rolled.get(3)).toBe(at);
+    expect(rolled.size).toBe(3);
   });
 });
 

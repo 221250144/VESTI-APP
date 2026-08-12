@@ -35,6 +35,7 @@ import {
   computeDailyOverview,
   lastNDates,
   localDayRange,
+  rollupSubagentActivityTimes,
   todayDateString,
   type DailyActivity,
   type DailyConversationInput,
@@ -113,6 +114,9 @@ async function gatherDailyInputs(): Promise<DailyInputs> {
     listConversationDigests().catch(() => []),
     getAllSummaries().catch(() => []),
   ]);
+  // A1 roll-up: see rollupSubagentActivityTimes — folded subagent runs make
+  // their parent conversation active on the day the sub actually ran.
+  const rolledTimes = rollupSubagentActivityTimes(records);
   const conversations: DailyConversationInput[] = [];
   for (const record of records) {
     if (typeof record.id !== "number" || record.is_trash) continue;
@@ -123,7 +127,7 @@ async function gatherDailyInputs(): Promise<DailyInputs> {
       id: record.id,
       title: record.title,
       platform: record.platform,
-      updatedAt: record.updated_at ?? 0,
+      updatedAt: rolledTimes.get(record.id) ?? record.updated_at ?? 0,
       messageCount: record.message_count ?? 0,
       source: isCli ? "cli" : "browser",
       projectLabel: isCli

@@ -854,6 +854,76 @@ export class MemoryHubDB extends Dexie {
         daily_logs: "++id, &date, created_at, updated_at",
       })
       .upgrade(() => undefined);
+    // v22 repairs import-stamped browser conversations: the extension's
+    // one-click history import used to stamp created_at/updated_at with the
+    // import instant, so every imported conversation piled onto a single
+    // fake day in the daily logs / learning map. When a conversation's
+    // messages carry the platform's real timeline (their last timestamp
+    // predates updated_at by more than a day), restore the true bounds.
+    // Records whose messages have no real timestamps are left untouched.
+    this.version(22)
+      .stores({
+        conversations:
+          "++id, platform, title, created_at, updated_at, uuid, source_created_at, turn_count, topic_id, is_starred, [platform+created_at], [platform+uuid], [topic_id+updated_at]",
+        messages:
+          "++id, conversation_id, role, created_at, [conversation_id+created_at]",
+        summaries: "++id, conversationId, createdAt",
+        weekly_reports: "++id, rangeStart, rangeEnd, createdAt",
+        topics:
+          "++id, parent_id, name, created_at, updated_at, [parent_id+name]",
+        vectors: "++id, conversation_id, text_hash",
+        notes:
+          "++id, created_at, updated_at, source_type, source_path, [source_type+updated_at], [source_type+source_path]",
+        note_sources: "id, kind, updated_at, created_at",
+        note_assets:
+          "id, vault_id, relative_path, hash, updated_at, [vault_id+relative_path]",
+        annotations:
+          "++id, conversation_id, message_id, created_at, days_after, [conversation_id+message_id], [conversation_id+created_at]",
+        explore_sessions: "id, updatedAt, createdAt",
+        explore_messages: "id, sessionId, timestamp, [sessionId+timestamp]",
+        prompts:
+          "++id, source, category, is_favorite, is_archived, quality_score, updated_at, last_used_at, use_count, body_hash, source_conversation_id, [source+updated_at], [is_favorite+updated_at]",
+        relay_packs: "++id, created_at",
+        deposits: "++id, created_at, template",
+        daily_logs: "++id, &date, created_at, updated_at",
+      })
+      .upgrade(async (tx) => {
+        const DAY_MS = 24 * 3600_000;
+        const conversationsTable = tx.table("conversations");
+        const messagesTable = tx.table("messages");
+        const rows = (await conversationsTable.toArray()) as Array<{
+          id?: number;
+          updated_at?: number;
+          created_at?: number;
+          first_captured_at?: number;
+        }>;
+        for (const row of rows) {
+          if (typeof row.id !== "number") continue;
+          const updatedAt = row.updated_at ?? 0;
+          const firstCaptured = row.first_captured_at ?? updatedAt;
+          if (updatedAt <= 0 || Math.abs(updatedAt - firstCaptured) > 10 * 60_000) {
+            continue;
+          }
+          const messages = (await messagesTable
+            .where("conversation_id")
+            .equals(row.id)
+            .toArray()) as Array<{ created_at?: number }>;
+          let minTs = Infinity;
+          let maxTs = -Infinity;
+          for (const message of messages) {
+            const ts = message.created_at ?? 0;
+            if (ts > 0) {
+              if (ts < minTs) minTs = ts;
+              if (ts > maxTs) maxTs = ts;
+            }
+          }
+          if (!Number.isFinite(minTs) || maxTs > updatedAt - DAY_MS) continue;
+          await conversationsTable.update(row.id, {
+            created_at: minTs,
+            updated_at: maxTs,
+          });
+        }
+      });
   }
 }
 

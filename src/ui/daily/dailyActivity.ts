@@ -135,6 +135,43 @@ export function emptyDailyLogStats(): DailyLogStats {
 }
 
 /**
+ * A1 roll-up: a folded subagent run's activity belongs to its parent
+ * conversation's day. When a subagent ran on day X but the parent's own last
+ * message is day Y≠X, the run would otherwise vanish from BOTH days (the sub
+ * is filtered out of the inputs, and the parent isn't active on X). Returns
+ * record id → effective activity time = max(own updated_at, every folded
+ * subagent's updated_at). Records without a numeric id are ignored.
+ */
+export function rollupSubagentActivityTimes(
+  records: Array<{
+    id?: number;
+    updated_at?: number;
+    _cli_id?: string;
+    _subagent_of?: unknown;
+  }>
+): Map<number, number> {
+  const subMaxByParent = new Map<string, number>();
+  for (const record of records) {
+    if (typeof record._subagent_of !== "string" || !record._subagent_of) continue;
+    const at = record.updated_at ?? 0;
+    if (at > (subMaxByParent.get(record._subagent_of) ?? 0)) {
+      subMaxByParent.set(record._subagent_of, at);
+    }
+  }
+  const effective = new Map<number, number>();
+  for (const record of records) {
+    if (typeof record.id !== "number") continue;
+    const own = record.updated_at ?? 0;
+    const rolled =
+      typeof record._cli_id === "string"
+        ? Math.max(own, subMaxByParent.get(record._cli_id) ?? 0)
+        : own;
+    effective.set(record.id, rolled);
+  }
+  return effective;
+}
+
+/**
  * Everything active on one local day: conversations whose last update falls
  * inside the day's local [start, end) bounds, each joined with its digest
  * (CLI side) and latest summary (browser side), plus aggregate stats. Days
