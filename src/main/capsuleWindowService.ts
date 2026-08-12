@@ -1,11 +1,23 @@
 import { BrowserWindow, Menu, screen } from 'electron';
 import path from 'node:path';
-import { IPC, type CapsuleState } from '../shared/contracts';
+import {
+  CAPSULE_BUBBLE_MOODS,
+  IPC,
+  type CapsuleBubbleMood,
+  type CapsuleBubblePayload,
+  type CapsuleState,
+} from '../shared/contracts';
 
 const BALL_SIZE = 56;
 const PANEL_WIDTH = 340;
 const PANEL_HEIGHT = 344;
 const EDGE_MARGIN = 16;
+/** Bubble form height: card zone (68px) + a small gap over the ball row. */
+const BUBBLE_HEIGHT = 130;
+export const CAPSULE_BUBBLE_DEFAULT_TIMEOUT_MS = 8_000;
+export const CAPSULE_BUBBLE_MIN_TIMEOUT_MS = 500;
+export const CAPSULE_BUBBLE_MAX_TIMEOUT_MS = 30_000;
+export const CAPSULE_BUBBLE_MAX_TEXT_CHARS = 200;
 
 export interface CapsulePosition {
   x: number;
@@ -14,7 +26,7 @@ export interface CapsulePosition {
 }
 
 interface CapsuleHost {
-  getState(): Omit<CapsuleState, 'expanded'>;
+  getState(): Omit<CapsuleState, 'expanded' | 'bubble'>;
   sync(): Promise<unknown>;
   toggleWatch(): Promise<boolean>;
   openMainWindow(): void;
@@ -25,6 +37,70 @@ interface CapsuleHost {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), Math.max(min, max));
+}
+
+/** Validated bubble payload (main-process side of the show-bubble IPC). */
+export interface NormalizedCapsuleBubble {
+  text: string;
+  mood: CapsuleBubbleMood | null;
+  timeoutMs: number;
+}
+
+/**
+ * Validate a show-bubble IPC payload: text must be non-empty within the
+ * cap, mood is whitelist-filtered (unknown values drop to null), and the
+ * timeout is clamped into 500-30000ms (default 8s). null = reject.
+ */
+export function normalizeCapsuleBubblePayload(value: unknown): NormalizedCapsuleBubble | null {
+  if (!value || typeof value !== 'object') return null;
+  const input = value as Partial<CapsuleBubblePayload>;
+  if (typeof input.text !== 'string') return null;
+  const text = input.text.trim();
+  if (!text || input.text.length > CAPSULE_BUBBLE_MAX_TEXT_CHARS) return null;
+  const mood = CAPSULE_BUBBLE_MOODS.includes(input.mood as CapsuleBubbleMood)
+    ? (input.mood as CapsuleBubbleMood)
+    : null;
+  const timeoutMs =
+    typeof input.timeoutMs === 'number' && Number.isFinite(input.timeoutMs)
+      ? clamp(Math.round(input.timeoutMs), CAPSULE_BUBBLE_MIN_TIMEOUT_MS, CAPSULE_BUBBLE_MAX_TIMEOUT_MS)
+      : CAPSULE_BUBBLE_DEFAULT_TIMEOUT_MS;
+  return { text, mood, timeoutMs };
+}
+
+/**
+ * Bubble-form window bounds: the ball keeps its exact screen position
+ * while the card opens above it, widening toward the screen center - the
+ * same anchor rule setExpanded uses for the panel.
+ */
+export function bubbleWindowBounds(
+  ball: Electron.Rectangle,
+  area: Electron.Rectangle,
+): Electron.Rectangle {
+  const width = PANEL_WIDTH;
+  const height = BUBBLE_HEIGHT;
+  const anchorRight = ball.x + BALL_SIZE / 2 > area.x + area.width / 2;
+  const x = anchorRight ? ball.x + BALL_SIZE - width : ball.x;
+  const y = clamp(
+    ball.y + BALL_SIZE - height,
+    area.y + EDGE_MARGIN,
+    Math.max(area.y + EDGE_MARGIN, area.y + area.height - height - EDGE_MARGIN),
+  );
+  return { x, y, width, height };
+}
+
+/** Inverse of bubbleWindowBounds: fold the bubble form back onto the ball. */
+export function ballBoundsFromBubble(
+  bubble: Electron.Rectangle,
+  anchorRight: boolean,
+  area: Electron.Rectangle,
+): Electron.Rectangle {
+  const x = anchorRight ? bubble.x + bubble.width - BALL_SIZE : bubble.x;
+  const y = clamp(
+    bubble.y + bubble.height - BALL_SIZE,
+    area.y + EDGE_MARGIN,
+    Math.max(area.y + EDGE_MARGIN, area.y + area.height - BALL_SIZE - EDGE_MARGIN),
+  );
+  return { x, y, width: BALL_SIZE, height: BALL_SIZE };
 }
 
 /**
@@ -39,6 +115,13 @@ export class CapsuleWindowService {
   /** Temporary expanded-panel height override (dock flows); null = default. */
   private panelHeight: number | null = null;
   private dragOffset: { x: number; y: number } | null = null;
+  /** Active bubble form state; null when the capsule is ball/panel only. */
+  private bubble: {
+    text: string;
+    mood: CapsuleBubbleMood | null;
+    anchorRight: boolean;
+    timer: NodeJS.Timeout | null;
+  } | null = null;
 
   constructor(private host: CapsuleHost) {}
 
@@ -111,6 +194,8 @@ export class CapsuleWindowService {
   }
 
   async hide(): Promise<void> {
+    if (this.bubble?.timer) clearTimeout(this.bubble.timer);
+    this.bubble = null;
     this.window?.close();
     this.window = null;
   }
@@ -127,6 +212,17 @@ export class CapsuleWindowService {
 
   async setExpanded(expanded: boolean): Promise<void> {
     if (!this.window || this.expanded === expanded) return;
+    if (this.bubble) {
+      // Expand/collapse anchors on the ball: fold an open bubble back
+      // first (in place, while hidden) so the math below sees ball bounds.
+      const bubble = this.bubble;
+      this.bubble = null;
+      if (bubble.timer) clearTimeout(bubble.timer);
+      const bounds = this.window.getBounds();
+      const area = screen.getDisplayMatching(bounds).workArea;
+      this.window.hide();
+      this.window.setBounds(ballBoundsFromBubble(bounds, bubble.anchorRight, area));
+    }
     this.expanded = expanded;
     // Re-expanding always starts from the default panel height; dock flows
     // grow it again via setPanelHeight as needed.
@@ -191,6 +287,54 @@ export class CapsuleWindowService {
     this.window.hide();
     this.window.setBounds({ x: bounds.x, y, width: PANEL_WIDTH, height: nextHeight });
     this.window.showInactive();
+  }
+
+  /**
+   * Bubble form (third capsule shape): the ball stays exactly where it is
+   * while a card opens above it; timeoutMs later the window folds back to
+   * the ball. Only available from the collapsed ball - an open panel is
+   * left alone. Re-showing replaces the content and restarts the timer.
+   */
+  async showBubble(payload: NormalizedCapsuleBubble): Promise<void> {
+    if (!this.window || this.window.isDestroyed() || this.expanded) return;
+    if (this.bubble) {
+      if (this.bubble.timer) clearTimeout(this.bubble.timer);
+      this.bubble.text = payload.text;
+      this.bubble.mood = payload.mood;
+    } else {
+      const ball = this.window.getBounds();
+      const area = screen.getDisplayMatching(ball).workArea;
+      this.bubble = {
+        text: payload.text,
+        mood: payload.mood,
+        anchorRight: ball.x + BALL_SIZE / 2 > area.x + area.width / 2,
+        timer: null,
+      };
+      // Same instant hide/setBounds/show swap as setExpanded.
+      this.window.hide();
+      this.window.setBounds(bubbleWindowBounds(ball, area));
+      this.window.showInactive();
+    }
+    this.bubble.timer = setTimeout(() => {
+      void this.dismissBubble();
+    }, payload.timeoutMs);
+    this.pushState();
+  }
+
+  /** Fold the bubble form back to the ball (click, timeout, or API). */
+  async dismissBubble(): Promise<void> {
+    if (!this.bubble) return;
+    const bubble = this.bubble;
+    this.bubble = null;
+    if (bubble.timer) clearTimeout(bubble.timer);
+    if (this.window && !this.window.isDestroyed()) {
+      const bounds = this.window.getBounds();
+      const area = screen.getDisplayMatching(bounds).workArea;
+      this.window.hide();
+      this.window.setBounds(ballBoundsFromBubble(bounds, bubble.anchorRight, area));
+      this.window.showInactive();
+    }
+    this.pushState();
   }
 
   handleDragStart(screenX: number, screenY: number): void {
@@ -260,7 +404,13 @@ export class CapsuleWindowService {
   }
 
   getState(): CapsuleState {
-    return { ...this.host.getState(), expanded: this.expanded };
+    return {
+      ...this.host.getState(),
+      expanded: this.expanded,
+      bubble: this.bubble
+        ? { text: this.bubble.text, mood: this.bubble.mood, anchorRight: this.bubble.anchorRight }
+        : null,
+    };
   }
 
   async destroy(): Promise<void> {

@@ -17,7 +17,7 @@ import path from 'node:path';
 import { AgentService } from './main/agentService';
 import { AgentMcpRegistry, createAgentMcpRegistry, resolveAgentMcpTargetId } from './main/agentMcpRegistry';
 import { CaptureService } from './main/captureService';
-import { CapsuleWindowService } from './main/capsuleWindowService';
+import { CapsuleWindowService, normalizeCapsuleBubblePayload } from './main/capsuleWindowService';
 import { DigestService } from './main/digestService';
 import { ProjectMemoryService } from './main/projectMemoryService';
 import { EmbeddingService } from './main/embeddingService';
@@ -44,6 +44,7 @@ import type { RelayPackPayload } from './main/agentPrompts';
 import { resolveCuratedPrompts } from './ui/promptPlaza/commonPrompts';
 import {
   IPC,
+  MAIN_SHELL_TABS,
   type AgentRunRequest,
   type AppSettingsUpdate,
   type CapturePlatform,
@@ -404,7 +405,7 @@ function validSessionId(value: unknown): value is string {
 function validAgentRequest(value: unknown): value is AgentRunRequest {
   if (!value || typeof value !== 'object') return false;
   const request = value as Partial<AgentRunRequest>;
-  return (request.kind === 'summary' || request.kind === 'explore' || request.kind === 'digest' || request.kind === 'classify' || request.kind === 'relay' || request.kind === 'extract' || request.kind === 'distill' || request.kind === 'deposit-maintain' || request.kind === 'daily' || request.kind === 'persona' || request.kind === 'roundtable-turn' || request.kind === 'roundtable-synthesis' || request.kind === 'learn-deepen' || request.kind === 'learn-synthesis' || request.kind === 'prompt-improve' || request.kind === 'prompt-continue' || request.kind === 'dream-extract' || request.kind === 'dream-maintain')
+  return (request.kind === 'summary' || request.kind === 'explore' || request.kind === 'digest' || request.kind === 'classify' || request.kind === 'relay' || request.kind === 'extract' || request.kind === 'distill' || request.kind === 'deposit-maintain' || request.kind === 'daily' || request.kind === 'persona' || request.kind === 'roundtable-turn' || request.kind === 'roundtable-synthesis' || request.kind === 'learn-deepen' || request.kind === 'learn-synthesis' || request.kind === 'prompt-improve' || request.kind === 'prompt-continue' || request.kind === 'dream-extract' || request.kind === 'dream-maintain' || request.kind === 'companion')
     && validSessionId(request.sessionId)
     && (request.question === undefined || typeof request.question === 'string')
     && (request.template === undefined || (typeof request.template === 'string' && request.template.length <= 64))
@@ -1242,6 +1243,35 @@ function registerIpc(): void {
   });
   memberIpcHandle(IPC.capsulePanelHeight, (_event, height: unknown) =>
     capsule.setPanelHeight(typeof height === 'number' && Number.isFinite(height) ? height : null));
+  // ---- Capsule bubble (third capsule form) + dock tab navigation ----
+  memberIpcHandle(IPC.capsuleBubbleShow, (_event, payload: unknown) => {
+    const bubble = normalizeCapsuleBubblePayload(payload);
+    if (!bubble) throw new Error('气泡内容无效');
+    return capsule.showBubble(bubble);
+  });
+  memberIpcHandle(IPC.capsuleBubbleDismiss, () => capsule.dismissBubble());
+  memberIpcHandle(IPC.capsuleOpenMainTab, (_event, tab: unknown) => {
+    if (typeof tab !== 'string' || !(MAIN_SHELL_TABS as readonly string[]).includes(tab)) {
+      throw new Error('无效的导航目标');
+    }
+    const sendNavigate = () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(IPC.mainTabNavigate, tab);
+      }
+    };
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      // The window is recreated asynchronously; navigate only after its load.
+      void createWindow().then(() => {
+        mainWindow?.show();
+        mainWindow?.focus();
+        updateTrayMenu();
+        sendNavigate();
+      });
+      return;
+    }
+    showMainWindow();
+    sendNavigate();
+  });
 }
 
 async function createWindow(): Promise<void> {

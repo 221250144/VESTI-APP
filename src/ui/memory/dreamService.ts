@@ -728,6 +728,22 @@ export async function runDreamPipeline(
     await api.setMemoryMeta(META_LAST_SESSION_TS, String(maxSessionTs));
     await api.setMemoryMeta(META_FIRST_FULL_DONE, "1");
 
+    // Announce the finished run on the capsule bubble. Best-effort: a hidden
+    // capsule, an open panel, or a partial window.vesti mock all fail silently
+    // and never block the pipeline.
+    try {
+      const touched = counts.added + counts.updated + counts.deleted;
+      await api.showCapsuleBubble?.({
+        text:
+          touched > 0
+            ? `梦境整理好了：新增 ${counts.added} 条记忆，更新 ${counts.updated} 条`
+            : `梦境整理好了：看过 ${blocks.length} 个会话，记忆没有新变化`,
+        mood: "sleepy",
+      });
+    } catch {
+      // The bubble is cosmetic; the run result below is what matters.
+    }
+
     return {
       ok: true,
       firstFull,

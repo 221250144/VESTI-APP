@@ -106,6 +106,14 @@ const api: VestiDesktopApi = {
   importMemoryEntries: entries => ipcRenderer.invoke(IPC.memoryImport, entries),
   getMemoryMeta: key => ipcRenderer.invoke(IPC.memoryMetaGet, key),
   setMemoryMeta: (key, value) => ipcRenderer.invoke(IPC.memoryMetaSet, key, value),
+  // ---- Capsule bubble + capsule-driven tab navigation ----
+  showCapsuleBubble: payload => ipcRenderer.invoke(IPC.capsuleBubbleShow, payload),
+  dismissCapsuleBubble: () => ipcRenderer.invoke(IPC.capsuleBubbleDismiss),
+  onMainTabNavigate: listener => {
+    const wrapped = (_event: unknown, tab: string) => listener(tab);
+    ipcRenderer.on(IPC.mainTabNavigate, wrapped);
+    return () => ipcRenderer.removeListener(IPC.mainTabNavigate, wrapped);
+  },
 };
 
 const uiPrefs: VestiUiPrefsApi = {
@@ -153,6 +161,8 @@ const capsule: VestiCapsuleApi = {
   prepareRelayCli: request => ipcRenderer.invoke(IPC.relayPrepareCli, request),
   copyText: text => ipcRenderer.invoke(IPC.capsuleCopyText, text),
   setPanelHeight: height => ipcRenderer.invoke(IPC.capsulePanelHeight, height),
+  dismissBubble: () => ipcRenderer.invoke(IPC.capsuleBubbleDismiss),
+  openMainTab: tab => ipcRenderer.invoke(IPC.capsuleOpenMainTab, tab),
 };
 
 contextBridge.exposeInMainWorld('vestiCapsule', capsule);

@@ -249,7 +249,7 @@ export interface NotionExportResult {
   url: string;
 }
 
-export type AgentKind = 'summary' | 'explore' | 'digest' | 'classify' | 'relay' | 'extract' | 'distill' | 'deposit-maintain' | 'daily' | 'persona' | 'roundtable-turn' | 'roundtable-synthesis' | 'learn-deepen' | 'learn-synthesis' | 'prompt-improve' | 'prompt-continue' | 'dream-extract' | 'dream-maintain';
+export type AgentKind = 'summary' | 'explore' | 'digest' | 'classify' | 'relay' | 'extract' | 'distill' | 'deposit-maintain' | 'daily' | 'persona' | 'roundtable-turn' | 'roundtable-synthesis' | 'learn-deepen' | 'learn-synthesis' | 'prompt-improve' | 'prompt-continue' | 'dream-extract' | 'dream-maintain' | 'companion';
 
 /** P4b deposit distillation templates ('custom' carries the user's own
  * instruction in AgentRunRequest.question). */
@@ -585,6 +585,11 @@ export const IPC = {
   capsulePromptSnapshotSave: 'vesti:capsule-prompt-snapshot-save',
   capsuleCopyText: 'vesti:capsule-copy-text',
   capsulePanelHeight: 'vesti:capsule-panel-height',
+  capsuleBubbleShow: 'vesti:capsule-bubble-show',
+  capsuleBubbleDismiss: 'vesti:capsule-bubble-dismiss',
+  capsuleOpenMainTab: 'vesti:capsule-open-main-tab',
+  /** main → main-window renderer: navigate to a shell tab (capsule dock). */
+  mainTabNavigate: 'vesti:main-tab-navigate',
   capsulePromptImprove: 'vesti:capsule-prompt-improve',
   capsulePromptContinue: 'vesti:capsule-prompt-continue',
   extensionBridgeStatus: 'vesti:extension-bridge-status',
@@ -617,11 +622,60 @@ export const IPC = {
 
 // ---- Desktop floating capsule ----
 
+/** Shell tabs the capsule dock may navigate the main window to (whitelist). */
+export const MAIN_SHELL_TABS = [
+  'home',
+  'library',
+  'explore',
+  'network',
+  'prompts',
+  'deposits',
+  'daily',
+  'settings',
+] as const;
+export type MainShellTab = (typeof MAIN_SHELL_TABS)[number];
+
+/** Owl mood shown inside a capsule bubble (icons: src/ui/assets/owl). */
+export type CapsuleBubbleMood =
+  | 'calm'
+  | 'thinking'
+  | 'delighted'
+  | 'spark'
+  | 'sleepy'
+  | 'warm';
+
+export const CAPSULE_BUBBLE_MOODS: readonly CapsuleBubbleMood[] = [
+  'calm',
+  'thinking',
+  'delighted',
+  'spark',
+  'sleepy',
+  'warm',
+];
+
+/** Renderer → main request to show the capsule bubble form. */
+export interface CapsuleBubblePayload {
+  text: string;
+  mood?: CapsuleBubbleMood;
+  /** Auto-dismiss delay; main clamps to 500–30000, default 8000. */
+  timeoutMs?: number;
+}
+
+/** Bubble state mirrored to the capsule renderer inside CapsuleState. */
+export interface CapsuleBubbleView {
+  text: string;
+  mood: CapsuleBubbleMood | null;
+  /** The ball sits on this side of the bubble-form window. */
+  anchorRight: boolean;
+}
+
 export interface CapsuleState {
   watching: boolean;
   syncing: boolean;
   conversationCount: number;
   expanded: boolean;
+  /** Active bubble (third capsule form); null when the ball/panel is plain. */
+  bubble: CapsuleBubbleView | null;
 }
 
 // ---- Capsule dock (P6: layered quick panel) ----
@@ -811,6 +865,10 @@ export interface VestiCapsuleApi {
   copyText(text: string): Promise<void>;
   /** Temporarily grow the expanded panel (px); null restores the default. */
   setPanelHeight(height: number | null): Promise<void>;
+  /** Collapse an active bubble back to the ball. */
+  dismissBubble(): Promise<void>;
+  /** Open/focus the main window on a shell tab (whitelist enforced in main). */
+  openMainTab(tab: string): Promise<void>;
 }
 
 // ---- VESTI dashboard data bridge (SQLite → renderer mirror) ----
@@ -1050,6 +1108,11 @@ export interface VestiDesktopApi {
   importMemoryEntries(entries: MemoryEntryView[]): Promise<number>;
   getMemoryMeta(key: string): Promise<string | null>;
   setMemoryMeta(key: string, value: string): Promise<void>;
+  // ---- Capsule bubble (main renderer triggers; capsule window displays) ----
+  showCapsuleBubble(payload: CapsuleBubblePayload): Promise<void>;
+  dismissCapsuleBubble(): Promise<void>;
+  /** main → renderer navigation request (capsule dock entries, e.g. 夜话). */
+  onMainTabNavigate(listener: (tab: string) => void): () => void;
 }
 
 /** Authentication bridge available before the product shell is unlocked. */

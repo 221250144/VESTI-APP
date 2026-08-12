@@ -1078,3 +1078,96 @@ body,
   animation: capsule-enter 160ms ease-out;
   pointer-events: none;
 }
+
+/* ---- Bubble form (ball + card; third capsule shape) ----
+ * Window is 340x130: the card fills the top zone and the ball row keeps
+ * the lower 56px, so the ball never moves on screen. */
+
+.capsule-bubble {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.capsule-bubble-card {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  margin: 0 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--capsule-border);
+  border-radius: 14px;
+  background: var(--capsule-bg);
+  box-shadow: var(--shadow-popover);
+  padding: 6px 12px;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  animation: capsule-bubble-enter 180ms ease-out;
+}
+
+/* Tail pointing at the ball (bottom corner on the anchored side). */
+.capsule-bubble-card::after {
+  content: '';
+  position: absolute;
+  bottom: -6px;
+  left: 23px;
+  width: 10px;
+  height: 10px;
+  background: var(--capsule-bg);
+  border-right: 1px solid var(--capsule-border);
+  border-bottom: 1px solid var(--capsule-border);
+  transform: rotate(45deg);
+}
+
+.capsule-bubble.anchor-right .capsule-bubble-card::after {
+  left: auto;
+  right: 23px;
+}
+
+.capsule-bubble-card img {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  pointer-events: none;
+}
+
+.capsule-bubble-text {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--capsule-text);
+  word-break: break-word;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+}
+
+.capsule-bubble-ball {
+  width: 56px;
+  height: 56px;
+  flex-shrink: 0;
+}
+
+.capsule-bubble.anchor-right .capsule-bubble-ball {
+  align-self: flex-end;
+}
+
+.capsule-action img.icon {
+  width: 18px;
+  height: 18px;
+}
+
+@keyframes capsule-bubble-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}

@@ -1,17 +1,36 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { CapsuleDockStatus, CapsuleState } from '../shared/contracts';
+import type { CapsuleBubbleMood, CapsuleDockStatus, CapsuleState } from '../shared/contracts';
 import { capsuleApi } from './api';
 import { COPY, type CapsuleLocale } from './copy';
 import { DEFAULT_SKIN_ID, resolveSkin } from './skins';
 import { QuickAsk } from './QuickAsk';
 import { RelayFlow } from './RelayFlow';
 import { PromptAssist } from './PromptAssist';
+import owlCalm from '../ui/assets/owl/calm.png';
+import owlThinking from '../ui/assets/owl/thinking.png';
+import owlDelighted from '../ui/assets/owl/delighted.png';
+import owlSpark from '../ui/assets/owl/spark.png';
+import owlSleepy from '../ui/assets/owl/sleepy.png';
+import owlWarm from '../ui/assets/owl/warm.png';
 
 type PanelView = 'home' | 'relay' | 'prompts';
 
 /** Temporary panel heights for the layered dock views (px). */
 const FLOW_PANEL_HEIGHT = 560;
 const TOAST_DURATION_MS = 2_400;
+
+/** Bubble card shows at most this many characters (main caps payloads at 200). */
+const BUBBLE_TEXT_MAX_CHARS = 80;
+
+/** Mood owl icons inside the bubble card (same assets as the main renderer). */
+const BUBBLE_MOOD_ICONS: Record<CapsuleBubbleMood, string> = {
+  calm: owlCalm,
+  thinking: owlThinking,
+  delighted: owlDelighted,
+  spark: owlSpark,
+  sleepy: owlSleepy,
+  warm: owlWarm,
+};
 
 const DRAG_THRESHOLD_PX = 5;
 
@@ -21,6 +40,7 @@ export function Capsule() {
     syncing: false,
     conversationCount: 0,
     expanded: false,
+    bubble: null,
   });
   const [locale, setLocale] = useState<CapsuleLocale>('zh');
   const [skinId, setSkinId] = useState<string>(DEFAULT_SKIN_ID);
@@ -186,6 +206,51 @@ export function Capsule() {
     [copy],
   );
 
+  // 夜话 dock entry: open/focus the main window on the Explore tab (the
+  // companion chat lives there) and fold the panel back to the ball.
+  const handleOpenNightChat = useCallback(() => {
+    void capsuleApi()?.openMainTab('explore');
+    void capsuleApi()?.setExpanded(false);
+  }, []);
+
+  const handleDismissBubble = useCallback(() => {
+    void capsuleApi()?.dismissBubble();
+  }, []);
+
+  // Bubble form: ball (unchanged spot) + a card above it. Click anywhere on
+  // the card or the ball folds back to the plain ball; the main process also
+  // auto-dismisses on its timeout.
+  if (state.bubble) {
+    const bubble = state.bubble;
+    const moodIcon = bubble.mood ? BUBBLE_MOOD_ICONS[bubble.mood] : null;
+    const text =
+      bubble.text.length > BUBBLE_TEXT_MAX_CHARS
+        ? `${bubble.text.slice(0, BUBBLE_TEXT_MAX_CHARS - 1)}…`
+        : bubble.text;
+    return (
+      <div className="capsule-root">
+        <div className={`capsule-bubble${bubble.anchorRight ? ' anchor-right' : ''}`}>
+          <button type="button" className="capsule-bubble-card" onClick={handleDismissBubble}>
+            {moodIcon && <img src={moodIcon} alt="" draggable={false} />}
+            <span className="capsule-bubble-text">{text}</span>
+          </button>
+          <div className="capsule-bubble-ball">
+            <div
+              className={`capsule-ball${state.syncing ? ' syncing' : ''}`}
+              role="button"
+              aria-label={copy.dock}
+              onClick={handleDismissBubble}
+              onContextMenu={handleContextMenu}
+            >
+              <img src={skin.collapsed} alt="Vesti" draggable={false} data-skin={skin.id} />
+              <span className={`status-dot${state.watching ? ' watching' : ''}`} />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (!state.expanded) {
     return (
       <div className="capsule-root">
@@ -257,6 +322,14 @@ export function Capsule() {
                 >
                   <span className="icon">✦</span>
                   {copy.prompts}
+                </button>
+                <button
+                  type="button"
+                  className="capsule-action primary"
+                  onClick={handleOpenNightChat}
+                >
+                  <img className="icon" src={owlCalm} alt="" draggable={false} />
+                  {copy.nightChat}
                 </button>
               </div>
             </div>

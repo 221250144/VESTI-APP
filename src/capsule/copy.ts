@@ -74,6 +74,8 @@ const en = {
   deliverCli: 'Generate CLI command',
   // Prompt assistant
   prompts: 'Prompt Assistant',
+  // 夜话 companion chat (opens the main window's Explore tab)
+  nightChat: 'Night Talk',
   promptSearchPlaceholder: 'Search prompts…',
   promptEmpty: 'No matching prompts',
   promptNoSnapshot: 'Personal library empty — showing curated catalog only',
@@ -162,6 +164,7 @@ const zh: CapsuleCopy = {
   deliverCopy: '复制到剪贴板',
   deliverCli: '生成 CLI 命令',
   prompts: '提示词助手',
+  nightChat: '夜话',
   promptSearchPlaceholder: '搜索提示词…',
   promptEmpty: '没有匹配的提示词',
   promptNoSnapshot: '个人提示词库为空，当前仅显示策展目录',
