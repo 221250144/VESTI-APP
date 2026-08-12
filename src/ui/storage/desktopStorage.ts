@@ -448,6 +448,35 @@ async function exportAnnotationToMyNotes(annotationId: number) {
 
 // ---- AI-backed methods (window.vesti agent IPC) ----------------------------
 
+/** Transcript budget for summarizing browser-captured conversations through
+ * the override channel — the main process caps summary overrides at 30K. */
+const WEB_SUMMARY_TRANSCRIPT_BUDGET = 24_000;
+
+/** Serialize a Dexie conversation (browser capture, no local capture-store
+ * session) into a role-tagged transcript the summary agent can read. Oversized
+ * threads keep the head and tail — the question and the landing matter most. */
+async function buildWebSummaryTranscript(
+  conversationId: number,
+  title: string
+): Promise<string> {
+  const messages = await listMessages(conversationId).catch(() => []);
+  const lines: string[] = [];
+  for (const message of messages) {
+    const text = (message.content_text ?? "").trim();
+    if (!text) continue;
+    const role = message.role === "user" ? "用户" : "AI";
+    lines.push(`${role}: ${text.length > 1200 ? `${text.slice(0, 1200)}…` : text}`);
+  }
+  if (lines.length === 0) return "";
+  const header = `### 会话（浏览器捕获）\n标题: ${title || "未命名会话"}`;
+  const body = lines.join("\n");
+  if (body.length <= WEB_SUMMARY_TRANSCRIPT_BUDGET) return `${header}\n\n${body}`;
+  const head = body.slice(0, Math.floor(WEB_SUMMARY_TRANSCRIPT_BUDGET * 0.6));
+  const tail = body.slice(-Math.floor(WEB_SUMMARY_TRANSCRIPT_BUDGET * 0.35));
+  const omitted = body.length - head.length - tail.length;
+  return `${header}\n\n${head}\n\n…（中间约 ${omitted} 字略）…\n\n${tail}`;
+}
+
 async function generateSummaryImpl(conversationId: number): Promise<ChatSummaryData> {
   const info = await getConversationCliId(conversationId);
   if (!info) {
@@ -456,9 +485,14 @@ async function generateSummaryImpl(conversationId: number): Promise<ChatSummaryD
   const title = info.title;
 
   const api = vestiApi();
-  if (!api || !info.cliId) {
-    // Non-Electron environment or a conversation that did not come from a
-    // local CLI capture: return an honest placeholder instead of failing.
+  // Browser-captured conversations have no local capture-store session, but
+  // their Dexie messages serialize into a transcriptOverride the summary
+  // agent can run against — the cli id is no longer a coverage gate.
+  const webTranscript =
+    api && !info.cliId ? await buildWebSummaryTranscript(conversationId, title) : "";
+  if (!api || (!info.cliId && !webTranscript.trim())) {
+    // Non-Electron environment or an empty conversation: return an honest
+    // placeholder instead of failing.
     return summaryRecordToChatSummaryData(
       {
         id: 0,
@@ -475,7 +509,15 @@ async function generateSummaryImpl(conversationId: number): Promise<ChatSummaryD
     );
   }
 
-  const result = await api.runAgent({ kind: "summary", sessionId: info.cliId });
+  const result = await api.runAgent(
+    info.cliId
+      ? { kind: "summary", sessionId: info.cliId }
+      : {
+          kind: "summary",
+          sessionId: `web-summary:${conversationId}`,
+          transcriptOverride: webTranscript,
+        }
+  );
   // The summary agent answers with ConversationSummaryV2 JSON (validated +
   // normalized by the parser); prose output degrades to the legacy
   // plain-text fallback write instead of failing.
@@ -1885,7 +1927,11 @@ export const desktopStorage: StorageApi = {
           is_archived: record.is_archived,
           is_trash: record.is_trash,
           updatedAt: record.updated_at,
-          cliId: typeof record._cli_id === "string" ? record._cli_id : null,
+          // Browser captures summarize through a transcriptOverride built from
+          // their Dexie messages; any conversation with messages qualifies.
+          summarizable:
+            (typeof record._cli_id === "string" && record._cli_id.trim() !== "") ||
+            (record.message_count ?? 0) > 0,
         })),
       summaries
     );

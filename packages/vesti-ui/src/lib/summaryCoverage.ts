@@ -15,9 +15,13 @@ export interface SummaryCoverageConversation {
   is_trash?: boolean;
   /** ms epoch; used to order the pending queue newest-first. */
   updatedAt?: number;
-  /** local-terminal capture id; conversations without one cannot be
-   * summarized through the desktop agent channel. */
+  /** local-terminal capture id. Legacy gate: when `summarizable` is unset,
+   * only cliId-bearing conversations are considered summarizable. */
   cliId?: string | null;
+  /** Explicit host verdict: can this conversation be summarized through the
+   * desktop agent channel? Browser captures serialize their Dexie messages
+   * into a transcriptOverride, so the cli id is no longer the gate. */
+  summarizable?: boolean;
 }
 
 export interface SummaryCoverageSummary {
@@ -61,9 +65,13 @@ export function computeSummaryCoverage(
       structuredCount += 1;
       continue;
     }
-    // Only conversations reachable through the local capture store can be
-    // summarized; the rest would just fail the agent run.
-    if (typeof conversation.cliId === "string" && conversation.cliId.trim()) {
+    // Only conversations the host can actually summarize enter the queue;
+    // the rest would just fail (or placeholder) the agent run. Hosts that
+    // don't pass `summarizable` keep the legacy cliId gate.
+    const summarizable =
+      conversation.summarizable ??
+      (typeof conversation.cliId === "string" && conversation.cliId.trim() !== "");
+    if (summarizable) {
       pendingConversationIds.push(conversation.id as number);
     }
   }
