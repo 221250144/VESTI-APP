@@ -16,9 +16,10 @@ import { TitleBar } from "./ui/shell/TitleBar";
 import { useUiTheme } from "./ui/shell/useUiTheme";
 import { useOnboarding } from "./ui/shell/useOnboarding";
 import { MembershipGate } from "./ui/membership/MembershipGate";
-import type { MembershipStatus } from "./shared/contracts";
+import { MAIN_SHELL_TABS, type MembershipStatus } from "./shared/contracts";
 import { LOGO_BASE64 } from "./ui/logo";
 import { desktopStorage } from "./ui/storage/desktopStorage";
+import { OWL_MOOD_ICONS } from "./ui/companion/owlIcons";
 import {
   getCaptureSyncState,
   startCaptureSync,
@@ -29,6 +30,7 @@ import { resolveClassifyLanguage, startAutoClassifyTrigger } from "./ui/organize
 import { startUpstreamAutoExport } from "./ui/upstream/autoExport";
 import { startDailyScheduler } from "./ui/daily/dailyScheduler";
 import { startDreamScheduler } from "./ui/memory/dreamScheduler";
+import { startAmbientBubbleScheduler } from "./ui/companion/ambientBubble";
 import { migrateDepositsToMemory } from "./ui/deposits/migrateDeposits";
 import { startPromptSnapshotSync } from "./ui/sync/promptSnapshot";
 import { getAllSummaries, getTopics, listConversations } from "./ui/db/repository";
@@ -94,10 +96,22 @@ function Shell({
     startUpstreamAutoExport();
     startDailyScheduler();
     startDreamScheduler();
+    startAmbientBubbleScheduler();
     // One-shot Dexie→memory_entries deposit migration; idempotent (same-id
     // upserts) and a no-op once the memory_meta watermark is stamped.
     void migrateDepositsToMemory().catch(() => undefined);
     startPromptSnapshotSync();
+  }, []);
+
+  // Capsule dock → shell navigation (e.g. the 夜话 entry opens Explore).
+  useEffect(() => {
+    const api = window.vesti;
+    if (!api?.onMainTabNavigate) return;
+    return api.onMainTabNavigate((tab) => {
+      if ((MAIN_SHELL_TABS as readonly string[]).includes(tab)) {
+        setPage(tab as ShellPage);
+      }
+    });
   }, []);
 
   useEffect(() => subscribeCaptureSync(setSyncState), []);
@@ -244,6 +258,7 @@ function Shell({
               aitiImagery={aitiImagery}
               aitiEmblemUrl={aitiImagery ? emblemUrl(aitiImagery.emblemId) : undefined}
               aitiPersonaNote={aitiPersonaNote}
+              companionOwlIcons={OWL_MOOD_ICONS}
               learn={learn}
               lang={lang}
               tab={dashboardTab}

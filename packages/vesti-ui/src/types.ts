@@ -70,6 +70,43 @@ export interface RelatedConversation {
 
 export type ExploreMode = "agent" | "classic";
 
+// ---- 夜话 (Companion) ---------------------------------------------------------
+// Mirror of src/ui/companion/companionService.ts's public contract — the UI
+// package cannot import the app shell, so the small type surface is duplicated
+// here (same string-literal unions) and the host wires the implementation in
+// through StorageApi.askCompanion.
+
+export type CompanionPersona = "listener" | "creator";
+export type CompanionMemoryScope = "full" | "memory" | "chat";
+export type CompanionMood =
+  | "calm"
+  | "thinking"
+  | "delighted"
+  | "spark"
+  | "sleepy"
+  | "warm";
+
+export interface CompanionAskInput {
+  sessionId?: string;
+  question: string;
+  persona?: CompanionPersona;
+  memoryScope?: CompanionMemoryScope;
+}
+
+export interface CompanionAnswer {
+  sessionId: string;
+  mood: CompanionMood;
+  persona: CompanionPersona;
+  /** Answer body with the mood tag line stripped. */
+  content: string;
+  sources: RelatedConversation[];
+}
+
+/** Owl mood icons, keyed by mood id. The host resolves the asset URLs
+ * (import.meta.glob on src/ui/assets/owl) and hands them down as props — the
+ * same pattern as aitiEmblemUrl. Missing entries fall back to `calm`. */
+export type CompanionOwlIcons = Partial<Record<CompanionMood, string>>;
+
 export type ExploreSearchScopeMode = "all" | "selected";
 
 export interface ExploreSearchScope {
@@ -173,6 +210,12 @@ export interface ExploreAgentMeta {
   contextCandidates?: ExploreContextCandidate[];
   selectedContextConversationIds?: number[];
   totalDurationMs?: number;
+  /** 夜话 annotations (companionService's CompanionAgentMeta): the assistant
+   * message's mood drives the owl avatar; persona/memoryScope record the
+   * switches the answer was generated under. */
+  mood?: CompanionMood;
+  persona?: CompanionPersona;
+  memoryScope?: CompanionMemoryScope;
 }
 
 export interface RagResponse {
@@ -468,6 +511,14 @@ export type StorageApi = {
     mode?: ExploreMode,
     options?: ExploreAskOptions
   ) => Promise<RagResponse & { sessionId: string }>;
+  /** 夜话: one companion turn (persist user + assistant messages into the
+   * explore session, return the mood-tagged answer). Implemented by the
+   * desktop host via src/ui/companion/companionService. */
+  askCompanion?: (input: CompanionAskInput) => Promise<CompanionAnswer>;
+  /** UI-preference read/write (window.vestiUi on the desktop host) — the 夜话
+   * persona / memory-scope switches persist through these. */
+  getUiPreference?: (key: string) => Promise<unknown>;
+  setUiPreference?: (key: string, value: unknown) => Promise<void>;
   // Explore Session APIs
   createExploreSession?: (title: string) => Promise<string>;
   listExploreSessions?: (limit?: number) => Promise<ExploreSession[]>;
@@ -1364,6 +1415,36 @@ export interface ExploreStarterDeckLabel {
   prompts: readonly ExploreStarterPromptLabel[];
 }
 
+export interface CompanionLabels {
+  /** Page header: the product name (夜话 / Night Talk) + one-line subtitle. */
+  title: string;
+  subtitle: string;
+  /** Persona switcher (listener default; affects only later answers). */
+  personaLabel: string;
+  personaListener: string;
+  personaCreator: string;
+  /** Memory-scope switcher (full default) + per-option tooltip hints. */
+  scopeLabel: string;
+  scopeFull: string;
+  scopeMemory: string;
+  scopeChat: string;
+  scopeFullHint: string;
+  scopeMemoryHint: string;
+  scopeChatHint: string;
+  /** Sidebar "new chat" button. */
+  newChat: string;
+  /** Empty state (big calm owl + guidance). */
+  emptyTitle: string;
+  emptyBody: string;
+  /** Composer. */
+  inputPlaceholder: string;
+  send: string;
+  /** Generating indicator / composer-disabled text. */
+  thinking: string;
+  /** Gentle error bubble title (the LLM failure message follows). */
+  errorTitle: string;
+}
+
 export interface ExploreLabels {
   // Choose Conversations dialog
   chooseConversationsTitle: string;
@@ -1523,6 +1604,8 @@ export interface ExploreLabels {
   save: string;
   copy: string;
   downloadTxt: string;
+  /** 夜话 (Companion) ask-pane copy. */
+  companion: CompanionLabels;
 }
 
 export interface DataLabels {

@@ -34,6 +34,7 @@ import type {
   WeeklyReport,
 } from "@vesti/ui";
 import { computeSummaryCoverage, learnRouteFingerprint, serializeRelayPackMarkdown } from "@vesti/ui";
+import { askCompanion } from "../companion/companionService";
 import type {
   ConversationTreeSession,
   SessionRecallHit,
@@ -1570,6 +1571,18 @@ export const desktopStorage: StorageApi = {
   renameExploreSession: (sessionId, title) => updateExploreSession(sessionId, { title }),
   updateExploreMessageContext: (messageId, contextDraft, selectedContextConversationIds) =>
     updateExploreMessageContext(messageId, contextDraft, selectedContextConversationIds),
+
+  // 夜话: one companion turn through the renderer orchestration service
+  // (context assembly + kind:'companion' agent + explore-session persistence).
+  askCompanion: (input) => askCompanion(input),
+
+  // UI preferences (window.vestiUi → ui-prefs.json): the 夜话 persona /
+  // memory-scope switches persist here — same bridge dailyScheduler reads.
+  getUiPreference: (key) =>
+    window.vestiUi?.getUiPreference(key) ?? Promise.resolve(null),
+  setUiPreference: async (key, value) => {
+    await window.vestiUi?.setUiPreference(key, value);
+  },
 
   // AI 圆桌: convene the selected personas on the configured LLM (one
   // 'roundtable-turn' run per seat, serial so progress arrives in order and

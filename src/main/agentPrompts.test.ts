@@ -883,3 +883,83 @@ describe('dream-maintain agent kind', () => {
     expect(() => definition.parse?.('   ')).toThrow('dream-maintain 输出不是 JSON');
   });
 });
+
+
+describe('companion agent kind', () => {
+  it('builds the listener prompt by default (template omitted)', () => {
+    const messages = getAgentKindDefinition('companion').buildPrompt({
+      transcript: 'CONTEXT',
+      question: '最近有点累',
+      preferences: zhPreferences,
+    });
+    expect(messages[0].role).toBe('system');
+    expect(messages[0].content.startsWith('你是「夜话」，Vesti 里的猫头鹰伙伴')).toBe(true);
+    expect(messages[0].content).toContain('温柔的倾听者');
+    expect(messages[0].content.endsWith('使用清晰、简洁的中文 Markdown。')).toBe(true);
+    expect(messages[1]).toEqual({
+      role: 'user',
+      content: 'CONTEXT\n\n用户现在说：最近有点累',
+    });
+  });
+
+  it('builds the creator prompt when template selects it', () => {
+    const messages = getAgentKindDefinition('companion').buildPrompt({
+      transcript: 'CONTEXT',
+      question: '给我点灵感',
+      template: 'creator',
+      preferences: zhPreferences,
+    });
+    expect(messages[0].content.startsWith('你是「夜话」的创造者人格')).toBe(true);
+    expect(messages[0].content).toContain('高能量、有火花');
+    expect(messages[0].content.endsWith('使用清晰、简洁的中文 Markdown。')).toBe(true);
+    expect(messages[1].content).toBe('CONTEXT\n\n用户现在说：给我点灵感');
+  });
+
+  it('falls back to the greeting line when the question is empty', () => {
+    const messages = getAgentKindDefinition('companion').buildPrompt({
+      transcript: '',
+      question: '',
+      preferences: zhPreferences,
+    });
+    expect(messages[1].content).toBe('\n\n用户现在说：（用户没有说话，主动打个招呼吧）');
+  });
+
+  it('appends custom instructions after the language affix', () => {
+    const messages = getAgentKindDefinition('companion').buildPrompt({
+      transcript: 'T',
+      preferences: { ...zhPreferences, customInstructions: '多用比喻' },
+    });
+    expect(messages[0].content).toContain('使用清晰、简洁的中文 Markdown。\n用户的长期分析偏好：多用比喻');
+  });
+
+  it('parse extracts the standard mood tag line', () => {
+    const definition = getAgentKindDefinition('companion');
+    expect(definition.parse?.('[mood:warm]\n正文第一行\n正文第二行')).toBe('warm\n正文第一行\n正文第二行');
+  });
+
+  it('parse defaults to calm when the tag is missing', () => {
+    const definition = getAgentKindDefinition('companion');
+    expect(definition.parse?.('没有标签的正文')).toBe('calm\n没有标签的正文');
+  });
+
+  it('parse drops an invalid tag and defaults to calm', () => {
+    const definition = getAgentKindDefinition('companion');
+    expect(definition.parse?.('[mood:excited]\n正文')).toBe('calm\n正文');
+  });
+
+  it('parse tolerates the fullwidth variant, casing and inner whitespace', () => {
+    const definition = getAgentKindDefinition('companion');
+    expect(definition.parse?.('【mood: SPARK 】\n正文')).toBe('spark\n正文');
+    expect(definition.parse?.('[MOOD:Thinking]\n正文')).toBe('thinking\n正文');
+  });
+
+  it('parse accepts the tag on the second line', () => {
+    const definition = getAgentKindDefinition('companion');
+    expect(definition.parse?.('\n[mood:sleepy]\n正文')).toBe('sleepy\n正文');
+  });
+
+  it('parse leaves tags beyond the second line in the body', () => {
+    const definition = getAgentKindDefinition('companion');
+    expect(definition.parse?.('第一行\n第二行\n[mood:warm]\n正文')).toBe('calm\n第一行\n第二行\n[mood:warm]\n正文');
+  });
+});

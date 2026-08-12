@@ -23,7 +23,7 @@ import { DailyTab } from "./tabs/daily-tab";
 import { LibraryTab } from "./tabs/library-tab";
 import { NetworkTab } from "./tabs/network-tab";
 import { PromptsTab } from "./tabs/prompts-tab";
-import type { AitiImagery, AitiProfile, DashboardLabels, LearnProfile, PlazaData, StorageApi, SummaryBatchState, SummaryCoverage, UiThemeMode } from "./types";
+import type { AitiImagery, AitiProfile, CompanionOwlIcons, DashboardLabels, LearnProfile, PlazaData, StorageApi, SummaryBatchState, SummaryCoverage, UiThemeMode } from "./types";
 import type { NotionDatabaseOption, NotionSettings } from "./notion-integration";
 import {
   advanceSummaryBatch,
@@ -609,6 +609,27 @@ const DEFAULT_LABELS: DashboardLabels = {
     save: "Save",
     copy: "Copy",
     downloadTxt: "Download TXT",
+    companion: {
+      title: "Night Talk",
+      subtitle: "The owl remembers what you've said.",
+      personaLabel: "Persona",
+      personaListener: "Listener",
+      personaCreator: "Creator",
+      scopeLabel: "Memory sense",
+      scopeFull: "Full sense",
+      scopeMemory: "Memory space only",
+      scopeChat: "This chat only",
+      scopeFullHint: "Night Talk draws on your long-term memories, deposits, and related past conversations.",
+      scopeMemoryHint: "Night Talk only uses your memory space — no conversation recall.",
+      scopeChatHint: "Night Talk only sees this conversation; your memory space stays untouched.",
+      newChat: "New Night Talk",
+      emptyTitle: "Tell me something",
+      emptyBody: "I remember all your conversations — the wins, the stuck points, the half-formed 2am ideas.",
+      inputPlaceholder: "Say something to Night Talk… (Enter to send, Shift+Enter for a new line)",
+      send: "Send",
+      thinking: "Night Talk is thinking…",
+      errorTitle: "Night Talk couldn't catch that one",
+    },
   },
   data: {
     title: "Data Management",
@@ -955,6 +976,9 @@ type DashboardProps = {
   aitiImagery?: AitiImagery | null;
   aitiEmblemUrl?: string;
   aitiPersonaNote?: string | null;
+  /** 夜话: owl mood-icon asset URLs resolved by the host (import.meta.glob on
+   * src/ui/assets/owl) — same hand-down pattern as aitiEmblemUrl. */
+  companionOwlIcons?: CompanionOwlIcons;
   learn?: LearnProfile;
   /** Transcript/persona language for the roundtable runs ("zh" default). */
   lang?: "zh" | "en";
@@ -983,6 +1007,7 @@ export function VestiDashboard({
   aitiImagery,
   aitiEmblemUrl,
   aitiPersonaNote,
+  companionOwlIcons,
   learn,
   lang = "zh",
   tab: controlledTab,
@@ -1609,6 +1634,7 @@ export function VestiDashboard({
                   onOpenConversation={handleOpenConversation}
                   labels={labels.explore}
                   seedQuery={askSeed}
+                  owlIcons={companionOwlIcons}
                 />
               </div>
               {exploreMode === "aiti" && (

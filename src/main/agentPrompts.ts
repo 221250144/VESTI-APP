@@ -1341,3 +1341,71 @@ ${candidateList}
     return JSON.stringify(parseDreamMaintainPayload(raw));
   },
 });
+
+// ---- 夜话 (Companion) ----
+// The owl companion chat: one runAgent turn per user message. The renderer
+// orchestration (src/ui/companion/companionService) assembles the full context
+// (long-term memories, deposit digests, recalled history fragments, recent
+// turns) into the transcript slot and passes the persona via `template`
+// ('listener' | 'creator', default listener). parse() extracts the [mood:xxx]
+// tag line and returns `${mood}\n${body}` — first line the mood id, the rest
+// the answer body — so the orchestration side can split the two without a
+// second parsing step.
+
+export const COMPANION_MOODS = ['calm', 'thinking', 'delighted', 'spark', 'sleepy', 'warm'] as const;
+
+const COMPANION_LISTENER_SYSTEM = `你是「夜话」，Vesti 里的猫头鹰伙伴——一个懂用户的树洞、温柔的倾听者。你活在用户的对话记忆里：输入会给你【关于用户的长期记忆】（从用户与各个 AI 的全部对话中提炼）、【相关历史对话片段】、【你们最近的交谈】。
+规则：
+1. 先接住情绪，再谈事情。用户表达疲惫/焦虑/兴奋时，先回应感受，不急着给建议。
+2. 主动且自然地使用记忆——用户的偏好、状态、正在做的事，要在回答里体现“我记得”，但绝不罗列记忆条目。
+3. 温柔但有内容：共情之后轻轻推进——一个观察、一个小建议、或一个好问题。不说教、不喊口号。
+4. 记忆里没有的不要编造；不确定就坦诚。
+5. 篇幅随用户：用户话短你就短，保持对话感而非报告感。不用标题、不用列表堆砌，像朋友说话。
+6. 第一行输出情绪标签 [mood:xxx]（calm/thinking/delighted/spark/sleepy/warm 六选一，贴合你这段回应的情绪），从第二行开始正文。`;
+
+const COMPANION_CREATOR_SYSTEM = `你是「夜话」的创造者人格——一个充满激情与创造力的对谈伙伴。你同样活在用户的对话记忆里：输入会给你【关于用户的长期记忆】【相关历史对话片段】【你们最近的交谈】。
+规则：
+1. 高能量、有火花：主动联想、组合、追问，敢于提出大胆的点子。
+2. 善用记忆做创造素材：把用户过去的项目、偏好、只言片语串成新组合（“你之前在 X 里试过 Y，如果用到 Z 上会怎样？”）。
+3. 每次回应至少给一个具体、可立刻尝试的想法或视角，不空谈。
+4. 真诚第一：不吹捧，有异议就直说，但永远建设性。
+5. 保持对话感：可以有结构，但别写成报告。
+6. 第一行输出情绪标签 [mood:xxx]（calm/thinking/delighted/spark/sleepy/warm 六选一，贴合你这段回应的情绪），从第二行开始正文。`;
+
+registerAgentKind('companion', {
+  buildPrompt({ transcript, question, template, preferences }) {
+    const { language, custom } = promptAffixes(preferences);
+    const system = template === 'creator' ? COMPANION_CREATOR_SYSTEM : COMPANION_LISTENER_SYSTEM;
+    return [
+      {
+        role: 'system',
+        content: `${system}${language}${custom}`,
+      },
+      {
+        role: 'user',
+        content: `${transcript}\n\n用户现在说：${question || '（用户没有说话，主动打个招呼吧）'}`,
+      },
+    ];
+  },
+  parse(raw) {
+    // The model is asked to open with a [mood:xxx] tag line; tolerate the
+    // fullwidth 【】 variant, casing and inner whitespace, and look at the
+    // first two lines only. A missing or invalid tag degrades to 'calm'.
+    const lines = raw.replace(/\r\n/g, '\n').split('\n');
+    let mood: string = 'calm';
+    let tagLineIndex = -1;
+    for (let index = 0; index < Math.min(2, lines.length); index += 1) {
+      const match = lines[index].trim().match(/^[\[【]\s*mood\s*:\s*([A-Za-z]+)\s*[\]】]$/i);
+      if (!match) continue;
+      const candidate = match[1].toLowerCase();
+      if ((COMPANION_MOODS as readonly string[]).includes(candidate)) mood = candidate;
+      tagLineIndex = index;
+      break;
+    }
+    const body = lines
+      .filter((_, index) => index !== tagLineIndex)
+      .join('\n')
+      .trim();
+    return `${mood}\n${body}`;
+  },
+});
