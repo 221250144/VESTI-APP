@@ -28,6 +28,7 @@ import {
 import { resolveClassifyLanguage, startAutoClassifyTrigger } from "./ui/organize/autoClassify";
 import { startUpstreamAutoExport } from "./ui/upstream/autoExport";
 import { startDailyScheduler } from "./ui/daily/dailyScheduler";
+import { startDreamScheduler } from "./ui/memory/dreamScheduler";
 import { startPromptSnapshotSync } from "./ui/sync/promptSnapshot";
 import { getAllSummaries, getTopics, listConversations } from "./ui/db/repository";
 import { computeAiti } from "./ui/aiti/computeAiti";
@@ -91,6 +92,7 @@ function Shell({
     startAutoClassifyTrigger();
     startUpstreamAutoExport();
     startDailyScheduler();
+    startDreamScheduler();
     startPromptSnapshotSync();
   }, []);
 
