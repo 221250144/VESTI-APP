@@ -1101,27 +1101,38 @@ export function VestiDashboard({
     return () => window.removeEventListener("vesti:data-updated", handler);
   }, [exploreMode, refreshAitiCoverage, summaryCoverageSupported]);
 
-  // 立即生成摘要: strictly sequential (concurrency 1), capped by
-  // planSummaryBatch; failures are counted and the run continues.
+  // 立即生成摘要: 3-lane worker pool (same pattern as the dream pipeline's
+  // lanes — the BYOK endpoint handles it) draining the whole pending queue in
+  // one click; failures are counted and the run continues. 停止 cancels.
   const handleGenerateSummaries = useCallback(async () => {
-    if (!storage.generateSummary || !aitiCoverage || summaryBatch?.status === "running") return;
-    const ids = planSummaryBatch(aitiCoverage.pendingConversationIds);
+    const generateSummary = storage.generateSummary;
+    if (!generateSummary || !aitiCoverage || summaryBatch?.status === "running") return;
+    const ids = planSummaryBatch(
+      aitiCoverage.pendingConversationIds,
+      aitiCoverage.pendingConversationIds.length
+    );
     if (ids.length === 0) return;
     summaryBatchCancelRef.current = false;
     let progress = createSummaryBatchProgress(ids.length);
     setSummaryBatch({ status: "running", ...progress });
-    for (const id of ids) {
-      if (summaryBatchCancelRef.current) break;
-      let outcome: "ok" | "failed" = "ok";
-      try {
-        await storage.generateSummary(id);
-      } catch (error) {
-        console.error("[Explore] Summary generation failed for conversation", id, error);
-        outcome = "failed";
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < ids.length && !summaryBatchCancelRef.current) {
+        const id = ids[cursor];
+        cursor += 1;
+        let outcome: "ok" | "failed" = "ok";
+        try {
+          await generateSummary(id);
+        } catch (error) {
+          console.error("[Explore] Summary generation failed for conversation", id, error);
+          outcome = "failed";
+        }
+        progress = advanceSummaryBatch(progress, outcome);
+        setSummaryBatch({ status: "running", ...progress });
       }
-      progress = advanceSummaryBatch(progress, outcome);
-      setSummaryBatch({ status: "running", ...progress });
-    }
+    };
+    const lanes = Math.min(3, ids.length);
+    await Promise.all(Array.from({ length: lanes }, () => worker()));
     setSummaryBatch({ status: "done", ...progress });
     // Same recompute trigger as a capture sync: the host recomputes AITI /
     // Learn from the freshly written summaries when it hears this.
