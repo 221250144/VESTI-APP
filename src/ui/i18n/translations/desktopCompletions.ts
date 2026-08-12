@@ -1,7 +1,7 @@
 /** Translations for desktop features added after the original ja/ko tables. */
 export const jaDesktopCompletion = {
   dashboard: {
-    tabs: { deposits: "ナレッジ", daily: "デイリー" },
+    tabs: { deposits: "メモリースペース", daily: "デイリー" },
     library: {
       digestKeyFiles: "主要ファイル",
       digestKeyDecisions: "決定事項", subagents: "サブエージェント", subagentHighlights: "サブエージェントの要点",
@@ -43,7 +43,7 @@ export const jaDesktopCompletion = {
       },
     },
     deposits: {
-      title: "ナレッジ", subtitle: "要点化して保存し、バージョン管理する知識ドキュメント。", unavailable: "現在の環境ではナレッジを利用できません。",
+      title: "メモリースペース", subtitle: "夢が日々の会話を長期記憶に整理し、ナレッジは蒸留ドキュメントとして保存されます。", unavailable: "現在の環境ではメモリースペースを利用できません。",
       newDeposit: "新規ナレッジ", templateBackground: "背景知識", descBackground: "スキル、好み、ワークフローをまとめ、AI があなたを理解できるようにします。",
       templateProject: "プロジェクト状況", descProject: "アーキテクチャ、決定、進捗、TODO を引き継ぎやレビュー向けにまとめます。",
       templateWriting: "文章スタイル", descWriting: "語調、表現、構成の習慣をまとめ、文章作成に活用します。", templateCustom: "カスタム要約",
@@ -64,6 +64,16 @@ export const jaDesktopCompletion = {
       sweepAll: "一括ナレッジ生成", sweepAllHint: "すべてのプリセット（背景知識・各プロジェクト状況・文章スタイル）を一度に生成します。",
       sweepProgress: "生成中 {current}/{total}: {label}",
       sweepSummary: "一括生成完了：追加 {added}・更新 {updated}・スキップ {skipped}", sweepFailed: "{failed} 件失敗",
+      sectionMemories: "メモリー", sectionDreamLogs: "夢ログ", sectionDeposits: "ナレッジ",
+      dreamNow: "夢を見る", dreamRunning: "夢を見ています…",
+      dreamFirstRunHint: "初回の夢は全履歴を整理するため、時間がかかります。", dreamAuto: "自動で夢を見る",
+      dreamFullRebuild: "全量やり直し",
+      dreamFullConfirm: "全量やり直しはすべての会話履歴を再整理するため、時間がかかります。続行しますか？",
+      dreamFailed: "夢の実行に失敗：{message}",
+      memoryEmpty: "まだメモリーがありません。眠って夢を見ましょう。", memoryTagEmpty: "このタグのメモリーはまだありません。",
+      dreamLogEmpty: "夢ログはまだありません。夢を実行すると記録されます。",
+      tagAll: "すべて", tagProfile: "背景", tagPreference: "好み", tagGoal: "目標", tagEmotion: "感情", tagRelationship: "協働", tagEvent: "出来事",
+      close: "閉じる",
     },
     daily: {
       title: "デイリーログ", subtitle: "毎晩まとめられる AI 活動。", unavailable: "現在の環境ではデイリーログを利用できません。",
@@ -113,7 +123,7 @@ export const jaDesktopCompletion = {
 
 export const koDesktopCompletion = {
   dashboard: {
-    tabs: { deposits: "지식 보관함", daily: "일일 로그" },
+    tabs: { deposits: "메모리 스페이스", daily: "일일 로그" },
     library: {
       digestKeyFiles: "주요 파일", digestKeyDecisions: "결정 사항", subagents: "서브 에이전트", subagentHighlights: "서브 에이전트 핵심", moveToTopic: "주제로 이동", noTopic: "주제 없음",
       sourceTree: { sectionLabel: "소스", notes: "내 노트", browser: "브라우저", wslBadge: "WSL" },
@@ -147,12 +157,12 @@ export const koDesktopCompletion = {
         generate: "지식 추출", generating: "추출 중…", title: "지식 추출", conversationsFrom: "소스 대화 {count}개",
         sectionKnowledge: "지식 포인트", sectionCode: "코드 조각", sectionDecisions: "결정 사항", sectionPrompts: "프롬프트",
         decisionContext: "배경", decisionLabel: "결정", decisionConsequences: "영향", copy: "복사", copied: "복사됨",
-        saveToDeposits: "지식 보관함에 저장", saving: "저장 중…", savedToDeposits: "지식 보관함에 저장했습니다.", exportMarkdown: ".md 내보내기",
+        saveToDeposits: "지식 문서에 저장", saving: "저장 중…", savedToDeposits: "지식 문서에 저장했습니다.", exportMarkdown: ".md 내보내기",
         exportJson: "JSON 내보내기", downloaded: "{filename} 다운로드 완료", close: "닫기", empty: "표시할 내용이 없습니다.",
       },
     },
     deposits: {
-      title: "지식 보관함", subtitle: "정제하여 저장하고 버전으로 관리하는 지식 문서입니다.", unavailable: "현재 환경에서는 지식 보관함을 사용할 수 없습니다.",
+      title: "메모리 스페이스", subtitle: "꿈이 매일의 대화를 장기 기억으로 정리하고, 지식 문서는 정제되어 보관됩니다.", unavailable: "현재 환경에서는 메모리 스페이스를 사용할 수 없습니다.",
       newDeposit: "새 지식 문서", templateBackground: "배경 지식", descBackground: "기술, 선호도와 작업 흐름을 정리해 어떤 AI든 사용자를 이해하도록 돕습니다.",
       templateProject: "프로젝트 상태", descProject: "아키텍처, 결정, 진행 상황과 할 일을 인계 및 검토용으로 정리합니다.",
       templateWriting: "글쓰기 스타일", descWriting: "어조, 표현과 구조 습관을 정리해 대필에 활용합니다.", templateCustom: "사용자 지정 정제",
@@ -172,6 +182,16 @@ export const koDesktopCompletion = {
       sweepAll: "한 번에 전체 생성", sweepAllHint: "모든 프리셋(배경 지식·각 프로젝트 상태·글쓰기 스타일)을 한 번에 생성합니다.",
       sweepProgress: "생성 중 {current}/{total}: {label}",
       sweepSummary: "전체 생성 완료: 추가 {added} · 업데이트 {updated} · 건너뜀 {skipped}", sweepFailed: "{failed}개 실패",
+      sectionMemories: "기억", sectionDreamLogs: "꿈 로그", sectionDeposits: "지식 문서",
+      dreamNow: "꿈꾸기", dreamRunning: "꿈꾸는 중…",
+      dreamFirstRunHint: "첫 꿈은 전체 기록을 정리하므로 시간이 걸립니다.", dreamAuto: "자동 꿈",
+      dreamFullRebuild: "전체 재정리",
+      dreamFullConfirm: "전체 재정리는 모든 대화 기록을 다시 정리하므로 시간이 오래 걸립니다. 계속할까요?",
+      dreamFailed: "꿈 실행 실패: {message}",
+      memoryEmpty: "아직 기억이 없습니다. 잠을 자며 꿈을 꿔보세요.", memoryTagEmpty: "이 태그에는 아직 기억이 없습니다.",
+      dreamLogEmpty: "아직 꿈 로그가 없습니다. 꿈을 실행하면 로그가 남습니다.",
+      tagAll: "전체", tagProfile: "배경", tagPreference: "선호", tagGoal: "목표", tagEmotion: "감정", tagRelationship: "협업", tagEvent: "사건",
+      close: "닫기",
     },
     daily: {
       title: "일일 로그", subtitle: "매일 저녁 요약되는 AI 활동입니다.", unavailable: "현재 환경에서는 일일 로그를 사용할 수 없습니다.",

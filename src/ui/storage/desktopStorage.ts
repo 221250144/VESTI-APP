@@ -47,20 +47,17 @@ import {
   addExploreMessage,
   bulkAddTagToConversations,
   bulkSetConversationFlags,
-  createDeposit,
   createExploreSession,
   createNote,
   createRelayPack,
   deleteAnnotation,
   deleteConversation,
-  deleteDeposit,
   deleteExploreSession,
   deleteNote,
   deleteRelayPack,
   exportAllData,
   getAllSummaries,
   getAnnotationExportContext,
-  getDeposit,
   getExploreMessages,
   getExploreSession,
   getNoteAsset,
@@ -73,7 +70,6 @@ import {
   listAnnotations,
   listConversations,
   listDailyLogs,
-  listDeposits,
   listExploreSessions,
   listMessages,
   listNotes,
@@ -81,7 +77,6 @@ import {
   listWeeklyReports,
   moveTagAcrossConversations,
   removeTagFromConversations,
-  renameDeposit,
   renameTagAcrossConversations,
   saveAnnotation,
   saveSummary,
@@ -91,6 +86,16 @@ import {
   updateExploreSession,
   updateNote,
 } from "../db/repository";
+// 记忆空间: deposits persist via the main-process memory_entries store (the
+// Dexie deposits table remains as a pre-migration backup).
+import {
+  createDeposit,
+  deleteDeposit,
+  getDeposit,
+  listDeposits,
+  renameDeposit,
+} from "../deposits/depositRepository";
+import { isDreamAutoEnabled, runDream, setDreamAutoEnabled } from "../memory";
 import {
   createPrompt,
   deletePrompt,
@@ -1462,6 +1467,19 @@ export const desktopStorage: StorageApi = {
   },
   resolveDepositScope: (scope) => resolveDepositScopeImpl(scope),
   exportDepositMarkdown: (id) => exportDepositMarkdownImpl(id),
+
+  // 记忆空间 (memory space): dream memories + dream logs from memory_entries,
+  // and the dream pipeline itself (src/ui/memory).
+  listMemoryEntries: async (options) => (await vestiApi()?.listMemoryEntries(options)) ?? [],
+  runDream: (options) =>
+    runDream({
+      mode: options.mode,
+      onProgress: options.onProgress
+        ? (progress) => options.onProgress?.(progress.message)
+        : undefined,
+    }),
+  getDreamAutoEnabled: () => isDreamAutoEnabled(),
+  setDreamAutoEnabled: (enabled) => setDreamAutoEnabled(enabled),
 
   // P4c daily log + weekly report.
   listDailyLogs: () => listDailyLogs(),

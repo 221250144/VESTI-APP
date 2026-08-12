@@ -1,12 +1,16 @@
 "use client";
 
-// Deposits area (P4b) — long-lived distilled knowledge documents.
-// Left: template cards (4 presets + custom) and the history list (version
-// heads). Right: the generation composer (template → scope → generate) or
-// the selected deposit (Markdown body, version chain, rename/delete,
-// multi-format export). Generation and persistence go through optional
-// StorageApi methods; platforms without the desktop bridge see the empty
-// state with everything disabled.
+// 记忆空间 (memory space, formerly the P4b deposits area): three sections —
+// dream memories ('dream' entries, tag-filtered cards), dream logs
+// ('dream-log' journals) and the classic deposits workbench (template grid,
+// version chains, one-click sweep). The header carries the dream pipeline
+// controls (manual run, auto toggle, full rebuild). Deposits persistence now
+// rides on the same memory_entries store via the storage layer, transparently.
+//
+// Deposits workbench layout: left = template cards + history (version heads),
+// right = the generation composer or the selected deposit (Markdown body,
+// version chain, rename/delete, export). Dream sections live in
+// ./deposits/memorySections.
 
 import { useEffect, useMemo, useState } from "react";
 import { marked } from "marked";
@@ -15,6 +19,7 @@ import {
   Archive,
   Check,
   ChevronDown,
+  CloudMoon,
   Download,
   FolderGit2,
   Layers,
@@ -22,12 +27,17 @@ import {
   PenLine,
   Pencil,
   RefreshCw,
+  RotateCcw,
   Sparkles,
   Trash2,
   User,
 } from "lucide-react";
 import { SendToMenu } from "../components/SendToMenu";
 import { sanitizeFileBaseName } from "../lib/extractMarkdown";
+import {
+  DreamLogSection,
+  DreamMemorySection,
+} from "./deposits/memorySections";
 import {
   planDepositSweep,
   runDepositSweep,
@@ -204,7 +214,20 @@ export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps)
   const [sweepProgress, setSweepProgress] = useState<DepositSweepProgress | null>(null);
   const [sweepSummary, setSweepSummary] = useState<DepositSweepSummary | null>(null);
 
-  const available = Boolean(storage.listDeposits && storage.generateDeposit);
+  // Memory-space sections + dream pipeline controls (header).
+  const [section, setSection] = useState<"memories" | "dreamLogs" | "deposits">("memories");
+  const [dreaming, setDreaming] = useState(false);
+  const [dreamProgress, setDreamProgress] = useState<string | null>(null);
+  const [dreamNotice, setDreamNotice] = useState<string | null>(null);
+  const [dreamDoneMessage, setDreamDoneMessage] = useState<string | null>(null);
+  const [dreamAutoEnabled, setDreamAutoEnabledState] = useState<boolean | null>(null);
+  /** null until probed; false drives the "first dream is a full pass" hint. */
+  const [hasDreamLog, setHasDreamLog] = useState<boolean | null>(null);
+  const [memoryRefreshKey, setMemoryRefreshKey] = useState(0);
+
+  const available = Boolean(
+    storage.listDeposits && storage.generateDeposit && storage.listMemoryEntries,
+  );
   const llmMissing = availability !== null && !availability.llmConfigured;
 
   const refreshDeposits = async () => {
@@ -223,6 +246,12 @@ export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps)
     // LLM probe: the relay availability surface is the existing capability
     // check (llmConfigured); deposits generation shares the same agent IPC.
     void storage.getRelayAvailability?.().then(setAvailability);
+    // Dream controls: current auto toggle + whether any dream ran before
+    // (a missing journal means the first run will be a full pass).
+    void storage.getDreamAutoEnabled?.().then(setDreamAutoEnabledState).catch(() => setDreamAutoEnabledState(null));
+    void storage.listMemoryEntries?.({ kind: "dream-log", limit: 1 })
+      .then((entries) => setHasDreamLog(entries.length > 0))
+      .catch(() => setHasDreamLog(null));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storage]);
 
@@ -473,6 +502,68 @@ export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps)
       ? `${templateName(item.template)} · ${item.scope.label}`
       : templateName(item.template);
 
+  // Dream pipeline: one manual/full run via the storage layer (src/ui/memory
+  // underneath). The service itself is single-flight; the button state here
+  // just mirrors the run and refreshes the dream sections when it lands.
+  const handleDream = async (mode: "manual" | "full") => {
+    if (!storage.runDream || dreaming || llmMissing) return;
+    if (mode === "full") {
+      const confirmed = window.confirm(
+        l(
+          "dreamFullConfirm",
+          "A full rebuild re-organizes your entire history and can take a long time. Continue?",
+        ),
+      );
+      if (!confirmed) return;
+    }
+    setDreaming(true);
+    setDreamNotice(null);
+    setDreamDoneMessage(null);
+    setDreamProgress(l("dreamRunning", "Dreaming…"));
+    try {
+      const result = await storage.runDream({
+        mode,
+        onProgress: (message) => {
+          if (message) setDreamProgress(message);
+        },
+      });
+      if (result.ok) {
+        setDreamDoneMessage(result.message ?? null);
+        setHasDreamLog(true);
+        setMemoryRefreshKey((key) => key + 1);
+      } else {
+        setDreamNotice(
+          l("dreamFailed", "Dream failed: {message}").replace(
+            "{message}",
+            result.error ?? "unknown",
+          ),
+        );
+      }
+    } catch (error) {
+      setDreamNotice(
+        l("dreamFailed", "Dream failed: {message}").replace(
+          "{message}",
+          (error as Error)?.message ?? String(error),
+        ),
+      );
+    } finally {
+      setDreaming(false);
+      setDreamProgress(null);
+    }
+  };
+
+  const handleDreamAutoToggle = async () => {
+    if (!storage.setDreamAutoEnabled || dreamAutoEnabled === null) return;
+    const next = !dreamAutoEnabled;
+    setDreamAutoEnabledState(next);
+    try {
+      await storage.setDreamAutoEnabled(next);
+    } catch (error) {
+      setDreamAutoEnabledState(!next);
+      setDreamNotice((error as Error)?.message ?? String(error));
+    }
+  };
+
   const handleRename = async () => {
     if (!storage.renameDeposit || !viewDeposit) return;
     const title = renameTitle.trim();
@@ -603,29 +694,138 @@ export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps)
   if (!available) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 bg-bg-app">
-        <Archive strokeWidth={1.75} className="h-8 w-8 text-text-tertiary" />
+        <CloudMoon strokeWidth={1.75} className="h-8 w-8 text-text-tertiary" />
         <p className="text-vesti-lg font-serif text-text-primary">
-          {l("title", "Deposits")}
+          {l("title", "Memory Space")}
         </p>
         <p className="text-vesti-base font-sans text-text-tertiary">
-          {l("unavailable", "Deposits are unavailable in the current environment.")}
+          {l("unavailable", "Memory space is unavailable in the current environment.")}
         </p>
       </div>
     );
   }
 
+  const sectionButton = (id: "memories" | "dreamLogs" | "deposits", label: string) => (
+    <button
+      key={id}
+      type="button"
+      onClick={() => setSection(id)}
+      className={`rounded-full px-3 py-1 text-vesti-sm font-sans transition-colors ${
+        section === id
+          ? "bg-accent-primary-light text-accent-primary"
+          : "text-text-tertiary hover:text-text-secondary"
+      }`}
+    >
+      {label}
+    </button>
+  );
+
   return (
+    <div className="flex h-full flex-col overflow-hidden bg-bg-app">
+      {/* Header: title + dream pipeline controls */}
+      <header className="shrink-0 border-b border-border-subtle bg-bg-tertiary px-4 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h1 className="text-vesti-lg font-serif text-text-primary">
+              {l("title", "Memory Space")}
+            </h1>
+            <p className="mt-0.5 text-vesti-sm font-sans text-text-tertiary">
+              {l(
+                "subtitle",
+                "Dreams distill each day's sessions into long-term memories; deposits keep distilled knowledge documents.",
+              )}
+            </p>
+          </div>
+          {storage.runDream ? (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+              <button
+                type="button"
+                onClick={() => void handleDream("full")}
+                disabled={dreaming || llmMissing}
+                title={
+                  llmMissing ? l("llmMissing", "Configure a model in Settings first.") : undefined
+                }
+                className="inline-flex items-center gap-1 rounded-md border border-border-subtle px-2.5 py-1 text-vesti-sm font-sans text-text-secondary transition-colors hover:bg-bg-surface-card disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <RotateCcw strokeWidth={1.75} className="h-3.5 w-3.5" />
+                {l("dreamFullRebuild", "Full rebuild")}
+              </button>
+              {storage.getDreamAutoEnabled && storage.setDreamAutoEnabled && dreamAutoEnabled !== null ? (
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={dreamAutoEnabled}
+                  onClick={() => void handleDreamAutoToggle()}
+                  className="inline-flex items-center gap-1.5 text-vesti-sm font-sans text-text-secondary transition-colors hover:text-text-primary"
+                >
+                  <span
+                    className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+                      dreamAutoEnabled ? "bg-accent-primary" : "bg-bg-surface-hover"
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 transform rounded-full bg-bg-primary shadow transition-transform ${
+                        dreamAutoEnabled ? "translate-x-[18px]" : "translate-x-0.5"
+                      }`}
+                    />
+                  </span>
+                  {l("dreamAuto", "Auto-dream")}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => void handleDream("manual")}
+                disabled={dreaming || llmMissing}
+                title={
+                  llmMissing ? l("llmMissing", "Configure a model in Settings first.") : undefined
+                }
+                className="inline-flex items-center gap-1.5 rounded-md bg-accent-primary px-3 py-1.5 text-vesti-base font-sans text-text-inverse transition-colors hover:bg-accent-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {dreaming ? (
+                  <RefreshCw strokeWidth={1.75} className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <CloudMoon strokeWidth={1.75} className="h-3.5 w-3.5" />
+                )}
+                {dreaming ? l("dreamRunning", "Dreaming…") : l("dreamNow", "Dream")}
+              </button>
+            </div>
+          ) : null}
+        </div>
+        {dreaming && dreamProgress ? (
+          <p className="mt-2 text-vesti-sm font-sans text-text-secondary">{dreamProgress}</p>
+        ) : null}
+        {!dreaming && hasDreamLog === false && !llmMissing ? (
+          <p className="mt-2 text-vesti-sm font-sans text-text-tertiary">
+            {l(
+              "dreamFirstRunHint",
+              "The first dream organizes your whole history — it can take a while.",
+            )}
+          </p>
+        ) : null}
+        {dreamDoneMessage ? (
+          <p className="mt-2 text-vesti-sm font-sans text-text-secondary">{dreamDoneMessage}</p>
+        ) : null}
+        {dreamNotice ? (
+          <p className="mt-2 text-vesti-sm font-sans text-danger">{dreamNotice}</p>
+        ) : null}
+      </header>
+
+      {/* Section switch: memories (default) / dream logs / deposits */}
+      <nav className="flex shrink-0 items-center gap-1 border-b border-border-subtle bg-bg-tertiary px-4 py-2">
+        {sectionButton("memories", l("sectionMemories", "Memories"))}
+        {sectionButton("dreamLogs", l("sectionDreamLogs", "Dream logs"))}
+        {sectionButton("deposits", l("sectionDeposits", "Deposits"))}
+      </nav>
+
+      <div className="min-h-0 flex-1">
+        {section === "memories" ? (
+          <DreamMemorySection storage={storage} l={l} refreshKey={memoryRefreshKey} />
+        ) : section === "dreamLogs" ? (
+          <DreamLogSection storage={storage} l={l} refreshKey={memoryRefreshKey} />
+        ) : (
     <div className="flex h-full overflow-hidden bg-bg-app">
       {/* Left column: templates + history */}
       <aside className="flex w-[300px] shrink-0 flex-col border-r border-border-subtle bg-bg-tertiary">
-        <div className="border-b border-border-subtle px-4 py-3">
-          <h1 className="text-vesti-lg font-serif text-text-primary">
-            {l("title", "Deposits")}
-          </h1>
-          <p className="mt-0.5 text-vesti-sm font-sans text-text-tertiary">
-            {l("subtitle", "Distilled knowledge documents, kept and versioned.")}
-          </p>
-        </div>
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-3">
           <section>
             <button
@@ -1213,6 +1413,9 @@ export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps)
           </div>
         )}
       </main>
+    </div>
+        )}
+      </div>
     </div>
   );
 }

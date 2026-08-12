@@ -64,7 +64,7 @@ function readStoredExploreMode(): ExploreSubMode {
 }
 
 const DEFAULT_LABELS: DashboardLabels = {
-  tabs: { library: "LIBRARY", explore: "EXPLORE", network: "KNOWLEDGE GRAPH", prompts: "PROMPTS", deposits: "DEPOSITS", daily: "DAILY" },
+  tabs: { library: "LIBRARY", explore: "EXPLORE", network: "KNOWLEDGE GRAPH", prompts: "PROMPTS", deposits: "MEMORY SPACE", daily: "DAILY" },
   nav: {
     backToExplore: "Back to Explore",
     backToNetwork: "Back to Knowledge Graph",

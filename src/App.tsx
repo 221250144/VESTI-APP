@@ -29,6 +29,7 @@ import { resolveClassifyLanguage, startAutoClassifyTrigger } from "./ui/organize
 import { startUpstreamAutoExport } from "./ui/upstream/autoExport";
 import { startDailyScheduler } from "./ui/daily/dailyScheduler";
 import { startDreamScheduler } from "./ui/memory/dreamScheduler";
+import { migrateDepositsToMemory } from "./ui/deposits/migrateDeposits";
 import { startPromptSnapshotSync } from "./ui/sync/promptSnapshot";
 import { getAllSummaries, getTopics, listConversations } from "./ui/db/repository";
 import { computeAiti } from "./ui/aiti/computeAiti";
@@ -93,6 +94,9 @@ function Shell({
     startUpstreamAutoExport();
     startDailyScheduler();
     startDreamScheduler();
+    // One-shot Dexie→memory_entries deposit migration; idempotent (same-id
+    // upserts) and a no-op once the memory_meta watermark is stamped.
+    void migrateDepositsToMemory().catch(() => undefined);
     startPromptSnapshotSync();
   }, []);
 

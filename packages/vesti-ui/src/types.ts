@@ -578,6 +578,15 @@ export type StorageApi = {
   /** Serializes the deposit Markdown and writes it under a user-chosen
    * directory; resolves null when the user cancels the picker. */
   exportDepositMarkdown?: (id: number) => Promise<{ relativePath: string } | null>;
+  // 记忆空间 (memory space): unified memory entries — dream memories
+  // (kind 'dream') and dream run logs (kind 'dream-log'). Migrated deposits
+  // keep flowing through listDeposits above.
+  listMemoryEntries?: (options?: MemoryEntryListOptions) => Promise<MemoryEntryView[]>;
+  /** Run the dream pipeline once (manual incremental / full rebuild). */
+  runDream?: (options: DreamRunOptions) => Promise<DreamRunResultView>;
+  /** Nightly auto-dream toggle state + setter (persisted by the platform). */
+  getDreamAutoEnabled?: () => Promise<boolean>;
+  setDreamAutoEnabled?: (enabled: boolean) => Promise<void>;
   // P4c daily log + weekly report.
   listDailyLogs?: () => Promise<DailyLog[]>;
   /** Generate (or regenerate) the log for a local day ("YYYY-MM-DD";
@@ -1019,6 +1028,63 @@ export interface GenerateDepositInput {
   scope: DepositScope;
   customInstruction?: string;
   previousId?: number;
+}
+
+// ---- 记忆空间 (memory space) ---------------------------------------------------
+// Mirror of src/shared/contracts.ts MemoryEntryView (main-process SQLite
+// memory_entries): unified long-term memory — migrated deposits, dream
+// memories, dream run logs and free notes. Optional in StorageApi; platforms
+// without the desktop bridge leave the methods unimplemented and the memory
+// space renders the unavailable state.
+
+export type MemoryEntryKind = "deposit" | "dream" | "dream-log" | "note";
+
+export interface MemoryEntryView {
+  id: string;
+  kind: MemoryEntryKind;
+  title: string;
+  contentMarkdown: string;
+  summary?: string | null;
+  scope?: string | null;
+  template?: string | null;
+  sourceSessionIds: string[];
+  tags: string[];
+  version: number;
+  prevId?: string | null;
+  lastOps?: string | null;
+  status: "active" | "archived";
+  /** YYYY-MM-DD */
+  entryDate?: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MemoryEntryListOptions {
+  kind?: MemoryEntryKind;
+  status?: "active" | "archived";
+  limit?: number;
+  offset?: number;
+}
+
+/** Dream pipeline run request: manual = incremental maintain pass, full =
+ * rebuild from the whole history. onProgress receives display-ready progress
+ * lines from the pipeline. */
+export interface DreamRunOptions {
+  mode: "manual" | "full";
+  onProgress?: (message: string) => void;
+}
+
+/** Outcome of one dream pipeline run (renderer mirror of the service result). */
+export interface DreamRunResultView {
+  ok: boolean;
+  firstFull: boolean;
+  sessionsProcessed: number;
+  added: number;
+  updated: number;
+  deleted: number;
+  noop: number;
+  message?: string;
+  error?: string;
 }
 
 // ---- P4c daily log + weekly report -----------------------------------------
