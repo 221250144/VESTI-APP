@@ -17,6 +17,7 @@ import type { SupportedLocale } from "../i18n/locales";
 import { MembershipAccountCard } from "../membership/MembershipAccountCard";
 import { CreditCard } from "../membership/CreditCard";
 import { useUiPreference } from "./useUiPreference";
+import { AGENT_NOTIFY_PREF_KEY, AMBIENT_BUBBLE_PREF_KEY } from "../companion/ambientBubble";
 import { DEFAULT_SKIN_ID, SKINS, resolveSkin } from "../../capsule/skins";
 import {
   DAILY_TIME_PREF_KEY,
@@ -97,6 +98,10 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     closeToTrayDesc: "点击窗口关闭按钮后继续在后台捕获;可从托盘菜单彻底退出。",
     showCapsule: "显示桌面悬浮球",
     showCapsuleDesc: "小猫头鹰常驻屏幕边缘,随时同步或打开主界面。",
+    ambientBubble: "猫头鹰环境气泡",
+    ambientBubbleDesc: "空闲时小猫头鹰会偶尔冒泡,聊聊你的梦境整理与最新对话。",
+    agentNotify: "Agent 完工提醒",
+    agentNotifyDesc: "当 Kimi Code、Claude Code 等 agent 完成一轮工作时,悬浮球会冒泡提示。",
     captureTitle: "采集引擎",
     captureDesc: "只读取已启用工具保存在本机的会话文件。停用来源不会删除已经归档的数据。",
     watchOnStartup: "启动后自动实时采集",
@@ -293,6 +298,10 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     closeToTrayDesc: "Closing the window keeps capturing in the background; quit from the tray menu.",
     showCapsule: "Show desktop floating ball",
     showCapsuleDesc: "The little owl stays at the screen edge for quick sync and access.",
+    ambientBubble: "Owl ambient bubbles",
+    ambientBubbleDesc: "When idle, the owl occasionally surfaces a gentle line about your dreams and latest conversations.",
+    agentNotify: "Agent completion alerts",
+    agentNotifyDesc: "When Kimi Code, Claude Code, or another agent finishes a run, the floating ball lets you know.",
     captureTitle: "Capture Engine",
     captureDesc: "Only reads session files stored locally by the enabled tools. Disabling a source never deletes archived data.",
     watchOnStartup: "Watch in real time after launch",
@@ -489,6 +498,10 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     closeToTrayDesc: "ウィンドウを閉じてもバックグラウンド収集を続けます。終了はトレイメニューから行えます。",
     showCapsule: "デスクトップのフローティングボールを表示",
     showCapsuleDesc: "小さなフクロウを画面端に常駐させ、同期やメイン画面をすぐ開けます。",
+    ambientBubble: "フクロウの環境バブル",
+    ambientBubbleDesc: "アイドル時にフクロウが夢の整理や最新の会話についてそっと話しかけます。",
+    agentNotify: "エージェント完了通知",
+    agentNotifyDesc: "Kimi Code や Claude Code などのエージェントが作業を終えると、フローティングボールがお知らせします。",
     captureTitle: "収集エンジン",
     captureDesc: "有効なツールがローカルに保存した会話ファイルだけを読み取ります。無効にしても保存済みデータは削除されません。",
     watchOnStartup: "起動後にリアルタイム収集を開始",
@@ -667,6 +680,10 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     closeToTrayDesc: "창을 닫은 뒤에도 백그라운드 수집을 계속합니다. 트레이 메뉴에서 완전히 종료할 수 있습니다.",
     showCapsule: "데스크톱 플로팅 볼 표시",
     showCapsuleDesc: "작은 부엉이를 화면 가장자리에 두고 동기화하거나 메인 화면을 빠르게 엽니다.",
+    ambientBubble: "부엉이 앰비언트 버블",
+    ambientBubbleDesc: "한가할 때 부엉이가 꿈 정리와 최근 대화에 대해 가볍게 말을 겁니다.",
+    agentNotify: "에이전트 완료 알림",
+    agentNotifyDesc: "Kimi Code, Claude Code 등 에이전트가 작업을 마치면 플로팅 볼이 알려줍니다.",
     captureTitle: "수집 엔진",
     captureDesc: "활성화한 도구가 로컬에 저장한 대화 파일만 읽습니다. 소스를 꺼도 이미 보관된 데이터는 삭제되지 않습니다.",
     watchOnStartup: "시작 후 실시간 수집",
@@ -999,6 +1016,8 @@ export function SettingsPage({
   const { locale, setLocale } = useI18n();
   const copy = { ...COPY.en, ...COPY[locale] };
   const [capsuleEnabled, setCapsuleEnabled] = useUiPreference("capsule.enabled", true, value => value !== false);
+  const [ambientBubbleEnabled, setAmbientBubbleEnabled] = useUiPreference(AMBIENT_BUBBLE_PREF_KEY, true, value => value !== false);
+  const [agentNotifyEnabled, setAgentNotifyEnabled] = useUiPreference(AGENT_NOTIFY_PREF_KEY, true, value => value !== false);
   const [owlSkin, setOwlSkin] = useUiPreference("owlSkin", DEFAULT_SKIN_ID, value => resolveSkin(value).id);
   const [classifyEnabled, setClassifyEnabled] = useUiPreference("classify.enabled", true, value => value !== false);
   const [classifyMode, setClassifyMode] = useUiPreference<"auto" | "suggest">(
@@ -1464,6 +1483,18 @@ export function SettingsPage({
               title={copy.showCapsule}
               description={copy.showCapsuleDesc}
               onChange={setCapsuleEnabled}
+            />
+            <Toggle
+              checked={ambientBubbleEnabled}
+              title={copy.ambientBubble}
+              description={copy.ambientBubbleDesc}
+              onChange={setAmbientBubbleEnabled}
+            />
+            <Toggle
+              checked={agentNotifyEnabled}
+              title={copy.agentNotify}
+              description={copy.agentNotifyDesc}
+              onChange={setAgentNotifyEnabled}
             />
           </div>
         </Card>

@@ -1482,6 +1482,10 @@ app.whenReady().then(async () => {
     digest.requestScan();
     projectMemory.requestScan();
   });
+  capture.setAgentActivityListener(payload => {
+    if (!productRuntimeActive) return;
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC.agentActivity, payload);
+  });
   extensionBridge = new ExtensionBridgeService({
     appVersion: app.getVersion(),
     isAuthorized: () => membership.isActive(),

@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  AGENT_NOTIFY_MIN_GAP_MS,
   AMBIENT_BUBBLE_MAX_GAP_MS,
   AMBIENT_BUBBLE_MIN_GAP_MS,
+  agentActivityBubbleText,
   dreamLogBubbleText,
   firstDailyLogLine,
   randomGapMs,
+  recentConversationBubbleText,
 } from "./ambientBubble";
-import type { MemoryEntryView } from "../../shared/contracts";
+import type { AgentActivityPayload, MemoryEntryView } from "../../shared/contracts";
 
 function dreamLog(summary: string | null): MemoryEntryView {
   return {
@@ -73,5 +76,59 @@ describe("randomGapMs", () => {
     expect(randomGapMs(() => 0)).toBe(AMBIENT_BUBBLE_MIN_GAP_MS);
     expect(randomGapMs(() => 0.9999)).toBeLessThanOrEqual(AMBIENT_BUBBLE_MAX_GAP_MS);
     expect(randomGapMs(() => 0.5)).toBeGreaterThan(AMBIENT_BUBBLE_MIN_GAP_MS);
+  });
+});
+
+describe("recentConversationBubbleText", () => {
+  it("mentions the platform and the truncated title", () => {
+    expect(
+      recentConversationBubbleText({ title: "重构捕获引擎的对话树", platform: "Kimi Code" }),
+    ).toBe("看到你在 Kimi Code 聊了《重构捕获引擎的对话树》，进展顺利吗？");
+  });
+
+  it("works without a platform label", () => {
+    expect(recentConversationBubbleText({ title: "写周记", platform: "" })).toBe(
+      "看到你在聊《写周记》，进展顺利吗？",
+    );
+  });
+
+  it("returns null for empty titles", () => {
+    expect(recentConversationBubbleText({ title: "   ", platform: "Codex" })).toBeNull();
+  });
+});
+
+describe("agentActivityBubbleText", () => {
+  const payload: AgentActivityPayload = {
+    platform: "kimi-code",
+    sessionId: "s-1",
+    title: "实现积分体系",
+    at: 0,
+  };
+
+  it("composes a completion line with the platform label", () => {
+    expect(agentActivityBubbleText(payload)).toBe(
+      "Kimi Code 刚完成了《实现积分体系》的新进展，要去看看吗？",
+    );
+  });
+
+  it("degrades gracefully without a title", () => {
+    expect(agentActivityBubbleText({ ...payload, title: "" })).toBe(
+      "Kimi Code 刚完成了新进展，要去看看吗？",
+    );
+  });
+
+  it("truncates long titles", () => {
+    const long = { ...payload, title: "很".repeat(60) };
+    const text = agentActivityBubbleText(long);
+    expect(text.length).toBeLessThan(60);
+    expect(text).toContain("…");
+  });
+
+  it("falls back to the raw platform id for unknown platforms", () => {
+    expect(agentActivityBubbleText({ ...payload, platform: "codex" })).toContain("Codex");
+  });
+
+  it("notify cooldown is shorter than the ambient gap", () => {
+    expect(AGENT_NOTIFY_MIN_GAP_MS).toBeLessThan(AMBIENT_BUBBLE_MIN_GAP_MS);
   });
 });

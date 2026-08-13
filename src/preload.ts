@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import {
   IPC,
+  type AgentActivityPayload,
   type CapsuleState,
   type ExtensionImportRequestPayload,
   type ExtensionImportResultPayload,
@@ -100,6 +101,11 @@ const api: VestiDesktopApi = {
     const listener = () => callback();
     ipcRenderer.on(IPC.changed, listener);
     return () => ipcRenderer.removeListener(IPC.changed, listener);
+  },
+  onAgentActivity: listener => {
+    const wrapped = (_event: unknown, payload: AgentActivityPayload) => listener(payload);
+    ipcRenderer.on(IPC.agentActivity, wrapped);
+    return () => ipcRenderer.removeListener(IPC.agentActivity, wrapped);
   },
   chooseDirectory: title => ipcRenderer.invoke(IPC.chooseDirectory, title),
   writeUpstreamFile: request => ipcRenderer.invoke(IPC.upstreamWriteFile, request),

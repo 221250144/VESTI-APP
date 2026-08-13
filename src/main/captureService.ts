@@ -20,6 +20,7 @@ import {
   type WslDetection,
 } from '@vesti/capture-core';
 import type {
+  AgentActivityPayload,
   CapturePlatform,
   ConversationExportBundle,
   Overview,
@@ -40,6 +41,15 @@ const SOURCE_LABELS: Record<CapturePlatform, string> = {
   'claude-code': 'Claude Code',
 };
 
+/**
+ * 完工提醒 (agent activity): the file watch keeps storing new content while an
+ * agent works. Once a session stays quiet for this long we consider the run
+ * finished and notify the renderer so the owl can surface a gentle bubble.
+ */
+export const AGENT_ACTIVITY_QUIET_MS = 90_000;
+const AGENT_ACTIVITY_CHECK_MS = 15_000;
+const AGENT_ACTIVITY_EVICT_MS = 30 * 60_000;
+
 export class CaptureService {
   private db!: DatabaseManager;
   private adapters!: AdapterManager;
@@ -48,6 +58,12 @@ export class CaptureService {
   private syncing = false;
   private notify?: () => void;
   private syncCompleted?: () => void;
+  private agentActivityListener?: (payload: AgentActivityPayload) => void;
+  // Latest watch-path activity; a session goes "quiet" QUIET_MS after the last
+  // store, at which point we emit one completion notification per active streak.
+  private lastWatchActivity: { at: number; platform: CapturePlatform } | null = null;
+  private watchActivityNotified = false;
+  private agentActivityTimer: NodeJS.Timeout | null = null;
   // Epoch bumped every time captured session data (or a digest) is stored;
   // backs the conversation-tree cache so repeated getConversationTree calls
   // don't rebuild the full tree when nothing changed.
@@ -88,6 +104,48 @@ export class CaptureService {
    */
   setSyncCompletedListener(listener: () => void): void {
     this.syncCompleted = listener;
+  }
+
+  /** 完工提醒: renderer policy (cooldown, bubble copy) lives in the companion
+   * module; the service only reports "this platform went quiet after work". */
+  setAgentActivityListener(listener: (payload: AgentActivityPayload) => void): void {
+    this.agentActivityListener = listener;
+  }
+
+  private noteWatchActivity(platform: CapturePlatform): void {
+    this.lastWatchActivity = { at: Date.now(), platform };
+    this.watchActivityNotified = false;
+    if (!this.agentActivityTimer) {
+      this.agentActivityTimer = setInterval(() => this.checkAgentActivityQuiet(), AGENT_ACTIVITY_CHECK_MS);
+      this.agentActivityTimer.unref();
+    }
+  }
+
+  private checkAgentActivityQuiet(): void {
+    const record = this.lastWatchActivity;
+    if (!record) {
+      if (this.agentActivityTimer) {
+        clearInterval(this.agentActivityTimer);
+        this.agentActivityTimer = null;
+      }
+      return;
+    }
+    const now = Date.now();
+    if (!this.watchActivityNotified && now - record.at >= AGENT_ACTIVITY_QUIET_MS) {
+      this.watchActivityNotified = true;
+      const latest = this.getSessions(1)[0];
+      if (latest) {
+        this.agentActivityListener?.({
+          platform: record.platform,
+          sessionId: latest.id,
+          title: latest.title ?? '',
+          at: record.at,
+        });
+      }
+    }
+    if (now - record.at >= AGENT_ACTIVITY_EVICT_MS) {
+      this.lastWatchActivity = null;
+    }
   }
 
   get activeDataDirectory(): string {
@@ -501,6 +559,7 @@ export class CaptureService {
           if (stored) {
             await this.resolveSubagentLinksSafe();
             this.syncCompleted?.();
+            this.noteWatchActivity(platform as CapturePlatform);
           }
           this.notify?.();
         })
@@ -532,6 +591,10 @@ export class CaptureService {
   async close(): Promise<void> {
     await this.adapters.stopWatching();
     this.stopWslPolling();
+    if (this.agentActivityTimer) {
+      clearInterval(this.agentActivityTimer);
+      this.agentActivityTimer = null;
+    }
     await Promise.allSettled(this.fileQueue.values());
     await this.db.close();
   }

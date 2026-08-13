@@ -572,6 +572,7 @@ export const IPC = {
   wslStatus: 'vesti:wsl-status',
   wslRedetect: 'vesti:wsl-redetect',
   changed: 'vesti:capture-changed',
+  agentActivity: 'vesti:agent-activity',
   settings: 'vesti:settings',
   settingsSave: 'vesti:settings-save',
   chooseDataDirectory: 'vesti:choose-data-directory',
@@ -681,6 +682,19 @@ export const CAPSULE_BUBBLE_MOODS: readonly CapsuleBubbleMood[] = [
   'sleepy',
   'warm',
 ];
+
+/**
+ * Agent completion signal (完工提醒): the file watch stored new content for a
+ * session and the session then stayed quiet for a while — a good moment for
+ * the owl to surface a gentle notification.
+ */
+export interface AgentActivityPayload {
+  platform: CapturePlatform;
+  sessionId: string;
+  title: string;
+  /** Timestamp of the last stored activity (quiet period starts there). */
+  at: number;
+}
 
 /** Renderer → main request to show the capsule bubble form. */
 export interface CapsuleBubblePayload {
@@ -1119,6 +1133,8 @@ export interface VestiDesktopApi {
   onExtensionImportRequest(listener: (payload: ExtensionImportRequestPayload) => void): () => void;
   onExtensionBridgeChanged(callback: () => void): () => void;
   onCaptureChanged(callback: () => void): () => void;
+  /** main → renderer: an agent session went quiet after new activity (完工提醒). */
+  onAgentActivity(listener: (payload: AgentActivityPayload) => void): () => void;
   chooseDirectory(title?: string): Promise<string | null>;
   writeUpstreamFile(request: UpstreamWriteFileRequest): Promise<UpstreamWriteFileResult>;
   testNotionConnection(): Promise<NotionTestResult>;

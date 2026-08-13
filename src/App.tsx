@@ -30,7 +30,7 @@ import { resolveClassifyLanguage, startAutoClassifyTrigger } from "./ui/organize
 import { startUpstreamAutoExport } from "./ui/upstream/autoExport";
 import { startDailyScheduler } from "./ui/daily/dailyScheduler";
 import { startDreamScheduler } from "./ui/memory/dreamScheduler";
-import { startAmbientBubbleScheduler } from "./ui/companion/ambientBubble";
+import { startAgentActivityNotifier, startAmbientBubbleScheduler } from "./ui/companion/ambientBubble";
 import { migrateDepositsToMemory } from "./ui/deposits/migrateDeposits";
 import { startPromptSnapshotSync } from "./ui/sync/promptSnapshot";
 import { getAllSummaries, getTopics, listConversations } from "./ui/db/repository";
@@ -98,6 +98,7 @@ function Shell({
     // 做梦为会员专属: the free tier never starts the auto-dream scheduler.
     if (membership.active) startDreamScheduler();
     startAmbientBubbleScheduler();
+    startAgentActivityNotifier();
     // One-shot Dexie→memory_entries deposit migration; idempotent (same-id
     // upserts) and a no-op once the memory_meta watermark is stamped.
     void migrateDepositsToMemory().catch(() => undefined);
