@@ -164,10 +164,16 @@ function Shell({
     let cancelled = false;
     let debounce: ReturnType<typeof setTimeout> | null = null;
     const recompute = () => {
+      // Topic counts reuse the same conversation list (one Dexie scan);
+      // getTopics falls back to its own scan if the list load fails.
+      const conversationsPromise = listConversations();
       void Promise.all([
         getAllSummaries(),
-        getTopics(),
-        listConversations(),
+        conversationsPromise.then(
+          (conversations) => getTopics(conversations),
+          () => getTopics()
+        ),
+        conversationsPromise,
         // Learn's synthesized route names follow the agent output-language
         // setting (UI locale as fallback), mirroring the classify pipeline.
         window.vesti?.getSettings().catch(() => null) ?? Promise.resolve(null),

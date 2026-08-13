@@ -23,6 +23,7 @@ import type {
   AgentActivityPayload,
   CapturePlatform,
   ConversationExportBundle,
+  ConversationExportResult,
   Overview,
   RelaySessionContext,
   RelayFileTouchRow,
@@ -32,6 +33,7 @@ import type {
   SyncSummary,
   WslStatusView,
 } from '../shared/contracts';
+import { computeBundleFingerprint } from '../shared/exportFingerprint';
 
 const PRIMARY_PLATFORMS: CapturePlatform[] = ['codex', 'cursor', 'kimi-code', 'claude-code'];
 const SOURCE_LABELS: Record<CapturePlatform, string> = {
@@ -70,6 +72,10 @@ export class CaptureService {
   private dataEpoch = 0;
   private conversationTreeCache: { epoch: number; tree: ConversationTree } | null = null;
   private fileQueue = new Map<string, Promise<void>>();
+  // Per-session fingerprint of the last exported bundle (process-lifetime).
+  // exportConversations diffs against this so unchanged sessions — the vast
+  // majority on a watch tick — never cross IPC to the renderer.
+  private exportFingerprints = new Map<string, number>();
   private basePath = '';
   private enabledPlatforms = new Set<CapturePlatform>(PRIMARY_PLATFORMS);
   private wslDetection: WslDetection | null = null;
@@ -326,17 +332,27 @@ export class CaptureService {
   }
 
   /**
-   * Full snapshot of every captured conversation in VESTI-dashboard format.
-   * The renderer mirrors this into its Dexie store; upserts are idempotent
-   * because numeric IDs are stable hashes of the CLI session/message IDs.
+   * Incremental snapshot of captured conversations in VESTI-dashboard format.
+   * Every session is rebuilt and fingerprinted here in main, but only bundles
+   * whose fingerprint moved since the previous export cross IPC (the first
+   * export after process start is a full snapshot). `sessionIds` always lists
+   * every current session's durable id so the renderer can reconcile upstream
+   * deletions without receiving unchanged payloads. The renderer mirror
+   * upserts idempotently because numeric IDs are stable hashes of the CLI
+   * session/message IDs.
    */
-  exportConversations(): ConversationExportBundle[] {
+  exportConversations(): ConversationExportResult {
     const sessions = this.db.listWorkSessions({ sessionType: 'conversation', limit: 10000 });
     // A1: stamp subagent lineage on the export so renderer-side consumers
     // (library list, learn/explore modules, classification, coverage) can
     // fold child runs under their parent without loading the tree.
     const lineage = this.db.getSubagentLineageByChild();
-    return sessions.map(session => {
+    const bundles: ConversationExportBundle[] = [];
+    const sessionIds: string[] = [];
+    const seenIds = new Set<string>();
+    for (const session of sessions) {
+      sessionIds.push(session.id);
+      seenIds.add(session.id);
       const messages = this.db.getSessionMessages(session.id);
       const firstUserMessage = messages.find(message => message.source === 'user_input');
       const conversation = workSessionToVestiConversation(session, firstUserMessage?.contentText?.slice(0, 200));
@@ -345,11 +361,22 @@ export class CaptureService {
         conversation._subagent_of = link.parentSessionId;
         if (link.agentRole) conversation._agent_role = link.agentRole;
       }
-      return {
+      const bundle: ConversationExportBundle = {
         conversation,
         messages: sessionMessagesToVestiMessages(messages, conversation.id),
       };
-    });
+      const fingerprint = computeBundleFingerprint(bundle.conversation, bundle.messages);
+      if (this.exportFingerprints.get(session.id) !== fingerprint) {
+        this.exportFingerprints.set(session.id, fingerprint);
+        bundles.push(bundle);
+      }
+    }
+    // Sessions deleted upstream leave the running list; drop their cache
+    // entries so a same-id session created later exports in full again.
+    for (const cachedId of [...this.exportFingerprints.keys()]) {
+      if (!seenIds.has(cachedId)) this.exportFingerprints.delete(cachedId);
+    }
+    return { bundles, sessionIds };
   }
 
   // ---- P1.5: digest store surface + conversation tree + session recall ----
@@ -560,8 +587,10 @@ export class CaptureService {
             await this.resolveSubagentLinksSafe();
             this.syncCompleted?.();
             this.noteWatchActivity(platform as CapturePlatform);
+            // Only a real store justifies the renderer's full reload chain;
+            // digest-only/no-change ticks must stay silent.
+            this.notify?.();
           }
-          this.notify?.();
         })
         .finally(() => {
           if (this.fileQueue.get(key) === next) this.fileQueue.delete(key);

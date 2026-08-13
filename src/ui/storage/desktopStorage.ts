@@ -1477,7 +1477,7 @@ async function extractPromptsFromDesktop(options?: {
 // ---- StorageApi ------------------------------------------------------------
 
 export const desktopStorage: StorageApi = {
-  getTopics: () => getTopics(),
+  getTopics: (conversations) => getTopics(conversations),
   getConversations: (filters) => listConversations(filters),
 
   getMessages: (conversationId) => listMessages(conversationId),

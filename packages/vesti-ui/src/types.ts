@@ -474,7 +474,10 @@ export interface ExploreMessage {
 }
 
 export type StorageApi = {
-  getTopics: () => Promise<Topic[]>;
+  /** Optional prefetch: platforms whose topic counts derive from the
+   * conversation list (desktop Dexie) reuse it to avoid a second table scan;
+   * other platforms may ignore it. */
+  getTopics: (conversations?: Conversation[]) => Promise<Topic[]>;
   getConversations: (filters?: ConversationFilters) => Promise<Conversation[]>;
   runGardener?: (
     conversationId: number

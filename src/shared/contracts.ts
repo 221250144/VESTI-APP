@@ -1000,6 +1000,18 @@ export interface ConversationExportBundle {
   messages: VestiMessageRecord[];
 }
 
+/**
+ * Incremental conversation export. `bundles` carries only sessions whose
+ * content fingerprint moved since the main process's previous export (the
+ * first export after app start is a full snapshot); `sessionIds` always
+ * lists every current session's durable `_cli_id` so the renderer can
+ * reconcile upstream deletions without receiving unchanged payloads.
+ */
+export interface ConversationExportResult {
+  bundles: ConversationExportBundle[];
+  sessionIds: string[];
+}
+
 // ---- Browser extension bridge (Bridge Protocol v1) ----
 
 export interface ExtensionBridgeClientView {
@@ -1149,7 +1161,7 @@ export interface VestiDesktopApi {
   generateCustomOwl(prompt: string): Promise<CustomOwlAsset>;
   readCustomOwl(): Promise<CustomOwlAsset | null>;
   getAgentResults(): Promise<AgentResult[]>;
-  exportConversations(): Promise<ConversationExportBundle[]>;
+  exportConversations(): Promise<ConversationExportResult>;
   getConversationTree(): Promise<ConversationTree>;
   recallSessions(query: string, topK?: number): Promise<SessionRecallHit[]>;
   getProjectStates(): Promise<ProjectStateView[]>;

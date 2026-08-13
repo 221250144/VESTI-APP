@@ -1058,11 +1058,30 @@ export async function getConversationById(
   return record ? toConversation(record) : null
 }
 
-export async function getTopics(): Promise<Topic[]> {
-  const [topicRecords, conversations] = await Promise.all([
-    db.topics.toArray(),
-    db.conversations.toArray()
-  ])
+/**
+ * Minimal shape getTopics needs for per-topic counting. Both raw
+ * ConversationRecord rows and converted Conversation objects satisfy it.
+ */
+export type TopicCountSource = {
+  topic_id?: number | null
+  is_archived?: boolean
+  is_trash?: boolean
+}
+
+export async function getTopics(
+  prefetchedConversations?: readonly TopicCountSource[]
+): Promise<Topic[]> {
+  // Callers that already hold the conversation list (library refresh, learn
+  // recompute) pass it in so one conversations-table scan serves both;
+  // without a prefetched list we scan here. A prefetched list is the folded
+  // library view (no trash, no subagent children) — the same view
+  // updateConversationInState recomputes counts from, so the numbers stay
+  // consistent with that path.
+  const [topicRecords, conversations]: [TopicRecord[], readonly TopicCountSource[]] =
+    await Promise.all([
+      db.topics.toArray(),
+      prefetchedConversations ?? db.conversations.toArray()
+    ])
 
   const directCounts = new Map<number, number>()
   for (const convo of conversations) {
