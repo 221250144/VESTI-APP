@@ -146,7 +146,10 @@ export function MembershipGate({ children }: MembershipGateProps) {
     }
   }, [loggingOut]);
 
-  if (status?.state === "active" && status.active && status.authenticated) {
+  // Any signed-in account enters the shell: an active member gets the full
+  // tier, an expired one continues as the free tier (the ExpiredView below is
+  // kept but no longer reachable while authenticated).
+  if (status?.authenticated) {
     return children({ status, logout, themeMode, toggleTheme });
   }
 

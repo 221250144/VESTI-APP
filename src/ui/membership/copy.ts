@@ -51,6 +51,28 @@ export interface MembershipCopy {
   remainingDays: string;
   remainingDay: string;
   accountUsername: string;
+  /** Badge + expiry-row note once an expired account continues as free tier. */
+  freePlan: string;
+  expiredToFreeNote: string;
+  // ---- Credit card (settings) ----
+  creditsTitle: string;
+  creditsDescription: string;
+  /** Balance line: "{remaining}" = remaining credits. */
+  creditsRemaining: string;
+  /** Quota line: "{quota}" = cycle allowance. */
+  creditsQuota: string;
+  /** Reset line: "{date}" = formatted reset instant. */
+  creditsReset: string;
+  /** Shown instead of the balance when llm.mode === 'custom_byok'. */
+  creditsByok: string;
+  /** Inline hint when remaining reaches 0. */
+  creditsExhausted: string;
+  creditsDocButton: string;
+  creditsDocClose: string;
+  // ---- 会员与积分说明 doc modal ----
+  creditsDocTitle: string;
+  creditsDocGreeting: string;
+  creditsDocSections: Array<{ heading: string; body: string }>;
   errors: Record<MembershipUiError, string>;
 }
 
@@ -105,6 +127,49 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     remainingDays: "剩余 {count} 天",
     remainingDay: "剩余 1 天",
     accountUsername: "用户名",
+    freePlan: "免费版",
+    expiredToFreeNote: "已转为免费版",
+    creditsTitle: "积分",
+    creditsDescription: "官方代理下智能服务的计量与余额。",
+    creditsRemaining: "剩余 {remaining}",
+    creditsQuota: "本期共 {quota}",
+    creditsReset: "{date} 重置",
+    creditsByok: "已配置自带密钥（BYOK），所有调用走你的密钥，不消耗积分。",
+    creditsExhausted: "本周期积分已用完，重置后恢复；切换自带密钥可继续。",
+    creditsDocButton: "会员与积分说明",
+    creditsDocClose: "关闭",
+    creditsDocTitle: "会员与积分说明",
+    creditsDocGreeting: "亲爱的Vesti用户：\n\n感谢你把自己的 AI 工作记忆托付给 Vesti。",
+    creditsDocSections: [
+      {
+        heading: "我们的约定",
+        body: "Vesti 是本地优先的产品：你的对话库、记忆空间与账号信息都保存在你自己的设备上。会员与积分体系只有一个目的——覆盖真实的智能成本，让产品可以长期、健康地运转。",
+      },
+      {
+        heading: "积分是什么",
+        body: "积分是 Vesti 官方代理下智能服务的计量单位。约 1,000 tokens 的模型用量计 1 积分（每次调用最低 1 积分）；AI 绘图每张 20 积分。做梦、AI 接力压缩、记忆追踪树构建、夜话等功能的积分消耗，都来自这些功能背后真实的模型调用。",
+      },
+      {
+        heading: "免费版",
+        body: "注册账号即可长期使用免费版：每日 300 积分，零点重置，可用于接力压缩、记忆追踪树、夜话对话等日常功能。",
+      },
+      {
+        heading: "Beta 会员",
+        body: "每月 50,000 积分（按开通日每月重置），并解锁做梦、AITI 画像等高级功能。现在注册即赠送 3 个月 Beta 会员，无需绑定任何付款方式。",
+      },
+      {
+        heading: "自带密钥（BYOK）",
+        body: "如果你在设置中配置了自己的模型密钥，所有调用直接走你的密钥、由你的服务商计费，Vesti 不消耗任何积分。",
+      },
+      {
+        heading: "透明与对账",
+        body: "积分账本保存在本机（credits.json），每次扣减都有记录可查；官方网关同时记录用量日志用于对账。Beta 阶段为本地账本模式，未来正式计费时将升级为服务端签发。",
+      },
+      {
+        heading: "过期之后",
+        body: "会员到期不会锁死你的数据与工作空间——账号自动转为免费版，每日积分照常发放，所有本地数据始终属于你自己。",
+      },
+    ],
     errors: {
       NOT_INITIALIZED: "会员服务尚未准备好，请稍后重试。",
       ALREADY_REGISTERED: "这台设备已经注册过 Vesti 账号，请直接登录。",
@@ -170,6 +235,49 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     remainingDays: "{count} days remaining",
     remainingDay: "1 day remaining",
     accountUsername: "Username",
+    freePlan: "Free tier",
+    expiredToFreeNote: "Converted to the free tier",
+    creditsTitle: "Credits",
+    creditsDescription: "Metering and balance for intelligence served through the official proxy.",
+    creditsRemaining: "{remaining} remaining",
+    creditsQuota: "{quota} per cycle",
+    creditsReset: "Resets {date}",
+    creditsByok: "Your own key (BYOK) is configured — every call is billed by your provider and consumes no credits.",
+    creditsExhausted: "This cycle's credits are used up; they return at reset, or switch to BYOK to keep going.",
+    creditsDocButton: "Membership & credits guide",
+    creditsDocClose: "Close",
+    creditsDocTitle: "Membership & Credits",
+    creditsDocGreeting: "Dear Vesti user,\n\nThank you for entrusting your AI work memory to Vesti.",
+    creditsDocSections: [
+      {
+        heading: "Our promise",
+        body: "Vesti is a local-first product: your conversation library, memory space, and account all live on your own device. Membership and credits exist for one purpose only — to cover real intelligence costs so the product can run sustainably for the long term.",
+      },
+      {
+        heading: "What credits are",
+        body: "Credits are the metering unit for Vesti's official-proxy intelligence services. Roughly 1,000 tokens of model usage cost 1 credit (minimum 1 credit per call); AI image generation costs 20 credits per image. The credits spent by Dream, AI relay compression, memory-tracking tree building, and Night Talk all come from the real model calls behind those features.",
+      },
+      {
+        heading: "Free tier",
+        body: "Register an account and use the free tier indefinitely: 300 credits per day, reset at midnight, usable for everyday features like relay compression, the memory-tracking tree, and Night Talk conversations.",
+      },
+      {
+        heading: "Beta membership",
+        body: "50,000 credits per month (reset monthly on your activation day), plus advanced features such as Dream and the AITI portrait. Sign up now and receive 3 months of Beta membership — no payment method required.",
+      },
+      {
+        heading: "Bring your own key (BYOK)",
+        body: "If you configure your own model key in Settings, every call goes directly through your key and is billed by your provider — Vesti consumes no credits at all.",
+      },
+      {
+        heading: "Transparency & reconciliation",
+        body: "The credit ledger lives on this device (credits.json), and every deduction is recorded and auditable; the official gateway also keeps usage logs for reconciliation. During Beta the ledger is local-only; it will be upgraded to server-issued metering when paid billing launches.",
+      },
+      {
+        heading: "After expiry",
+        body: "An expired membership never locks your data or workspace — the account automatically converts to the free tier, daily credits keep flowing, and all local data remains yours.",
+      },
+    ],
     errors: {
       NOT_INITIALIZED: "The membership service is not ready yet. Please try again.",
       ALREADY_REGISTERED: "A Vesti account already exists on this device. Sign in instead.",
@@ -235,6 +343,49 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     remainingDays: "残り {count} 日",
     remainingDay: "残り 1 日",
     accountUsername: "ユーザー名",
+    freePlan: "無料版",
+    expiredToFreeNote: "無料版に移行しました",
+    creditsTitle: "クレジット",
+    creditsDescription: "公式プロキシ経由のインテリジェンスサービスの計量と残高です。",
+    creditsRemaining: "残り {remaining}",
+    creditsQuota: "今期の合計 {quota}",
+    creditsReset: "{date} にリセット",
+    creditsByok: "自分のキー（BYOK）を設定済みのため、すべての呼び出しはあなたのキー経由で課金され、クレジットは消費されません。",
+    creditsExhausted: "今期のクレジットを使い切りました。リセット後に回復します。BYOK に切り替えると続けられます。",
+    creditsDocButton: "メンバーシップとクレジットの説明",
+    creditsDocClose: "閉じる",
+    creditsDocTitle: "メンバーシップとクレジットについて",
+    creditsDocGreeting: "親愛なる Vesti ユーザーの皆様：\n\nAI との作業の記憶を Vesti にお預けいただき、ありがとうございます。",
+    creditsDocSections: [
+      {
+        heading: "私たちの約束",
+        body: "Vesti はローカルファーストの製品です。会話ライブラリ、メモリー空間、アカウント情報はすべてあなた自身の端末に保存されます。メンバーシップとクレジットの目的はただひとつ——実際のインテリジェンスコストをまかない、製品が長く健全に運営され続けるようにすることです。",
+      },
+      {
+        heading: "クレジットとは",
+        body: "クレジットは Vesti 公式プロキシのインテリジェンスサービスの計量単位です。約 1,000 tokens のモデル使用量で 1 クレジット（1 回の呼び出しにつき最低 1 クレジット）、AI 画像生成は 1 枚 20 クレジットです。夢、AI リレー圧縮、記憶トラッキングツリーの構築、夜話などのクレジット消費は、これらの機能の背後にある実際のモデル呼び出しから生じています。",
+      },
+      {
+        heading: "無料版",
+        body: "アカウントを登録すれば、無料版をずっとお使いいただけます。毎日 300 クレジットが 0 時にリセットされ、リレー圧縮、記憶トラッキングツリー、夜話などの日常機能に利用できます。",
+      },
+      {
+        heading: "Beta メンバーシップ",
+        body: "毎月 50,000 クレジット（開通日を起点に毎月リセット）に加え、夢、AITI 画像などの高度な機能が解放されます。今ご登録いただくと 3 か月の Beta メンバーシップをプレゼント。お支払い方法の登録は不要です。",
+      },
+      {
+        heading: "自分のキーを使う（BYOK）",
+        body: "設定で自分のモデルキーを構成している場合、すべての呼び出しはあなたのキーを直接通り、ご利用のプロバイダーが課金します。Vesti はクレジットを一切消費しません。",
+      },
+      {
+        heading: "透明性と照合",
+        body: "クレジット台帳はこの端末（credits.json）に保存され、すべての引き落としが記録され、いつでも確認できます。公式ゲートウェイ側でも照合用の使用ログを記録しています。Beta 期間中はローカル台帳モードで、正式な課金の開始時にはサーバー発行へアップグレードされます。",
+      },
+      {
+        heading: "有効期限が切れた後",
+        body: "メンバーシップが切れても、データやワークスペースがロックされることはありません。アカウントは自動的に無料版に移行し、毎日のクレジットは引き続き付与されます。すべてのローカルデータは常にあなたのものです。",
+      },
+    ],
     errors: {
       NOT_INITIALIZED: "メンバーシップサービスの準備が完了していません。もう一度お試しください。",
       ALREADY_REGISTERED: "この端末にはすでに Vesti アカウントがあります。ログインしてください。",
@@ -300,6 +451,49 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     remainingDays: "{count}일 남음",
     remainingDay: "1일 남음",
     accountUsername: "사용자 이름",
+    freePlan: "무료 버전",
+    expiredToFreeNote: "무료 버전으로 전환되었습니다",
+    creditsTitle: "크레딧",
+    creditsDescription: "공식 프록시 인텔리전스 서비스의 사용량 계량과 잔액입니다.",
+    creditsRemaining: "남은 크레딧 {remaining}",
+    creditsQuota: "이번 주기 총 {quota}",
+    creditsReset: "{date}에 초기화",
+    creditsByok: "자체 키(BYOK)가 구성되어 있어 모든 호출이 사용자의 키를 통해 이루어지며 크레딧을 소비하지 않습니다.",
+    creditsExhausted: "이번 주기 크레딧을 모두 사용했습니다. 초기화 후 복구되며, BYOK로 전환하면 계속 사용할 수 있습니다.",
+    creditsDocButton: "멤버십 및 크레딧 안내",
+    creditsDocClose: "닫기",
+    creditsDocTitle: "멤버십 및 크레딧 안내",
+    creditsDocGreeting: "소중한 Vesti 사용자 여러분:\n\nAI 작업 기억을 Vesti에 맡겨 주셔서 감사합니다.",
+    creditsDocSections: [
+      {
+        heading: "우리의 약속",
+        body: "Vesti는 로컬 우선 제품입니다. 대화 라이브러리, 메모리 공간, 계정 정보는 모두 사용자의 기기에 저장됩니다. 멤버십과 크레딧의 목적은 단 하나 — 실제 인텔리전스 비용을 충당해 제품이 오랫동안 건강하게 운영되도록 하는 것입니다.",
+      },
+      {
+        heading: "크레딧이란",
+        body: "크레딧은 Vesti 공식 프록시 인텔리전스 서비스의 계량 단위입니다. 약 1,000 tokens의 모델 사용량이 1크레딧(호출당 최소 1크레딧)이며, AI 이미지 생성은 장당 20크레딧입니다. 꿈, AI 릴레이 압축, 메모리 트래킹 트리 구축, 밤의 대화 등 기능의 크레딧 소비는 모두 해당 기능 뒤의 실제 모델 호출에서 발생합니다.",
+      },
+      {
+        heading: "무료 버전",
+        body: "계정을 등록하면 무료 버전을 계속 사용할 수 있습니다. 매일 300 크레딧이 자정에 초기화되며, 릴레이 압축, 메모리 트래킹 트리, 밤의 대화 등 일상 기능에 사용할 수 있습니다.",
+      },
+      {
+        heading: "Beta 멤버십",
+        body: "매월 50,000 크레딧(개통일 기준 매월 초기화)과 함께 꿈, AITI 프로필 등 고급 기능이 잠금 해제됩니다. 지금 가입하면 3개월 Beta 멤버십을 드리며, 결제 수단을 등록할 필요가 없습니다.",
+      },
+      {
+        heading: "자체 키 사용(BYOK)",
+        body: "설정에서 자신의 모델 키를 구성했다면, 모든 호출이 사용자의 키를 통해 직접 이루어지고 제공업체가 요금을 청구합니다. Vesti는 크레딧을 전혀 소비하지 않습니다.",
+      },
+      {
+        heading: "투명성과 대조",
+        body: "크레딧 원장은 이 기기(credits.json)에 저장되며 모든 차감 내역을 확인할 수 있습니다. 공식 게이트웨이에도 대조용 사용 로그가 기록됩니다. Beta 단계에서는 로컬 원장 모드이며, 정식 과금 시 서버 발급 방식으로 업그레이드됩니다.",
+      },
+      {
+        heading: "만료 이후",
+        body: "멤버십이 만료되어도 데이터와 작업 공간은 잠기지 않습니다. 계정이 자동으로 무료 버전으로 전환되고 매일 크레딧이 계속 지급되며, 모든 로컬 데이터는 항상 사용자의 것입니다.",
+      },
+    ],
     errors: {
       NOT_INITIALIZED: "멤버십 서비스가 아직 준비되지 않았습니다. 다시 시도해 주세요.",
       ALREADY_REGISTERED: "이 기기에 Vesti 계정이 이미 있습니다. 로그인해 주세요.",
@@ -335,4 +529,40 @@ export function formatMembershipDate(timestamp: number | null, locale: Supported
 export function formatRemainingDays(copy: MembershipCopy, days: number): string {
   if (days === 1) return copy.remainingDay;
   return copy.remainingDays.replace("{count}", String(Math.max(0, days)));
+}
+
+/** Credit numbers (up to 50,000) get locale thousands separators. */
+export function formatCreditCount(value: number, locale: SupportedLocale): string {
+  const localeTag: Record<SupportedLocale, string> = {
+    zh: "zh-CN",
+    en: "en-US",
+    ja: "ja-JP",
+    ko: "ko-KR",
+  };
+  return new Intl.NumberFormat(localeTag[locale]).format(Math.max(0, Math.round(value)));
+}
+
+/** Credit reset instant: member cycles care about the day, free tier about midnight. */
+export function formatCreditReset(timestamp: number | null, locale: SupportedLocale): string {
+  if (timestamp === null || !Number.isFinite(timestamp)) return "—";
+  const localeTag: Record<SupportedLocale, string> = {
+    zh: "zh-CN",
+    en: "en-US",
+    ja: "ja-JP",
+    ko: "ko-KR",
+  };
+  return new Intl.DateTimeFormat(localeTag[locale], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(timestamp));
+}
+
+/** Marker main embeds in the exhaustion error message so renderers can detect it. */
+export const CREDITS_EXHAUSTED_MARKER = "CREDITS_EXHAUSTED";
+
+export function isCreditsExhaustedError(error: unknown): boolean {
+  const text = error instanceof Error ? error.message : String(error);
+  return text.includes(CREDITS_EXHAUSTED_MARKER);
 }

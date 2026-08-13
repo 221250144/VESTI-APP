@@ -5,6 +5,7 @@ import {
   type ExtensionImportRequestPayload,
   type ExtensionImportResultPayload,
   type VestiCapsuleApi,
+  type VestiCreditApi,
   type VestiDesktopApi,
   type VestiMembershipApi,
   type VestiUiPrefsApi,
@@ -39,6 +40,17 @@ const membership: VestiMembershipApi = {
 };
 
 contextBridge.exposeInMainWorld('vestiMembership', membership);
+
+const credits: VestiCreditApi = {
+  getBalance: () => ipcRenderer.invoke(IPC.creditBalance),
+  onChanged: listener => {
+    const wrapped = (_event: unknown, balance: Parameters<typeof listener>[0]) => listener(balance);
+    ipcRenderer.on(IPC.creditChanged, wrapped);
+    return () => ipcRenderer.removeListener(IPC.creditChanged, wrapped);
+  },
+};
+
+contextBridge.exposeInMainWorld('vestiCredits', credits);
 
 const api: VestiDesktopApi = {
   getOverview: () => ipcRenderer.invoke(IPC.overview),

@@ -2178,6 +2178,8 @@ export interface DashboardLabels {
     llmMissing: string;
     /** Pending queue is empty — everything already has a structured summary. */
     allSummarized: string;
+    /** 会员门控: hint on the generation entry for free-tier accounts. */
+    memberOnly: string;
   };
   learn: {
     modeLearn: string;

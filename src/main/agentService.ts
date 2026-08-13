@@ -51,6 +51,23 @@ function effectiveMaxTokens(kind: string, configured: number): number {
 }
 export const BYOK_CHAT_TIMEOUT_MS = 180_000;
 
+export interface AgentUsageTokens {
+  promptTokens: number;
+  completionTokens: number;
+}
+
+/**
+ * Credit-metering hook wired by main: demo-gateway calls are pre-checked and
+ * accounted against the local credit ledger; BYOK mode meters nothing (the
+ * adapter no-ops), so agent code stays mode-agnostic.
+ */
+export interface AgentCreditMeter {
+  /** Pre-flight check before a chat call; throws (CREDITS_EXHAUSTED) when out. */
+  beforeChat(estimatedChars: number, label: string): void;
+  /** Post-success accounting; usage is null when the gateway didn't report it. */
+  afterChat(usage: AgentUsageTokens | null, estimatedChars: number, label: string): void;
+}
+
 export class LlmGatewayError extends Error {
   constructor(
     message: string,
@@ -73,6 +90,7 @@ export class AgentService {
   constructor(
     private readonly capture: CaptureService,
     private readonly settings: SettingsService,
+    private readonly credits?: AgentCreditMeter,
   ) {}
 
   async run(request: AgentRunRequest, options?: { persist?: boolean }): Promise<AgentResult> {
@@ -97,6 +115,7 @@ export class AgentService {
     const completion = await this.complete(
       llm,
       definition.buildPrompt({ transcript, question, template: request.template, preferences }),
+      request.kind,
     );
     const raw = completion.content;
     const content = definition.parse ? definition.parse(raw) : raw;
@@ -122,7 +141,7 @@ export class AgentService {
       const completion = await this.complete(llm, [
         { role: 'system', content: 'You are a connection test. Answer with only OK.' },
         { role: 'user', content: 'ping' },
-      ]);
+      ], 'llm-test');
       const modelLabel = completion.modelUsed === llm.modelId
         ? llm.modelId
         : `${llm.modelId} → ${completion.modelUsed}`;
@@ -214,6 +233,7 @@ export class AgentService {
   private async complete(
     settings: RuntimeLlmSettings,
     messages: Array<{ role: string; content: string }>,
+    label = 'chat',
   ): Promise<{ content: string; modelUsed: string }> {
     if (settings.mode === 'custom_byok' && !settings.apiKey) {
       throw new Error('请先在设置中填写 API Key');
@@ -222,6 +242,8 @@ export class AgentService {
       ? `${settings.baseUrl}/chat`
       : `${settings.baseUrl}/chat/completions`;
     const body = buildChatCompletionBody(settings, messages);
+    // Credit pre-check (demo gateway only; the meter no-ops under BYOK).
+    this.credits?.beforeChat(body.length, label);
 
     let response: Response;
     let proxyMetadata: ProxyAttemptMetadata | undefined;
@@ -255,6 +277,7 @@ export class AgentService {
       error?: { code?: string; message?: string; requestId?: string } | string;
       message?: string;
       model?: unknown;
+      usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
     };
     if (!response.ok) {
       const detail = typeof payload.error === 'string' ? payload.error : payload.error?.message || payload.message;
@@ -288,6 +311,15 @@ export class AgentService {
       || proxyMetadata?.modelUsed?.trim()
       || responseModel
       || settings.modelId;
+    // Credit accounting after a successful answer; usage comes from the
+    // gateway payload, otherwise the meter estimates from request size.
+    const promptTokens = typeof payload.usage?.prompt_tokens === 'number' ? payload.usage.prompt_tokens : null;
+    const completionTokens = typeof payload.usage?.completion_tokens === 'number' ? payload.usage.completion_tokens : null;
+    this.credits?.afterChat(
+      promptTokens !== null && completionTokens !== null ? { promptTokens, completionTokens } : null,
+      body.length,
+      label,
+    );
     return { content: cleaned, modelUsed };
   }
 

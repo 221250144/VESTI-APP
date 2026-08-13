@@ -15,6 +15,7 @@ import type {
 import { useI18n } from "../i18n";
 import type { SupportedLocale } from "../i18n/locales";
 import { MembershipAccountCard } from "../membership/MembershipAccountCard";
+import { CreditCard } from "../membership/CreditCard";
 import { useUiPreference } from "./useUiPreference";
 import { DEFAULT_SKIN_ID, SKINS, resolveSkin } from "../../capsule/skins";
 import {
@@ -1429,6 +1430,7 @@ export function SettingsPage({
     <div className="h-full overflow-y-auto overflow-x-hidden bg-bg-app px-8 py-8">
       <div className="mx-auto flex max-w-[880px] flex-col gap-6 pb-8">
         <MembershipAccountCard status={membership} onLogout={onLogout} locale={locale} />
+        <CreditCard membership={membership} llmMode={settings.llm.mode} locale={locale} />
 
         <Card eyebrow="GENERAL" title={copy.generalTitle} description={copy.generalDesc}>
           <div className="-mx-3 flex flex-col">

@@ -1031,6 +1031,7 @@ export const zhTranslations = {
       dreamFullRebuild: "全量重做",
       dreamFullConfirm: "全量重做会重新整理全部历史会话，耗时较长。确定继续吗？",
       dreamFailed: "做梦失败：{message}",
+      dreamMemberOnly: "做梦是 Beta 会员专属功能——当前账号已转为免费版。",
       memoryEmpty: "还没有记忆。睡一觉，做个梦吧。",
       memoryTagEmpty: "这个标签下还没有记忆。",
       dreamLogEmpty: "还没有梦境日志。跑一次做梦就会留下日志。",
@@ -1641,6 +1642,7 @@ export const zhTranslations = {
       summariesResult: "完成：成功 {done} 条，失败 {failed} 条。",
       llmMissing: "尚未配置模型 —— 请先在「设置」中配置 LLM，再来生成摘要。",
       allSummarized: "所有会话都已有结构化摘要。",
+      memberOnly: "生成 AITI 画像是 Beta 会员专属功能——当前账号已转为免费版。",
     },
     learn: {
       modeLearn: "学习",

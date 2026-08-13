@@ -170,7 +170,10 @@ export class MembershipService {
       registered: true,
       authenticated,
       active,
-      canUseApp: authenticated && active,
+      // Expiry downgrades the account to the free tier instead of locking the
+      // product: any signed-in account may use the app; `active` remains the
+      // member/free tier discriminator.
+      canUseApp: authenticated,
       username: this.account.username,
       plan: this.account.membership.plan,
       memberSince: this.account.membership.startedAt,
@@ -285,6 +288,9 @@ export class MembershipService {
         'Sign in with an active Vesti membership to continue.',
       );
     }
+    // With free-tier downgrade, canUseApp === authenticated, so this branch
+    // no longer fires for expired accounts; kept as a guard should the
+    // access semantics tighten again.
     if (!status.canUseApp) {
       throw new MembershipError('MEMBERSHIP_EXPIRED', 'The local Vesti membership has expired.');
     }
@@ -403,7 +409,8 @@ function normalizeUsername(value: string): string {
   return typeof value === 'string' ? value.trim().normalize('NFKC').toLocaleLowerCase('en-US') : '';
 }
 
-function addUtcCalendarMonths(timestamp: number, months: number): number {
+/** Exported for CreditService's member-cycle anchoring (same month math). */
+export function addUtcCalendarMonths(timestamp: number, months: number): number {
   const source = new Date(timestamp);
   const absoluteMonth = source.getUTCFullYear() * 12 + source.getUTCMonth() + months;
   const year = Math.floor(absoluteMonth / 12);

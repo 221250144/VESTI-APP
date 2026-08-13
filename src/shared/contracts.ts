@@ -524,6 +524,33 @@ export type MembershipActionResult =
   | { ok: true; status: MembershipStatus }
   | { ok: false; status: MembershipStatus; error: MembershipErrorCode };
 
+// ---- Local credit ledger (Beta metering) ----
+
+/** 'member' = active Beta membership; 'free' = registered but expired. */
+export type CreditTier = 'member' | 'free';
+export type CreditCategory = 'chat' | 'image' | 'embedding';
+
+export interface CreditEntry {
+  ts: number;
+  category: CreditCategory;
+  credits: number;
+  label: string;
+}
+
+/** Public credit balance exposed to renderers (Beta: local ledger mode). */
+export interface CreditBalance {
+  tier: CreditTier;
+  /** Cycle allowance: 50,000 monthly (member) / 300 daily (free). */
+  quota: number;
+  used: number;
+  remaining: number;
+  /** Cycle-end timestamp (member anchor-day month / next local midnight). */
+  resetsAt: number;
+  lifetimeUsed: number;
+  /** Up to 20 most recent deductions, newest first. */
+  recent: CreditEntry[];
+}
+
 export const IPC = {
   windowMinimize: 'vesti:window-minimize',
   windowToggleMaximize: 'vesti:window-toggle-maximize',
@@ -535,6 +562,8 @@ export const IPC = {
   membershipLogin: 'vesti:membership-login',
   membershipLogout: 'vesti:membership-logout',
   membershipChanged: 'vesti:membership-changed',
+  creditBalance: 'vesti:credit-balance',
+  creditChanged: 'vesti:credit-changed',
   overview: 'vesti:overview',
   sessions: 'vesti:sessions',
   session: 'vesti:session',
@@ -1122,6 +1151,12 @@ export interface VestiMembershipApi {
   login(credentials: MembershipCredentials): Promise<MembershipActionResult>;
   logout(): Promise<MembershipStatus>;
   onStatusChanged(listener: (status: MembershipStatus) => void): () => void;
+}
+
+/** Credit ledger bridge, exposed as window.vestiCredits. */
+export interface VestiCreditApi {
+  getBalance(): Promise<CreditBalance>;
+  onChanged(listener: (balance: CreditBalance) => void): () => void;
 }
 
 /**

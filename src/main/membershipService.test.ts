@@ -118,7 +118,7 @@ describe('MembershipService', () => {
       .rejects.toMatchObject({ code: 'ALREADY_REGISTERED' });
   });
 
-  it('marks the membership expired at the exact expiry time and blocks access', async () => {
+  it('marks the membership expired at the exact expiry time and downgrades to the free tier', async () => {
     const service = createService();
     await service.initialize();
     const registered = await service.register({ username: 'beta-user', password: 'password-123' });
@@ -127,12 +127,12 @@ describe('MembershipService', () => {
     expect(service.getStatus()).toMatchObject({
       state: 'expired',
       authenticated: true,
-      canUseApp: false,
+      active: false,
+      // Free tier: an expired-but-signed-in account keeps using the app.
+      canUseApp: true,
       daysRemaining: 0,
     });
-    expect(() => service.requireActiveMember()).toThrowError(
-      expect.objectContaining({ code: 'MEMBERSHIP_EXPIRED' }),
-    );
+    expect(service.requireActiveMember().username).toBe('beta-user');
   });
 
   it('rejects malformed account data instead of silently granting access', async () => {

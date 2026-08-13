@@ -95,7 +95,8 @@ function Shell({
     startAutoClassifyTrigger();
     startUpstreamAutoExport();
     startDailyScheduler();
-    startDreamScheduler();
+    // 做梦为会员专属: the free tier never starts the auto-dream scheduler.
+    if (membership.active) startDreamScheduler();
     startAmbientBubbleScheduler();
     // One-shot Dexie→memory_entries deposit migration; idempotent (same-id
     // upserts) and a no-op once the memory_meta watermark is stamped.
@@ -173,6 +174,9 @@ function Shell({
   // P5 思维意象: resolve the 16-imagery card from the AITI axes (localized),
   // then fetch the LLM persona footnote — recomputed only when the profile or
   // locale changes; the note itself is cached in ui-prefs by personaNote.ts.
+  // 会员门控: the persona footnote is an LLM call inside the member-only AITI
+  // 画像 feature, so the free tier never requests it (the locally-computed
+  // imagery card itself stays visible).
   useEffect(() => {
     if (!aiti?.available) {
       setAitiImagery(null);
@@ -183,7 +187,9 @@ function Shell({
     const localized = resolved ? localizeImagery(resolved, lang) : null;
     setAitiImagery(localized);
     setAitiPersonaNote(null);
-    if (!localized) return;
+    // 会员门控: the persona footnote is a 'persona' agent LLM call; the free
+    // tier keeps the locally-computed imagery but never fetches the note.
+    if (!localized || !membership.active) return;
     let cancelled = false;
     const sampleLabel = t.dashboard.aiti.sample.replace("{n}", String(aiti.sampleSize));
     void getPersonaNote(localized, aiti, sampleLabel).then((note) => {
@@ -192,7 +198,7 @@ function Shell({
     return () => {
       cancelled = true;
     };
-  }, [aiti, lang, t]);
+  }, [aiti, lang, t, membership.active]);
   const plaza = useMemo(() => {
     const daily = buildPlazaPrompts(lang, Date.now()).filter((prompt) => prompt.featured);
     const resolved = resolveCuratedPrompts(lang);
@@ -258,6 +264,7 @@ function Shell({
               aitiImagery={aitiImagery}
               aitiEmblemUrl={aitiImagery ? emblemUrl(aitiImagery.emblemId) : undefined}
               aitiPersonaNote={aitiPersonaNote}
+              membershipActive={membership.active}
               companionOwlIcons={OWL_MOOD_ICONS}
               learn={learn}
               lang={lang}

@@ -43,13 +43,22 @@ export class EmbeddingRequestError extends Error {
   }
 }
 
+/** Credit-metering hook wired by main (demo-gateway accounting; BYOK no-ops). */
+export interface EmbeddingCreditMeter {
+  /** Post-success accounting of one embeddings endpoint call. */
+  afterEmbedding(label: string): void;
+}
+
 /** OpenAI-compatible embeddings client with isolated, versioned indexes. */
 export class EmbeddingService {
   private status: EmbeddingStatus = { available: true };
   private probed = false;
   private tail: Promise<unknown> = Promise.resolve();
 
-  constructor(private readonly settings: SettingsService) {}
+  constructor(
+    private readonly settings: SettingsService,
+    private readonly credits?: EmbeddingCreditMeter,
+  ) {}
 
   invalidateStatus(): void {
     this.status = { available: true };
@@ -193,6 +202,8 @@ export class EmbeddingService {
       || proxyMetadata?.modelUsed
       || payload.model
       || llm.embeddingModel;
+    // One successful endpoint call = one metered embedding (demo gateway only).
+    this.credits?.afterEmbedding('embedding');
     return {
       vectors,
       metadata: {

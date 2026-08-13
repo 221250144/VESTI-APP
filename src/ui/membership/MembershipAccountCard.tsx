@@ -48,10 +48,16 @@ export function MembershipAccountCard({
             {copy.accountDescription}
           </p>
         </div>
-        <span className="inline-flex items-center gap-1.5 rounded-full border border-success/25 bg-success/10 px-3 py-1.5 text-[11px] font-sans font-semibold text-success">
-          <Check className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
-          {copy.active}
-        </span>
+        {status.active ? (
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-success/25 bg-success/10 px-3 py-1.5 text-[11px] font-sans font-semibold text-success">
+            <Check className="h-3.5 w-3.5" strokeWidth={2} aria-hidden="true" />
+            {copy.active}
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-warning/28 bg-warning/10 px-3 py-1.5 text-[11px] font-sans font-semibold text-warning">
+            {copy.freePlan}
+          </span>
+        )}
       </div>
 
       <div className="mt-5 grid gap-3 sm:grid-cols-3">
@@ -69,7 +75,8 @@ export function MembershipAccountCard({
           icon={<CalendarDays className="h-4 w-4" strokeWidth={1.7} />}
           label={copy.membershipExpires}
           value={formatMembershipDate(status.expiresAt, locale)}
-          note={formatRemainingDays(copy, status.daysRemaining)}
+          note={status.active ? formatRemainingDays(copy, status.daysRemaining) : copy.expiredToFreeNote}
+          noteTone={status.active ? "success" : "warning"}
         />
       </div>
 
@@ -110,11 +117,13 @@ function AccountDetail({
   label,
   value,
   note,
+  noteTone = "success",
 }: {
   icon: React.ReactNode;
   label: string;
   value: string;
   note?: string;
+  noteTone?: "success" | "warning";
 }) {
   return (
     <div className="min-w-0 rounded-xl border border-border-subtle bg-bg-primary p-3.5">
@@ -125,7 +134,11 @@ function AccountDetail({
       <p className="mt-2 truncate text-[13px] font-sans font-semibold text-text-primary" title={value}>
         {value}
       </p>
-      {note ? <p className="mt-1 text-[10px] font-sans text-success">{note}</p> : null}
+      {note ? (
+        <p className={`mt-1 text-[10px] font-sans ${noteTone === "warning" ? "text-warning" : "text-success"}`}>
+          {note}
+        </p>
+      ) : null}
     </div>
   );
 }
