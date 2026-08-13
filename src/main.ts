@@ -15,6 +15,7 @@ import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { AgentService, type AgentCreditMeter } from './main/agentService';
+import { ImageService, type ImageCreditMeter } from './main/imageService';
 import { AgentMcpRegistry, createAgentMcpRegistry, resolveAgentMcpTargetId } from './main/agentMcpRegistry';
 import { CaptureService } from './main/captureService';
 import { CapsuleWindowService, normalizeCapsuleBubblePayload } from './main/capsuleWindowService';
@@ -87,6 +88,7 @@ let settings: SettingsService;
 let membership: MembershipService;
 let credits: CreditService;
 let agent: AgentService;
+let image: ImageService;
 let embedding: EmbeddingService;
 let digest: DigestService;
 let projectMemory: ProjectMemoryService;
@@ -232,6 +234,21 @@ const embeddingCreditMeter: EmbeddingCreditMeter = {
   afterEmbedding(label) {
     if (settings.getRuntimeLlm().mode !== 'demo_proxy') return;
     void credits.consume({ ...creditTierContext(), category: 'embedding', label })
+      .then(() => broadcastCreditChange())
+      .catch(error => console.warn('[vesti] credit accounting failed:', error));
+  },
+};
+
+/** Image generations (custom owl DIY): ALWAYS metered — BYOK users' images
+ * also ride our gateway (their own key has no gpt-image upstream). */
+const imageCreditMeter: ImageCreditMeter = {
+  beforeImage() {
+    const context = creditTierContext();
+    const peeked = credits.peek({ ...context, category: 'image', label: 'custom-owl' });
+    if (peeked.balance.remaining < peeked.cost) throw creditExhaustedError(context.tier);
+  },
+  afterImage(label) {
+    void credits.consume({ ...creditTierContext(), category: 'image', label })
       .then(() => broadcastCreditChange())
       .catch(error => console.warn('[vesti] credit accounting failed:', error));
   },
@@ -1021,6 +1038,12 @@ function registerIpc(): void {
     );
   });
   memberIpcHandle(IPC.agentResults, () => agent.listResults());
+  // DIY 猫头鹰皮肤：生成会员专属（计积分）；读取自己已生成的皮肤不需要会员。
+  memberIpcHandle(IPC.customOwlGenerate, (_event, prompt: unknown) => {
+    if (typeof prompt !== 'string') throw new Error('绘图请求无效');
+    return image.generateCustomOwl(prompt);
+  });
+  ipcMain.handle(IPC.customOwlRead, () => image.readCustomOwl());
   memberIpcHandle(IPC.exportConversations, () => capture.exportConversations());
   memberIpcHandle(IPC.conversationTree, () => capture.getConversationTree());
   memberIpcHandle(IPC.projectStates, () => capture.listProjectStates());
@@ -1486,6 +1509,7 @@ app.whenReady().then(async () => {
   applyGeneralSettings();
   await capture.initialize(broadcastChange, settings.dataDirectory, settings.capture.enabledPlatforms);
   agent = new AgentService(capture, settings, agentCreditMeter);
+  image = new ImageService(capture, settings, imageCreditMeter);
   embedding = new EmbeddingService(settings, embeddingCreditMeter);
   digest = new DigestService(capture, agent, embedding, () => settings.isLlmConfigured());
   notion = new NotionService(settings);

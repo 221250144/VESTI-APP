@@ -317,6 +317,14 @@ export interface AgentStreamChunk {
   done?: boolean;
 }
 
+/** DIY 猫头鹰皮肤 asset (custom-owl.png under the data directory), served to
+ * renderers as a data URL since neither the capsule nor the main window may
+ * read arbitrary filesystem paths. */
+export interface CustomOwlAsset {
+  dataUrl: string;
+  updatedAt: number;
+}
+
 export interface EmbeddingStatus {
   available: boolean;
   reason?: string;
@@ -663,6 +671,8 @@ export const IPC = {
   memoryImport: 'vesti:memory-import',
   memoryMetaGet: 'vesti:memory-meta-get',
   memoryMetaSet: 'vesti:memory-meta-set',
+  customOwlGenerate: 'vesti:custom-owl-generate',
+  customOwlRead: 'vesti:custom-owl-read',
 } as const;
 
 // ---- Desktop floating capsule ----
@@ -1134,6 +1144,10 @@ export interface VestiDesktopApi {
    * runId) while the invoke resolves with the final parsed result. */
   runAgentStream(request: AgentRunRequest, runId: string): Promise<AgentResult>;
   onAgentStreamChunk(runId: string, listener: (chunk: AgentStreamChunk) => void): () => void;
+  /** DIY 猫头鹰皮肤: generate a custom owl through the gateway images API
+   * (member-only, credit-metered) / read the current one (null = none yet). */
+  generateCustomOwl(prompt: string): Promise<CustomOwlAsset>;
+  readCustomOwl(): Promise<CustomOwlAsset | null>;
   getAgentResults(): Promise<AgentResult[]>;
   exportConversations(): Promise<ConversationExportBundle[]>;
   getConversationTree(): Promise<ConversationTree>;

@@ -26,7 +26,7 @@ import {
 // whitelist; the previous deployment remains the transport-level fallback.
 export const DEMO_BASE_URL = 'https://vesti.world/gate/api';
 export const LEGACY_DEMO_BASE_URL = 'https://api.ccvg1218.online/api';
-const DEMO_SERVICE_TOKEN = 'vesti-kcq-default-d850d4dcd610a0e2e919eb610f42066faff1e1c57c0c047c';
+export const DEMO_SERVICE_TOKEN = 'vesti-kcq-default-d850d4dcd610a0e2e919eb610f42066faff1e1c57c0c047c';
 export const DEFAULT_EMBEDDING_MODEL = 'text-embedding-v1';
 // 旧网关(百炼上游)时代的内置模型 id:新网关按前缀路由到 DeepSeek/Kimi,
 // 这些 id 没有对应上游,迁移到当前默认模型。

@@ -80,6 +80,8 @@ const api: VestiDesktopApi = {
     ipcRenderer.on(IPC.agentStreamChunk, wrapped);
     return () => ipcRenderer.removeListener(IPC.agentStreamChunk, wrapped);
   },
+  generateCustomOwl: prompt => ipcRenderer.invoke(IPC.customOwlGenerate, prompt),
+  readCustomOwl: () => ipcRenderer.invoke(IPC.customOwlRead),
   getAgentResults: () => ipcRenderer.invoke(IPC.agentResults),
   exportConversations: () => ipcRenderer.invoke(IPC.exportConversations),
   getConversationTree: () => ipcRenderer.invoke(IPC.conversationTree),

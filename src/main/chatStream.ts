@@ -98,6 +98,16 @@ export function createSseDataCollector(onData: (data: string) => void): (chunk: 
 }
 
 /**
+ * The demo gateway's OpenAI-compatible base: SSE streaming and image
+ * generation only exist on the `/v1` surface (the legacy `/api` routes are
+ * the old non-stream protocol), so `/gate/api` maps to `/gate/v1`.
+ */
+export function demoOpenAiBase(baseUrl: string): string {
+  const trimmed = baseUrl.replace(/\/+$/, '');
+  return trimmed.endsWith('/api') ? `${trimmed.slice(0, -4)}/v1` : trimmed;
+}
+
+/**
  * Where a streaming chat request goes. BYOK already talks to an
  * OpenAI-compatible base, so the path matches the non-streaming one; the demo
  * gateway exposes SSE only on the OpenAI-compatible `/v1` surface (its legacy
@@ -106,8 +116,7 @@ export function createSseDataCollector(onData: (data: string) => void): (chunk: 
 export function chatStreamEndpoint(mode: 'demo_proxy' | 'custom_byok', baseUrl: string): string {
   const trimmed = baseUrl.replace(/\/+$/, '');
   if (mode === 'demo_proxy') {
-    const openAiBase = trimmed.endsWith('/api') ? `${trimmed.slice(0, -4)}/v1` : trimmed;
-    return `${openAiBase}/chat/completions`;
+    return `${demoOpenAiBase(trimmed)}/chat/completions`;
   }
   return `${trimmed}/chat/completions`;
 }

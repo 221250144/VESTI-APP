@@ -89,6 +89,40 @@ function Shell({
   const [learn, setLearn] = useState<LearnProfile | undefined>(undefined);
   const [aitiImagery, setAitiImagery] = useState<AitiImagery | null>(null);
   const [aitiPersonaNote, setAitiPersonaNote] = useState<string | null>(null);
+  // 夜话头像:默认心情图标集;owlSkin==='custom' 时整套换成 DIY 皮肤。
+  const [owlIcons, setOwlIcons] = useState(OWL_MOOD_ICONS);
+
+  // Follow the floating-ball skin pref: the custom DIY owl replaces every
+  // mood icon (it has no mood variants of its own), built-in skins restore
+  // the default set. Regeneration signals via owlCustomUpdatedAt.
+  useEffect(() => {
+    const bridge = window.vestiUi;
+    if (!bridge) return;
+    let cancelled = false;
+    const apply = async () => {
+      const skinPref = await bridge.getUiPreference("owlSkin").catch(() => null);
+      if (skinPref === "custom") {
+        const asset = await window.vesti?.readCustomOwl().catch(() => null);
+        if (asset?.dataUrl) {
+          const all = { ...OWL_MOOD_ICONS };
+          for (const mood of Object.keys(all)) {
+            all[mood as keyof typeof all] = asset.dataUrl;
+          }
+          if (!cancelled) setOwlIcons(all);
+          return;
+        }
+      }
+      if (!cancelled) setOwlIcons(OWL_MOOD_ICONS);
+    };
+    void apply();
+    const off = bridge.onUiPreferenceChanged((key) => {
+      if (key === "owlSkin" || key === "owlCustomUpdatedAt") void apply();
+    });
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, []);
 
   useEffect(() => {
     startCaptureSync();
@@ -266,7 +300,7 @@ function Shell({
               aitiEmblemUrl={aitiImagery ? emblemUrl(aitiImagery.emblemId) : undefined}
               aitiPersonaNote={aitiPersonaNote}
               membershipActive={membership.active}
-              companionOwlIcons={OWL_MOOD_ICONS}
+              companionOwlIcons={owlIcons}
               learn={learn}
               lang={lang}
               tab={dashboardTab}
