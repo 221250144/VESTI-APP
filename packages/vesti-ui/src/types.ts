@@ -91,6 +91,11 @@ export interface CompanionAskInput {
   question: string;
   persona?: CompanionPersona;
   memoryScope?: CompanionMemoryScope;
+  /** Live-typing callbacks (host-dependent): onStream receives the accumulated
+   * RAW answer text (mood tag line included), onReasoning the accumulated
+   * thinking trace. Omit both for the classic single-shot turn. */
+  onStream?: (accumulatedRaw: string) => void;
+  onReasoning?: (accumulated: string) => void;
 }
 
 export interface CompanionAnswer {
@@ -99,6 +104,8 @@ export interface CompanionAnswer {
   persona: CompanionPersona;
   /** Answer body with the mood tag line stripped. */
   content: string;
+  /** Thinking trace when the turn streamed and the model exposed one. */
+  reasoning?: string;
   sources: RelatedConversation[];
 }
 
@@ -216,6 +223,9 @@ export interface ExploreAgentMeta {
   mood?: CompanionMood;
   persona?: CompanionPersona;
   memoryScope?: CompanionMemoryScope;
+  /** Persisted thinking trace (companion streaming turns): the chat renders
+   * it as a collapsible 思考过程 block above the answer. */
+  reasoning?: string;
 }
 
 export interface RagResponse {
@@ -1444,6 +1454,8 @@ export interface CompanionLabels {
   send: string;
   /** Generating indicator / composer-disabled text. */
   thinking: string;
+  /** Collapsible block holding the model's streamed thinking trace. */
+  thinkingProcess: string;
   /** Gentle error bubble title (the LLM failure message follows). */
   errorTitle: string;
 }

@@ -628,6 +628,7 @@ const DEFAULT_LABELS: DashboardLabels = {
       inputPlaceholder: "Say something to Night Talk… (Enter to send, Shift+Enter for a new line)",
       send: "Send",
       thinking: "Night Talk is thinking…",
+      thinkingProcess: "Thinking process",
       errorTitle: "Night Talk couldn't catch that one",
     },
   },

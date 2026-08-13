@@ -68,6 +68,8 @@ export function ExploreTab({
   const [inputValue, setInputValue] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Live-typing state of the in-flight streaming turn (null = not streaming).
+  const [streaming, setStreaming] = useState<{ raw: string; reasoning: string } | null>(null);
 
   // Persona / memory-scope switches: local state seeded from ui-preferences,
   // every change persisted back (window.vestiUi on the desktop host).
@@ -161,7 +163,7 @@ export function ExploreTab({
     if (messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
-  }, [messages, isSubmitting, error]);
+  }, [messages, isSubmitting, error, streaming]);
 
   const handlePersonaChange = (next: CompanionPersona) => {
     setPersona(next);
@@ -221,6 +223,7 @@ export function ExploreTab({
 
     setIsSubmitting(true);
     setError(null);
+    setStreaming(null);
 
     const optimisticUserMessage: ExploreMessage = {
       id: generateId(),
@@ -238,7 +241,14 @@ export function ExploreTab({
         question: trimmed,
         persona,
         memoryScope,
+        // Live typing: the host streams raw chunks (mood tag line included —
+        // the bubble hides it) plus the thinking trace when the model has one.
+        onStream: (raw) =>
+          setStreaming((prev) => ({ raw, reasoning: prev?.reasoning ?? "" })),
+        onReasoning: (reasoning) =>
+          setStreaming((prev) => ({ raw: prev?.raw ?? "", reasoning })),
       });
+      setStreaming(null);
 
       if (!currentSessionId) {
         justCreatedSessionRef.current = answer.sessionId;
@@ -259,6 +269,7 @@ export function ExploreTab({
           mood: answer.mood,
           persona: answer.persona,
           memoryScope,
+          ...(answer.reasoning ? { reasoning: answer.reasoning } : {}),
         },
         timestamp: Date.now(),
       };
@@ -272,6 +283,7 @@ export function ExploreTab({
       await loadSessions();
     } catch (err) {
       console.error("[Companion] Submit error:", err);
+      setStreaming(null);
       setError((err as Error)?.message ?? labels.failedToRetrieveAnswer);
       setMessages((prev) => prev.filter((message) => message.id !== optimisticUserMessage.id));
       // Restore the question so a transient failure doesn't lose the typing.
@@ -329,6 +341,7 @@ export function ExploreTab({
         messages={messages}
         messagesLoading={messagesLoading}
         isSubmitting={isSubmitting}
+        streaming={streaming}
         error={error}
         onDismissError={() => setError(null)}
         currentSessionTitle={currentSession?.title ?? null}

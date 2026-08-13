@@ -12,6 +12,7 @@ import type {
 import { getAgentKindDefinition } from './agentPrompts';
 import type { CaptureService } from './captureService';
 import { buildChatCompletionBody } from './chatRequest';
+import { chatStreamEndpoint, createSseDataCollector, parseChatStreamData } from './chatStream';
 import type { RuntimeAgentSettings, RuntimeLlmSettings, SettingsService } from './settingsService';
 import { fetchDemoProxy, type ProxyAttemptMetadata } from './proxyFetch';
 
@@ -94,6 +95,52 @@ export class AgentService {
   ) {}
 
   async run(request: AgentRunRequest, options?: { persist?: boolean }): Promise<AgentResult> {
+    const prepared = this.prepareRun(request);
+    const completion = await this.complete(prepared.llm, prepared.messages, request.kind);
+    return this.finalizeRun(request, prepared, completion, options);
+  }
+
+  /**
+   * Streaming variant of run(): answer/thinking deltas are pushed through
+   * `emit` as they arrive while the method resolves with the same final
+   * AgentResult run() would produce. A transport failure before the first
+   * visible chunk degrades transparently to the non-streaming call; once the
+   * user has seen partial output there is no clean retry, so later failures
+   * propagate.
+   */
+  async runStream(
+    request: AgentRunRequest,
+    emit: (chunk: { delta?: string; reasoning?: string; done?: boolean }) => void,
+    options?: { persist?: boolean },
+  ): Promise<AgentResult> {
+    const prepared = this.prepareRun(request);
+    let sawDelta = false;
+    let completion: { content: string; modelUsed: string };
+    try {
+      completion = await this.completeStream(
+        prepared.llm,
+        prepared.messages,
+        request.kind,
+        (content, reasoning) => {
+          sawDelta = true;
+          emit({ delta: content || undefined, reasoning: reasoning || undefined });
+        },
+      );
+    } catch (error) {
+      if (sawDelta) throw error;
+      completion = await this.complete(prepared.llm, prepared.messages, request.kind);
+    }
+    emit({ done: true });
+    return this.finalizeRun(request, prepared, completion, options);
+  }
+
+  private prepareRun(request: AgentRunRequest): {
+    detail: SessionDetail | null;
+    llm: RuntimeLlmSettings;
+    definition: ReturnType<typeof getAgentKindDefinition>;
+    messages: Array<{ role: string; content: string }>;
+    question: string | undefined;
+  } {
     const detail = this.capture.getSession(request.sessionId);
     // Batch kinds (classify) run over renderer-side Dexie conversations whose
     // ids don't exist in the capture store; a pre-built transcript makes the
@@ -112,11 +159,17 @@ export class AgentService {
     llm.modelId = this.resolveModelId(llm, request.modelId);
     const question = request.question?.trim();
     const definition = getAgentKindDefinition(request.kind);
-    const completion = await this.complete(
-      llm,
-      definition.buildPrompt({ transcript, question, template: request.template, preferences }),
-      request.kind,
-    );
+    const messages = definition.buildPrompt({ transcript, question, template: request.template, preferences });
+    return { detail: detail ?? null, llm, definition, messages, question };
+  }
+
+  private async finalizeRun(
+    request: AgentRunRequest,
+    prepared: ReturnType<AgentService['prepareRun']>,
+    completion: { content: string; modelUsed: string },
+    options?: { persist?: boolean },
+  ): Promise<AgentResult> {
+    const { detail, definition, llm, question } = prepared;
     const raw = completion.content;
     const content = definition.parse ? definition.parse(raw) : raw;
     const result: AgentResult = {
@@ -320,6 +373,103 @@ export class AgentService {
       body.length,
       label,
     );
+    return { content: cleaned, modelUsed };
+  }
+
+  /**
+   * Streaming chat completion over the OpenAI-compatible SSE surface. The demo
+   * gateway's legacy `/chat` route forces stream:false, so demo mode goes to
+   * the `/v1` endpoint (chatStreamEndpoint); BYOK uses its normal base. Token
+   * usage rides the terminal chunk (stream_options.include_usage) — without it
+   * the credit meter falls back to its estimate, exactly like complete().
+   */
+  private async completeStream(
+    settings: RuntimeLlmSettings,
+    messages: Array<{ role: string; content: string }>,
+    label: string,
+    onDelta: (content: string, reasoning: string) => void,
+  ): Promise<{ content: string; modelUsed: string }> {
+    if (settings.mode === 'custom_byok' && !settings.apiKey) {
+      throw new Error('请先在设置中填写 API Key');
+    }
+    const endpoint = chatStreamEndpoint(settings.mode, settings.baseUrl);
+    const body = buildChatCompletionBody(settings, messages, true);
+    // Credit pre-check (demo gateway only; the meter no-ops under BYOK).
+    this.credits?.beforeChat(body.length, label);
+
+    let response: Response;
+    try {
+      const headers: Record<string, string> = { 'content-type': 'application/json' };
+      if (settings.mode === 'demo_proxy') {
+        if (settings.serviceToken.trim()) {
+          headers['x-vesti-service-token'] = settings.serviceToken.trim();
+        }
+      } else {
+        headers.authorization = `Bearer ${settings.apiKey}`;
+      }
+      response = await net.fetch(endpoint, {
+        method: 'POST',
+        headers,
+        body,
+        signal: AbortSignal.timeout(BYOK_CHAT_TIMEOUT_MS),
+      });
+    } catch (error) {
+      throw await this.networkError(error, endpoint);
+    }
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({})) as {
+        error?: { code?: string; message?: string; requestId?: string } | string;
+        message?: string;
+      };
+      const detail = typeof payload.error === 'string' ? payload.error : payload.error?.message || payload.message;
+      const requestId = response.headers.get('x-request-id')
+        || (typeof payload.error === 'object' ? payload.error?.requestId : undefined);
+      const suffix = requestId ? `（请求 ID：${requestId}）` : '';
+      throw new LlmGatewayError(
+        `${detail || `模型请求失败（HTTP ${response.status}）`}${suffix}`,
+        {
+          status: response.status,
+          code: typeof payload.error === 'object' ? payload.error?.code : undefined,
+          requestId,
+          providerUsed: response.headers.get('x-proxy-provider-used') || undefined,
+          modelUsed: response.headers.get('x-proxy-model-used') || undefined,
+        },
+      );
+    }
+    if (!response.body) throw new Error('模型服务未返回流式响应体');
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let content = '';
+    let modelFromChunk: string | null = null;
+    let usage: AgentUsageTokens | null = null;
+    const feed = createSseDataCollector((data) => {
+      const parsed = parseChatStreamData(data);
+      if (!parsed || parsed.done) return;
+      if (parsed.model) modelFromChunk = parsed.model;
+      if (parsed.usage) usage = parsed.usage;
+      if (parsed.content || parsed.reasoning) {
+        content += parsed.content;
+        onDelta(parsed.content, parsed.reasoning);
+      }
+    });
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        feed(decoder.decode(value, { stream: true }));
+      }
+      feed(decoder.decode());
+    } finally {
+      reader.releaseLock();
+    }
+
+    const cleaned = content.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+    if (!cleaned) throw new Error('模型没有返回可显示的内容');
+    const modelUsed = response.headers.get('x-proxy-model-used')?.trim()
+      || modelFromChunk
+      || settings.modelId;
+    this.credits?.afterChat(usage, body.length, label);
     return { content: cleaned, modelUsed };
   }
 

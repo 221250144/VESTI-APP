@@ -1409,6 +1409,7 @@ export const zhTranslations = {
         inputPlaceholder: "和夜话说点什么…（Enter 发送，Shift+Enter 换行）",
         send: "发送",
         thinking: "夜话思考中…",
+        thinkingProcess: "思考过程",
         errorTitle: "夜话这次没接上你的话",
       },
     },

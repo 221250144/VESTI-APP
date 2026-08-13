@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import {
   IPC,
   type AgentActivityPayload,
+  type AgentStreamChunk,
   type CapsuleState,
   type ExtensionImportRequestPayload,
   type ExtensionImportResultPayload,
@@ -71,6 +72,14 @@ const api: VestiDesktopApi = {
   testLlm: () => ipcRenderer.invoke(IPC.llmTest),
   embeddingStatus: () => ipcRenderer.invoke(IPC.embeddingStatus),
   runAgent: request => ipcRenderer.invoke(IPC.agentRun, request),
+  runAgentStream: (request, runId) => ipcRenderer.invoke(IPC.agentRunStream, request, runId),
+  onAgentStreamChunk: (runId, listener) => {
+    const wrapped = (_event: unknown, chunk: AgentStreamChunk) => {
+      if (chunk?.runId === runId) listener(chunk);
+    };
+    ipcRenderer.on(IPC.agentStreamChunk, wrapped);
+    return () => ipcRenderer.removeListener(IPC.agentStreamChunk, wrapped);
+  },
   getAgentResults: () => ipcRenderer.invoke(IPC.agentResults),
   exportConversations: () => ipcRenderer.invoke(IPC.exportConversations),
   getConversationTree: () => ipcRenderer.invoke(IPC.conversationTree),

@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   AgentResult,
   AgentRunRequest,
+  AgentStreamChunk,
   MemoryEntryView,
   SessionRecallHit,
 } from "../../shared/contracts";
@@ -22,6 +23,7 @@ import {
   mapCompanionRecallSources,
   splitCompanionResult,
   stripCompanionMoodLine,
+  type CompanionAgentMeta,
   type CompanionConversationRecord,
   type CompanionDeps,
 } from "./companionService";
@@ -266,6 +268,9 @@ interface CompanionMockOptions {
   history?: ExploreMessage[];
   records?: CompanionConversationRecord[];
   runAgentContent?: string;
+  /** Wire the streaming bridge pair (runAgentStream + onAgentStreamChunk). */
+  streaming?: boolean;
+  streamChunks?: Array<{ delta?: string; reasoning?: string }>;
 }
 
 function makeDeps(options: CompanionMockOptions = {}) {
@@ -307,6 +312,33 @@ function makeDeps(options: CompanionMockOptions = {}) {
     listConversationRecords: vi.fn(async () => options.records ?? []),
     now: () => 5_000,
   };
+  if (options.streaming) {
+    const listeners = new Map<string, (chunk: AgentStreamChunk) => void>();
+    deps.onAgentStreamChunk = vi.fn(
+      (runId: string, listener: (chunk: AgentStreamChunk) => void) => {
+        listeners.set(runId, listener);
+        return () => {
+          listeners.delete(runId);
+        };
+      },
+    );
+    deps.runAgentStream = vi.fn(async (request: AgentRunRequest, runId: string) => {
+      calls.agentRequests.push(request);
+      const listener = listeners.get(runId);
+      for (const chunk of options.streamChunks ?? [
+        { reasoning: "用户在打招呼" },
+        { delta: "[mood:warm]\n" },
+        { delta: "晚上好" },
+        { delta: "，想聊点什么？" },
+      ]) {
+        listener?.({ runId, ...chunk });
+      }
+      listener?.({ runId, done: true });
+      return {
+        content: options.runAgentContent ?? "warm\n晚上好，想聊点什么？",
+      } as AgentResult;
+    });
+  }
   return { deps, calls };
 }
 
@@ -442,5 +474,61 @@ describe("askCompanion", () => {
     await expect(
       askCompanion({ sessionId: "sess-1", question: "hi" }, deps),
     ).rejects.toThrow("LLM offline");
+  });
+
+  it("streams deltas and reasoning to the callbacks and persists the reasoning", async () => {
+    const { deps, calls } = makeDeps({ streaming: true });
+    const streamed: string[] = [];
+    const reasonings: string[] = [];
+    const answer = await askCompanion(
+      {
+        sessionId: "sess-1",
+        question: "晚上好",
+        onStream: (raw) => streamed.push(raw),
+        onReasoning: (accumulated) => reasonings.push(accumulated),
+      },
+      deps,
+    );
+    // Accumulated RAW text (mood tag line included) reaches the live bubble.
+    expect(streamed).toEqual([
+      "[mood:warm]\n",
+      "[mood:warm]\n晚上好",
+      "[mood:warm]\n晚上好，想聊点什么？",
+    ]);
+    expect(reasonings).toEqual(["用户在打招呼"]);
+    expect(deps.runAgent).not.toHaveBeenCalled();
+    expect(deps.runAgentStream).toHaveBeenCalledTimes(1);
+    // The final answer/persisted message carry the parsed contract + trace.
+    expect(answer.mood).toBe("warm");
+    expect(answer.content).toBe("晚上好，想聊点什么？");
+    expect(answer.reasoning).toBe("用户在打招呼");
+    const meta = calls.addedMessages[1].message.agentMeta as CompanionAgentMeta | undefined;
+    expect(meta?.reasoning).toBe("用户在打招呼");
+    expect(calls.addedMessages[1].message.content).toBe("warm\n晚上好，想聊点什么？");
+  });
+
+  it("uses the plain call when no streaming callbacks are given, even if the bridge offers it", async () => {
+    const { deps } = makeDeps({ streaming: true });
+    const answer = await askCompanion({ sessionId: "sess-1", question: "hi" }, deps);
+    expect(deps.runAgent).toHaveBeenCalledTimes(1);
+    expect(deps.runAgentStream).not.toHaveBeenCalled();
+    expect(answer.reasoning).toBeUndefined();
+  });
+
+  it("streams nothing (and persists no reasoning) when the model only sends answer text", async () => {
+    const { deps, calls } = makeDeps({
+      streaming: true,
+      streamChunks: [{ delta: "calm\n" }, { delta: "没有思考痕迹的回答" }],
+      runAgentContent: "calm\n没有思考痕迹的回答",
+    });
+    const reasonings: string[] = [];
+    const answer = await askCompanion(
+      { sessionId: "sess-1", question: "hi", onStream: () => undefined, onReasoning: (r) => reasonings.push(r) },
+      deps,
+    );
+    expect(reasonings).toEqual([]);
+    expect(answer.reasoning).toBeUndefined();
+    const meta = calls.addedMessages[1].message.agentMeta as CompanionAgentMeta | undefined;
+    expect(meta?.reasoning).toBeUndefined();
   });
 });

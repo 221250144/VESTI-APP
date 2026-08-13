@@ -13,6 +13,7 @@
 import type {
   AgentResult,
   AgentRunRequest,
+  AgentStreamChunk,
   MemoryEntryListOptions,
   MemoryEntryView,
   SessionRecallHit,
@@ -67,6 +68,8 @@ export interface CompanionAnswer {
   persona: CompanionPersona;
   /** Answer body with the mood tag line stripped. */
   content: string;
+  /** Thinking trace when the turn streamed and the model exposed one. */
+  reasoning?: string;
   sources: RelatedConversation[];
 }
 
@@ -75,6 +78,13 @@ export interface AskCompanionInput {
   question: string;
   persona?: CompanionPersona;
   memoryScope?: CompanionMemoryScope;
+  /** Live-typing callbacks. When set (and the host bridge supports streaming)
+   * the turn streams: onStream gets the accumulated RAW answer text (mood tag
+   * line included — the UI hides it while typing), onReasoning the
+   * accumulated thinking trace. Without them the turn behaves exactly as
+   * before (single non-streaming call). */
+  onStream?: (accumulatedRaw: string) => void;
+  onReasoning?: (accumulated: string) => void;
 }
 
 /** agentMeta payload persisted on the assistant message: the explore fields
@@ -83,7 +93,14 @@ export type CompanionAgentMeta = ExploreAgentMeta & {
   mood?: CompanionMood;
   persona?: CompanionPersona;
   memoryScope?: CompanionMemoryScope;
+  /** Persisted thinking trace (capped) so the collapsible 思考过程 block
+   * survives a reload. */
+  reasoning?: string;
 };
+
+/** Persisted reasoning is a convenience for the 思考过程 fold, not a document —
+ * keep it bounded. */
+export const COMPANION_REASONING_PERSIST_CHARS = 4_000;
 
 // ---- Pure core (unit-tested) ----------------------------------------------------
 
@@ -318,6 +335,9 @@ export function mapCompanionRecallSources(
 /** Injectable seams so the turn pipeline is testable without Dexie/window. */
 export interface CompanionDeps {
   runAgent(request: AgentRunRequest): Promise<AgentResult>;
+  /** Streaming bridge pair — when absent the turn silently uses runAgent. */
+  runAgentStream?(request: AgentRunRequest, runId: string): Promise<AgentResult>;
+  onAgentStreamChunk?(runId: string, listener: (chunk: AgentStreamChunk) => void): () => void;
   listMemoryEntries(options?: MemoryEntryListOptions): Promise<MemoryEntryView[]>;
   recallSessions(query: string, topK?: number): Promise<SessionRecallHit[]>;
   createSession(title: string): Promise<string>;
@@ -370,6 +390,13 @@ async function listDexieCompanionConversations(): Promise<
 function defaultCompanionDeps(): CompanionDeps {
   return {
     runAgent: (request) => requireVestiApi().runAgent(request),
+    runAgentStream: (request, runId) => {
+      const api = requireVestiApi();
+      if (!api.runAgentStream) throw new Error("流式通道不可用");
+      return api.runAgentStream(request, runId);
+    },
+    onAgentStreamChunk: (runId, listener) =>
+      requireVestiApi().onAgentStreamChunk?.(runId, listener) ?? (() => undefined),
     listMemoryEntries: (options) => requireVestiApi().listMemoryEntries(options),
     recallSessions: (query, topK) => requireVestiApi().recallSessions(query, topK),
     createSession: (title) => createExploreSession(title),
@@ -413,7 +440,7 @@ export async function askCompanion(
   ]);
 
   const context = buildCompanionContext({ memories, depositDigests, recallHits, history });
-  const result = await deps.runAgent({
+  const request: AgentRunRequest = {
     kind: "companion",
     sessionId,
     question,
@@ -423,8 +450,38 @@ export async function askCompanion(
     // fresh session) still needs a non-blank placeholder riding the channel.
     transcriptOverride: context.trim() ? context : "（暂无可参考的记忆或对话前文）",
     persist: false,
-  });
+  };
+
+  // Streaming is opt-in per turn: the UI passes live-typing callbacks and the
+  // host bridge must expose the stream pair; otherwise the plain call runs.
+  let reasoning = "";
+  let result: AgentResult;
+  if (input.onStream && deps.runAgentStream && deps.onAgentStreamChunk) {
+    const runId = crypto.randomUUID();
+    let accumulated = "";
+    const off = deps.onAgentStreamChunk(runId, (chunk) => {
+      if (chunk.delta) {
+        accumulated += chunk.delta;
+        input.onStream?.(accumulated);
+      }
+      if (chunk.reasoning) {
+        reasoning += chunk.reasoning;
+        input.onReasoning?.(reasoning);
+      }
+    });
+    try {
+      result = await deps.runAgentStream(request, runId);
+    } finally {
+      off();
+    }
+  } else {
+    result = await deps.runAgent(request);
+  }
   const { mood, body } = splitCompanionResult(result.content);
+  const trimmedReasoning = reasoning.trim();
+  const persistedReasoning = trimmedReasoning
+    ? trimmedReasoning.slice(0, COMPANION_REASONING_PERSIST_CHARS)
+    : undefined;
   const sources =
     recallHits.length > 0
       ? mapCompanionRecallSources(recallHits, await deps.listConversationRecords())
@@ -442,6 +499,7 @@ export async function askCompanion(
     mood,
     persona,
     memoryScope,
+    ...(persistedReasoning ? { reasoning: persistedReasoning } : {}),
   };
   await deps.addMessage(sessionId, {
     role: "assistant",
@@ -451,5 +509,12 @@ export async function askCompanion(
     timestamp: now + 1,
   });
 
-  return { sessionId, mood, persona, content: body, sources };
+  return {
+    sessionId,
+    mood,
+    persona,
+    content: body,
+    sources,
+    ...(persistedReasoning ? { reasoning: persistedReasoning } : {}),
+  };
 }

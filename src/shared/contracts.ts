@@ -304,6 +304,19 @@ export interface LlmTestResult {
   message: string;
 }
 
+/**
+ * main → renderer live chunk of a streaming agent run (夜话 live typing).
+ * The renderer filters on runId; `delta` carries raw (pre-parse) answer text,
+ * `reasoning` the model's thinking trace when exposed, and `done` marks the
+ * final chunk sent right before the invoke resolves.
+ */
+export interface AgentStreamChunk {
+  runId: string;
+  delta?: string;
+  reasoning?: string;
+  done?: boolean;
+}
+
 export interface EmbeddingStatus {
   available: boolean;
   reason?: string;
@@ -583,6 +596,8 @@ export const IPC = {
   llmTest: 'vesti:llm-test',
   embeddingStatus: 'vesti:embedding-status',
   agentRun: 'vesti:agent-run',
+  agentRunStream: 'vesti:agent-run-stream',
+  agentStreamChunk: 'vesti:agent-stream-chunk',
   agentResults: 'vesti:agent-results',
   exportConversations: 'vesti:export-conversations',
   conversationTree: 'vesti:conversation-tree',
@@ -1115,6 +1130,10 @@ export interface VestiDesktopApi {
   testLlm(): Promise<LlmTestResult>;
   embeddingStatus(): Promise<EmbeddingStatus>;
   runAgent(request: AgentRunRequest): Promise<AgentResult>;
+  /** Streaming variant: live chunks arrive via onAgentStreamChunk (filtered by
+   * runId) while the invoke resolves with the final parsed result. */
+  runAgentStream(request: AgentRunRequest, runId: string): Promise<AgentResult>;
+  onAgentStreamChunk(runId: string, listener: (chunk: AgentStreamChunk) => void): () => void;
   getAgentResults(): Promise<AgentResult[]>;
   exportConversations(): Promise<ConversationExportBundle[]>;
   getConversationTree(): Promise<ConversationTree>;

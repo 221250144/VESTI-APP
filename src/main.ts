@@ -1006,6 +1006,20 @@ function registerIpc(): void {
     if (!validAgentRequest(request)) throw new Error('Agent 请求无效');
     return agent.run(request, { persist: request.persist });
   });
+  memberIpcHandle(IPC.agentRunStream, (event, request: unknown, runId: unknown) => {
+    if (!validAgentRequest(request) || typeof runId !== 'string' || !runId) {
+      throw new Error('Agent 请求无效');
+    }
+    return agent.runStream(
+      request,
+      chunk => {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send(IPC.agentStreamChunk, { runId, ...chunk });
+        }
+      },
+      { persist: request.persist },
+    );
+  });
   memberIpcHandle(IPC.agentResults, () => agent.listResults());
   memberIpcHandle(IPC.exportConversations, () => capture.exportConversations());
   memberIpcHandle(IPC.conversationTree, () => capture.getConversationTree());

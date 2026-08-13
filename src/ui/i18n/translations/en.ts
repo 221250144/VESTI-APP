@@ -1411,6 +1411,7 @@ export const enTranslations = {
         send: "Send",
         thinking: "Night Talk is thinking…",
         errorTitle: "Night Talk couldn't catch that one",
+        thinkingProcess: "Thinking process",
       },
     },
     data: {
