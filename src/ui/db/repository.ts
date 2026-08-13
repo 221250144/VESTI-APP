@@ -3068,6 +3068,10 @@ export async function getRecentExploreMessages(
   sessionId: string,
   limit = 6
 ): Promise<ExploreMessage[]> {
+  // Take the newest `limit` rows (reversed primary-key order), then hand back
+  // chronological order — sortBy already sorts ascending by timestamp, so no
+  // extra reverse here (an earlier double-reverse fed history newest-first
+  // into the companion prompt, which read as "no conversation memory").
   const records = await db.explore_messages
     .where("sessionId")
     .equals(sessionId)
@@ -3076,7 +3080,7 @@ export async function getRecentExploreMessages(
     .sortBy("timestamp")
 
   // Return in chronological order
-  return records.reverse().map((record) => ({
+  return records.map((record) => ({
     id: record.id,
     sessionId: record.sessionId,
     role: record.role,

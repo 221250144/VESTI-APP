@@ -17,6 +17,8 @@ import {
   buildCompanionContext,
   COMPANION_CONTEXT_BUDGET_CHARS,
   COMPANION_DEPOSIT_DIGEST_CHARS,
+  COMPANION_MEMORY_LIMIT,
+  COMPANION_RECALL_TOP_K,
   mapCompanionRecallSources,
   splitCompanionResult,
   stripCompanionMoodLine,
@@ -139,7 +141,9 @@ describe("buildCompanionContext", () => {
       makeHit({
         sessionId: `cli-${index}`,
         title: `会话${index}`,
-        oneLiner: "y".repeat(6_000),
+        // One retained hit must alone blow the budget so trimming only stops
+        // once the whole recall section is gone.
+        oneLiner: "y".repeat(12_000),
       }),
     );
     const text = buildCompanionContext({
@@ -155,7 +159,8 @@ describe("buildCompanionContext", () => {
   });
 
   it("drops the earliest history messages when recall trimming is not enough", () => {
-    const filler = "z".repeat(4_000);
+    // 2×8K alone overflows the 16K budget; dropping the earliest line fits.
+    const filler = "z".repeat(8_000);
     const text = buildCompanionContext({
       memories: [makeEntry({ id: "m1", contentMarkdown: "记得我" })],
       depositDigests: [],
@@ -335,7 +340,7 @@ describe("askCompanion", () => {
     expect(request.transcriptOverride).toContain("【相关历史对话片段】");
     expect(request.transcriptOverride).toContain("发布片段");
     expect(request.transcriptOverride).toContain("【你们最近的交谈】");
-    expect(calls.recallQueries).toEqual([{ query: "心里有点没底", topK: 4 }]);
+    expect(calls.recallQueries).toEqual([{ query: "心里有点没底", topK: COMPANION_RECALL_TOP_K }]);
 
     expect(answer).toEqual({
       sessionId: "sess-1",
@@ -402,7 +407,7 @@ describe("askCompanion", () => {
       deps,
     );
     expect(calls.memoryQueries).toEqual([
-      { kind: "dream", status: "active", limit: 100 },
+      { kind: "dream", status: "active", limit: COMPANION_MEMORY_LIMIT },
       { kind: "deposit", status: "active", limit: 5 },
     ]);
     expect(calls.recallQueries).toEqual([]);

@@ -910,7 +910,7 @@ describe('companion agent kind', () => {
       preferences: zhPreferences,
     });
     expect(messages[0].content.startsWith('你是「夜话」的创造者人格')).toBe(true);
-    expect(messages[0].content).toContain('高能量、有火花');
+    expect(messages[0].content).toContain('激情与想象力');
     expect(messages[0].content.endsWith('使用清晰、简洁的中文 Markdown。')).toBe(true);
     expect(messages[1].content).toBe('CONTEXT\n\n用户现在说：给我点灵感');
   });

@@ -35,15 +35,19 @@ import {
 // ---- Tunables ----------------------------------------------------------------
 
 /** Hard cap for the assembled context. The main process caps
- * transcriptOverride at 30K; 8K leaves ample headroom for the prompt
- * template around it. */
-export const COMPANION_CONTEXT_BUDGET_CHARS = 8_000;
+ * transcriptOverride at 30K; 16K feeds a generous memory section while
+ * leaving ample headroom for the prompt template around it. */
+export const COMPANION_CONTEXT_BUDGET_CHARS = 16_000;
 /** Deposit documents enter the context as a digest of this many chars. */
 export const COMPANION_DEPOSIT_DIGEST_CHARS = 200;
 /** Recall hit snippets are collapsed and capped at this many chars. */
 export const COMPANION_RECALL_SNIPPET_CHARS = 200;
 /** Recent turns of the current conversation fed back into the context. */
 export const COMPANION_HISTORY_LIMIT = 12;
+/** Long-term memories fetched per turn (trimmed to budget by tag priority). */
+export const COMPANION_MEMORY_LIMIT = 400;
+/** Cross-session recall hits fetched per question. */
+export const COMPANION_RECALL_TOP_K = 6;
 
 // ---- Public types --------------------------------------------------------------
 
@@ -178,40 +182,68 @@ function renderHistorySection(history: ExploreMessage[]): string | null {
 }
 
 /**
+ * 个人信息优先级: profile/preference/goal memories are the ones the user
+ * most wants the owl to "remember about me" — they enter the context first
+ * and are dropped last; within a tag, freshest first.
+ */
+export const COMPANION_MEMORY_TAG_PRIORITY: Record<string, number> = {
+  profile: 0,
+  preference: 1,
+  goal: 2,
+  emotion: 3,
+  relationship: 4,
+  event: 5,
+};
+
+export function prioritizeMemories(memories: MemoryEntryView[]): MemoryEntryView[] {
+  return [...memories].sort((a, b) => {
+    const pa = COMPANION_MEMORY_TAG_PRIORITY[a.tags[0] ?? ""] ?? 6;
+    const pb = COMPANION_MEMORY_TAG_PRIORITY[b.tags[0] ?? ""] ?? 6;
+    if (pa !== pb) return pa - pb;
+    return b.updatedAt - a.updatedAt;
+  });
+}
+
+/**
  * Assemble the companion context: up to four sections (【关于用户的长期记忆】
  * 【用户的沉淀文档（摘要）】 【相关历史对话片段】 【你们最近的交谈】), empty
  * sections omitted entirely, everything under a hard char budget. When over
- * budget, recall hits are dropped first (lowest-ranked last), then the
- * earliest history messages; a final hard slice guards against oversized
- * memory/deposit sections. An all-empty input yields '' (plain small talk).
+ * budget, sections shrink in rising-value order: recall hits first
+ * (lowest-ranked last), then deposit digests, then the earliest history
+ * messages, finally the lowest-priority memory lines; a final hard slice
+ * guards the remainder. An all-empty input yields '' (plain small talk).
  */
 export function buildCompanionContext(input: CompanionContextInput): string {
-  const fixedSections = [
-    renderMemorySection(input.memories),
-    renderDepositSection(input.depositDigests),
-  ];
-  const assemble = (
-    recallHits: SessionRecallHit[],
-    history: ExploreMessage[],
-  ): string =>
+  let memories = input.memories;
+  let deposits = input.depositDigests;
+  let recallHits = input.recallHits;
+  let history = input.history;
+  const assemble = (): string =>
     [
-      ...fixedSections,
+      renderMemorySection(memories),
+      renderDepositSection(deposits),
       renderRecallSection(recallHits),
       renderHistorySection(history),
     ]
       .filter((section): section is string => section !== null)
       .join("\n\n");
 
-  let recallHits = input.recallHits;
-  let history = input.history;
-  let text = assemble(recallHits, history);
+  let text = assemble();
   while (text.length > COMPANION_CONTEXT_BUDGET_CHARS && recallHits.length > 0) {
     recallHits = recallHits.slice(0, -1);
-    text = assemble(recallHits, history);
+    text = assemble();
+  }
+  while (text.length > COMPANION_CONTEXT_BUDGET_CHARS && deposits.length > 0) {
+    deposits = deposits.slice(0, -1);
+    text = assemble();
   }
   while (text.length > COMPANION_CONTEXT_BUDGET_CHARS && history.length > 0) {
     history = history.slice(1);
-    text = assemble(recallHits, history);
+    text = assemble();
+  }
+  while (text.length > COMPANION_CONTEXT_BUDGET_CHARS && memories.length > 0) {
+    memories = memories.slice(0, -1);
+    text = assemble();
   }
   if (text.length > COMPANION_CONTEXT_BUDGET_CHARS) {
     text = `${text.slice(0, COMPANION_CONTEXT_BUDGET_CHARS - 1)}…`;
@@ -368,13 +400,15 @@ export async function askCompanion(
   const [history, memories, depositDigests, recallHits] = await Promise.all([
     deps.getRecentMessages(sessionId, COMPANION_HISTORY_LIMIT),
     wantMemory
-      ? deps.listMemoryEntries({ kind: "dream", status: "active", limit: 100 })
+      ? deps
+          .listMemoryEntries({ kind: "dream", status: "active", limit: COMPANION_MEMORY_LIMIT })
+          .then(prioritizeMemories)
       : Promise.resolve([] as MemoryEntryView[]),
     wantMemory
       ? deps.listMemoryEntries({ kind: "deposit", status: "active", limit: 5 })
       : Promise.resolve([] as MemoryEntryView[]),
     wantRecall
-      ? deps.recallSessions(question, 4).catch(() => [] as SessionRecallHit[])
+      ? deps.recallSessions(question, COMPANION_RECALL_TOP_K).catch(() => [] as SessionRecallHit[])
       : Promise.resolve([] as SessionRecallHit[]),
   ]);
 
