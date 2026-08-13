@@ -128,6 +128,15 @@ export class AgentService {
         : `${llm.modelId} → ${completion.modelUsed}`;
       return { ok: true, message: `连接成功：${modelLabel}` };
     } catch (error) {
+      // 网关诊断:把 fallback 原因/首败端点带出来,不然"主网关传输失败→旧网关
+      // 兜底报错"这类链路问题在 UI 上完全不可见
+      if (error instanceof LlmGatewayError) {
+        const hints: string[] = [];
+        if (error.details.fallbackReason) hints.push(`主网关重试原因：${error.details.fallbackReason}`);
+        if (error.details.providerUsed) hints.push(`实际命中：${error.details.providerUsed}`);
+        const suffix = hints.length > 0 ? `（${hints.join('，')}）` : '';
+        return { ok: false, message: `${error.message}${suffix}` };
+      }
       return { ok: false, message: error instanceof Error ? error.message : '连接失败' };
     }
   }

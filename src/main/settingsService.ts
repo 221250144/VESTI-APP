@@ -22,10 +22,20 @@ import {
   PRIMARY_CAPTURE_PLATFORMS,
 } from './settingsMigration';
 
-export const DEMO_BASE_URL = 'https://api.ccvg1218.online/api';
-export const LEGACY_DEMO_BASE_URL = 'https://vesti-gate.vercel.app/api';
+// Official gateway: keys stay server-side, model ids pass through with no
+// whitelist; the previous deployment remains the transport-level fallback.
+export const DEMO_BASE_URL = 'https://vesti.world/gate/api';
+export const LEGACY_DEMO_BASE_URL = 'https://api.ccvg1218.online/api';
 const DEMO_SERVICE_TOKEN = 'vesti-kcq-default-d850d4dcd610a0e2e919eb610f42066faff1e1c57c0c047c';
 export const DEFAULT_EMBEDDING_MODEL = 'text-embedding-v1';
+// 旧网关(百炼上游)时代的内置模型 id:新网关按前缀路由到 DeepSeek/Kimi,
+// 这些 id 没有对应上游,迁移到当前默认模型。
+const LEGACY_DEMO_MODEL_IDS = new Set([
+  'qwen-plus',
+  'qwen-turbo',
+  'qwen-max',
+  'qwen-coder-plus',
+]);
 
 export interface StoredBridgeClient {
   clientId: string;
@@ -412,7 +422,7 @@ export class SettingsService {
       llm: {
         mode: 'demo_proxy',
         customBaseUrl: '',
-        modelId: 'qwen-plus',
+        modelId: 'deepseek-v4-flash',
         temperature: 0.3,
         // 0 = uncapped: no max_tokens is sent, the model's own default applies.
         // A per-request 1600 cap silently truncated relay packs and daily logs.
@@ -491,7 +501,14 @@ export class SettingsService {
       llm: {
         mode: llmMode,
         customBaseUrl,
-        modelId: llm.modelId?.trim() || defaults.llm.modelId,
+        // 旧网关的百炼模型在新网关没有对应上游:demo_proxy 下统一迁移到默认模型
+        modelId: (() => {
+          const stored = llm.modelId?.trim();
+          if (llmMode === 'demo_proxy' && stored && LEGACY_DEMO_MODEL_IDS.has(stored)) {
+            return defaults.llm.modelId;
+          }
+          return stored || defaults.llm.modelId;
+        })(),
         temperature: this.numberInRange(llm.temperature, 0, 2, defaults.llm.temperature),
         maxTokens: normalizeMaxTokens(llm.maxTokens, llmMode, parsed.version),
         encryptedApiKey: typeof llm.encryptedApiKey === 'string' ? llm.encryptedApiKey : undefined,

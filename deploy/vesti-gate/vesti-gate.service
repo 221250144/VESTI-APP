@@ -1,0 +1,17 @@
+[Unit]
+Description=Vesti Gateway (key-hiding streaming LLM/image proxy)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/vesti-gate
+ExecStart=/usr/bin/node /opt/vesti-gate/server.mjs
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+# 流式长连接为主:文件描述符给足
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
