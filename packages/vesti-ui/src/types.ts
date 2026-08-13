@@ -633,6 +633,9 @@ export type StorageApi = {
   // (kind 'dream') and dream run logs (kind 'dream-log'). Migrated deposits
   // keep flowing through listDeposits above.
   listMemoryEntries?: (options?: MemoryEntryListOptions) => Promise<MemoryEntryView[]>;
+  /** 记忆空间管理: edit/delete one entry (reader-modal actions). */
+  upsertMemoryEntry?: (entry: MemoryEntryView) => Promise<void>;
+  deleteMemoryEntry?: (id: string) => Promise<void>;
   /** Run the dream pipeline once (manual incremental / full rebuild). */
   runDream?: (options: DreamRunOptions) => Promise<DreamRunResultView>;
   /** Nightly auto-dream toggle state + setter (persisted by the platform). */

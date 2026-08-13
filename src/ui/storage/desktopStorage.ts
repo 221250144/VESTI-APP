@@ -1531,6 +1531,12 @@ export const desktopStorage: StorageApi = {
   // 记忆空间 (memory space): dream memories + dream logs from memory_entries,
   // and the dream pipeline itself (src/ui/memory).
   listMemoryEntries: async (options) => (await vestiApi()?.listMemoryEntries(options)) ?? [],
+  upsertMemoryEntry: async (entry) => {
+    await vestiApi()?.upsertMemoryEntry(entry);
+  },
+  deleteMemoryEntry: async (id) => {
+    await vestiApi()?.deleteMemoryEntry(id);
+  },
   runDream: (options) =>
     runDream({
       mode: options.mode,

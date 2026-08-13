@@ -1043,6 +1043,13 @@ export const enTranslations = {
       tagEmotion: "Emotion",
       tagRelationship: "Collaboration",
       tagEvent: "Event",
+      memorySearch: "Search memories…",
+      memorySearchEmpty: "No memories match this search.",
+      updatedAt: "Updated {date}",
+      sourceSessions: "Source sessions",
+      edit: "Edit",
+      saving: "Saving…",
+      memoryDeleteConfirm: "Click again to delete",
       close: "Close",
     },
     daily: {

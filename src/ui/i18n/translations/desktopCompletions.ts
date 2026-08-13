@@ -74,6 +74,10 @@ export const jaDesktopCompletion = {
       memoryEmpty: "まだメモリーがありません。眠って夢を見ましょう。", memoryTagEmpty: "このタグのメモリーはまだありません。",
       dreamLogEmpty: "夢ログはまだありません。夢を実行すると記録されます。",
       tagAll: "すべて", tagProfile: "背景", tagPreference: "好み", tagGoal: "目標", tagEmotion: "感情", tagRelationship: "協働", tagEvent: "出来事",
+      memorySearch: "メモリーを検索…", memorySearchEmpty: "一致するメモリーがありません。",
+      updatedAt: "{date} に更新", sourceSessions: "ソースセッション",
+      edit: "編集", saving: "保存中…",
+      memoryDeleteConfirm: "もう一度クリックして削除",
       close: "閉じる",
     },
     daily: {
@@ -214,6 +218,10 @@ export const koDesktopCompletion = {
       memoryEmpty: "아직 기억이 없습니다. 잠을 자며 꿈을 꿔보세요.", memoryTagEmpty: "이 태그에는 아직 기억이 없습니다.",
       dreamLogEmpty: "아직 꿈 로그가 없습니다. 꿈을 실행하면 로그가 남습니다.",
       tagAll: "전체", tagProfile: "배경", tagPreference: "선호", tagGoal: "목표", tagEmotion: "감정", tagRelationship: "협업", tagEvent: "사건",
+      memorySearch: "기억 검색…", memorySearchEmpty: "검색과 일치하는 기억이 없습니다.",
+      updatedAt: "{date} 업데이트됨", sourceSessions: "소스 세션",
+      edit: "편집", saving: "저장 중…",
+      memoryDeleteConfirm: "한 번 더 클릭하면 삭제됩니다",
       close: "닫기",
     },
     daily: {

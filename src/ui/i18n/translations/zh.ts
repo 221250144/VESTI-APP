@@ -1042,6 +1042,13 @@ export const zhTranslations = {
       tagEmotion: "情绪",
       tagRelationship: "协作",
       tagEvent: "事件",
+      memorySearch: "搜索记忆…",
+      memorySearchEmpty: "没有匹配的记忆。",
+      updatedAt: "更新于 {date}",
+      sourceSessions: "来源会话",
+      edit: "编辑",
+      saving: "保存中…",
+      memoryDeleteConfirm: "再点一次确认删除",
       close: "关闭",
     },
     daily: {
