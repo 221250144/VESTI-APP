@@ -106,7 +106,7 @@ export function ballBoundsFromBubble(
 /**
  * Owns the desktop floating capsule ("小猫头鹰悬浮球"): a small always-on-top
  * transparent window that collapses to the owl ball and expands into a quick
- * actions panel. Dragging snaps to the nearest left/right screen edge; the
+ * actions panel. Dragging leaves the ball anywhere inside the work area; the
  * position persists through the UI-prefs store.
  */
 export class CapsuleWindowService {
@@ -367,10 +367,14 @@ export class CapsuleWindowService {
     this.dragOffset = null;
     const bounds = this.window.getBounds();
     const area = screen.getDisplayNearestPoint({ x: screenX, y: screenY }).workArea;
-    const anchorRight = bounds.x + bounds.width / 2 > area.x + area.width / 2;
-    const x = anchorRight
-      ? area.x + area.width - bounds.width - EDGE_MARGIN
-      : area.x + EDGE_MARGIN;
+    // Free placement: the ball stays where the user dropped it, only clamped
+    // fully inside the work area. Panel/bubble anchoring derives its direction
+    // from whichever screen half the ball sits in, so any position works.
+    const x = clamp(
+      bounds.x,
+      area.x + EDGE_MARGIN,
+      Math.max(area.x + EDGE_MARGIN, area.x + area.width - bounds.width - EDGE_MARGIN),
+    );
     const y = clamp(
       bounds.y,
       area.y + EDGE_MARGIN,
