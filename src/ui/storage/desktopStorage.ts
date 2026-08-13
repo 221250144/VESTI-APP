@@ -477,7 +477,24 @@ async function buildWebSummaryTranscript(
   return `${header}\n\n${head}\n\n…（中间约 ${omitted} 字略）…\n\n${tail}`;
 }
 
+/** Re-entrancy guard: the batch progress state lives in the explore
+ * dashboard and resets when the user switches top-level pages, so a second
+ * click could otherwise spawn a duplicate pool over the same backlog. */
+const summaryInFlight = new Set<number>();
+
 async function generateSummaryImpl(conversationId: number): Promise<ChatSummaryData> {
+  if (summaryInFlight.has(conversationId)) {
+    throw new Error("SUMMARY_ALREADY_RUNNING");
+  }
+  summaryInFlight.add(conversationId);
+  try {
+    return await generateSummaryInner(conversationId);
+  } finally {
+    summaryInFlight.delete(conversationId);
+  }
+}
+
+async function generateSummaryInner(conversationId: number): Promise<ChatSummaryData> {
   const info = await getConversationCliId(conversationId);
   if (!info) {
     throw new Error("CONVERSATION_NOT_FOUND");
