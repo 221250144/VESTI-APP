@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   getAgentKindDefinition,
+  parsePromptDistillPayload,
   parsePromptImprovePayload,
   PROMPT_CONTINUE_MAX_CHARS,
+  PROMPT_DISTILL_MAX_FRAGMENTS,
   PROMPT_IMPROVE_MAX_NOTES,
 } from './agentPrompts';
 import type { RuntimeAgentSettings } from './settingsService';
@@ -109,5 +111,60 @@ describe('prompt-continue kind', () => {
     const parse = getAgentKindDefinition('prompt-continue').parse!;
     const long = 'x'.repeat(PROMPT_CONTINUE_MAX_CHARS + 500);
     expect(parse(long)).toHaveLength(PROMPT_CONTINUE_MAX_CHARS);
+  });
+});
+
+describe('prompt-distill kind', () => {
+  it('builds a prompt-engineer prompt carrying the candidate turns', () => {
+    const messages = getAgentKindDefinition('prompt-distill').buildPrompt({
+      transcript: '1. 总结会议纪要\n\n2. 审查这段代码',
+      preferences: zhPreferences,
+    });
+    expect(messages[0].role).toBe('system');
+    expect(messages[0].content).toContain('提示词工程师');
+    expect(messages[0].content).toContain('{{变量}}');
+    expect(messages[1].content).toContain('1. 总结会议纪要');
+    expect(messages[1].content).toContain('JSON 数组');
+  });
+
+  it('parses a clean fragment array and normalizes the shape', () => {
+    const parsed = parsePromptDistillPayload(
+      JSON.stringify([
+        { title: ' 会议纪要结构化 ', body: '请把下面的会议纪要结构化：{{纪要文本}}，分决议/待办/风险三段输出。', category: ' Writing ' },
+        { title: '无分类', body: '请扮演资深代码审查员，逐行审查 {{代码}}，按严重级别列出问题。' },
+      ]),
+    );
+    expect(parsed).toEqual([
+      { title: '会议纪要结构化', body: '请把下面的会议纪要结构化：{{纪要文本}}，分决议/待办/风险三段输出。', category: 'Writing' },
+      { title: '无分类', body: '请扮演资深代码审查员，逐行审查 {{代码}}，按严重级别列出问题。', category: null },
+    ]);
+  });
+
+  it('tolerates code fences and drops invalid / too-short / duplicate fragments', () => {
+    const parsed = parsePromptDistillPayload(
+      '```json\n' + JSON.stringify([
+        { title: '太短', body: '总结一下' },
+        { title: '', body: 42 },
+        'not-an-object',
+        { title: '甲', body: '请把 {{文本}} 翻译成地道的英文，保持专业语气，术语前后一致。' },
+        { title: '乙', body: '请把 {{文本}} 翻译成地道的英文，保持专业语气，术语前后一致。' },
+      ]) + '\n```',
+    );
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].title).toBe('甲');
+  });
+
+  it('degrades malformed output to an empty array (caller falls back to heuristics)', () => {
+    expect(parsePromptDistillPayload('这不是 JSON')).toEqual([]);
+    expect(parsePromptDistillPayload('{"not": "an array"}')).toEqual([]);
+    expect(getAgentKindDefinition('prompt-distill').parse?.('这不是 JSON')).toBe('[]');
+  });
+
+  it('caps the fragment count', () => {
+    const many = Array.from({ length: 10 }, (_, index) => ({
+      title: `模板${index}`,
+      body: `这是第 ${index} 条足够长的可复用提示词模板正文，包含 {{变量}}。`,
+    }));
+    expect(parsePromptDistillPayload(JSON.stringify(many))).toHaveLength(PROMPT_DISTILL_MAX_FRAGMENTS);
   });
 });

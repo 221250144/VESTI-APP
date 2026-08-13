@@ -1428,9 +1428,12 @@ function parseDistillFragments(raw: string, limit: number): ExtractedFragment[] 
 
 /**
  * Build the one-batch LLM distiller for extraction ("总结"): merge the top
- * candidate prompts into reusable fragment templates. Returns undefined when
- * no LLM is configured — extraction then runs the deterministic heuristic
- * path (scanner clustering still aggregates similar prompts offline).
+ * candidate prompts into reusable fragment templates via the dedicated
+ * 'prompt-distill' agent kind (prompt-engineer persona + validated JSON
+ * contract; parse() re-serializes so the content here is always a clean JSON
+ * array, '[]' on a malformed answer). Returns undefined when no LLM is
+ * configured — extraction then runs the deterministic heuristic path
+ * (scanner clustering still aggregates similar prompts offline).
  */
 async function buildPromptDistiller(
   api: VestiDesktopApi,
@@ -1446,13 +1449,13 @@ async function buildPromptDistiller(
     if (top.length === 0) return [];
     const transcript = top.map((body, index) => `${index + 1}. ${body.slice(0, 600)}`).join("\n\n");
     const result = await api.runAgent({
-      kind: "explore",
+      kind: "prompt-distill",
       sessionId: `prompt-distill:${Date.now()}`,
       transcriptOverride: transcript,
-      question:
-        "上面是用户在与 AI 对话中反复使用的候选提示词（按编号给出）。请把它们提炼成至多 6 条可复用的提示词模板：合并语义相似的条目、把一次性的具体内容抽象成 {{变量}} 占位符、保留条目原来的语言。严格只输出一个 JSON 数组，每项形如 {\"title\": \"简短标题\", \"body\": \"完整模板正文\", \"category\": \"分类或 null\"}，不要输出任何其他文字。",
       persist: false,
     });
+    // The kind's parse() already validated + normalized the payload; this
+    // second pass only guards the renderer↔main contract boundary.
     return parseDistillFragments(result.content, EXTRACT_DISTILL_FRAGMENT_LIMIT);
   };
 }

@@ -249,7 +249,7 @@ export interface NotionExportResult {
   url: string;
 }
 
-export type AgentKind = 'summary' | 'explore' | 'digest' | 'classify' | 'relay' | 'extract' | 'distill' | 'deposit-maintain' | 'daily' | 'persona' | 'roundtable-turn' | 'roundtable-synthesis' | 'learn-deepen' | 'learn-synthesis' | 'prompt-improve' | 'prompt-continue' | 'dream-extract' | 'dream-maintain' | 'companion';
+export type AgentKind = 'summary' | 'explore' | 'digest' | 'classify' | 'relay' | 'extract' | 'distill' | 'deposit-maintain' | 'daily' | 'persona' | 'roundtable-turn' | 'roundtable-synthesis' | 'learn-deepen' | 'learn-synthesis' | 'prompt-improve' | 'prompt-continue' | 'prompt-distill' | 'dream-extract' | 'dream-maintain' | 'companion';
 
 /** P4b deposit distillation templates ('custom' carries the user's own
  * instruction in AgentRunRequest.question). */

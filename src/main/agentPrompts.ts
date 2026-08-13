@@ -1216,6 +1216,89 @@ registerAgentKind('prompt-continue', {
   },
 });
 
+/**
+ * 常用提示词 fragment distillation (extraction pipeline's LLM path): merge the
+ * top recurring user prompts into a handful of REUSABLE templates. Unlike the
+ * deposit 'distill' kind (long-form Markdown documents), this answers a strict
+ * JSON array of {title, body, category}; parse() validates + normalizes every
+ * fragment and re-serializes, so a malformed model answer degrades to '[]'
+ * (the caller then falls back to the heuristic selection) instead of leaking
+ * garbage into the prompt library.
+ */
+export interface PromptDistillFragment {
+  title: string;
+  body: string;
+  category: string | null;
+}
+
+export const PROMPT_DISTILL_MAX_FRAGMENTS = 6;
+
+export function parsePromptDistillPayload(raw: string): PromptDistillFragment[] {
+  // Tolerate Markdown code fences around the JSON array.
+  const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  const start = cleaned.indexOf('[');
+  const end = cleaned.lastIndexOf(']');
+  if (start === -1 || end <= start) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(cleaned.slice(start, end + 1));
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const fragments: PromptDistillFragment[] = [];
+  const seenBodies = new Set<string>();
+  for (const item of parsed) {
+    if (!item || typeof item !== 'object') continue;
+    const candidate = item as { title?: unknown; body?: unknown; category?: unknown };
+    const body = typeof candidate.body === 'string' ? candidate.body.trim() : '';
+    // A template shorter than this is almost always a gutted one-liner, not a
+    // reusable prompt; drop it rather than polluting the library.
+    if (body.length < 24) continue;
+    const dedupeKey = body.toLowerCase().replace(/\s+/g, '');
+    if (seenBodies.has(dedupeKey)) continue;
+    seenBodies.add(dedupeKey);
+    fragments.push({
+      title: (typeof candidate.title === 'string' ? candidate.title.trim() : '').slice(0, 48),
+      body: body.slice(0, 4_000),
+      category:
+        typeof candidate.category === 'string' && candidate.category.trim()
+          ? candidate.category.trim().slice(0, 40)
+          : null,
+    });
+    if (fragments.length >= PROMPT_DISTILL_MAX_FRAGMENTS) break;
+  }
+  return fragments;
+}
+
+registerAgentKind('prompt-distill', {
+  buildPrompt({ transcript, preferences }) {
+    const { language } = promptAffixes(preferences);
+    return [
+      {
+        role: 'system',
+        content: `你是 Vesti 的提示词工程师，负责把用户在日常对话中反复使用的原始输入提炼成可复用的提示词模板。规则：
+1. 合并语义相似的条目为一条模板，保留最有表达力的写法。
+2. 把一次性的具体内容（项目名、文件名、某段代码、某次任务）抽象成 {{变量}} 占位符；保留条目原来的语言。
+3. 每条模板必须自成一体：脱离原始对话也能直接使用，不写"上面的对话""这段代码"这类无所指的指代。
+4. 标题要具体（动作+对象，如"代码审查清单""会议纪要结构化"），不要"提示词一"这种泛名。
+5. 只提炼真正值得复用的模式；凑数不如少给。严格只输出 JSON，不要 Markdown 代码围栏、不要任何额外文字。${language}`,
+      },
+      {
+        role: 'user',
+        content: [
+          '下面是用户反复使用的候选提示词（按编号给出）。请把它们提炼成至多 6 条可复用模板，严格只输出一个 JSON 数组，每项形如 {"title": "简短标题", "body": "完整模板正文", "category": "分类或 null"}：',
+          '',
+          transcript,
+        ].join('\n'),
+      },
+    ];
+  },
+  parse(raw) {
+    return JSON.stringify(parsePromptDistillPayload(raw));
+  },
+});
+
 // ---- 梦境 (Dream memory) ----
 // Two kinds backing the memory-space dream pipeline. dream-extract reads a
 // batch of compressed conversations and answers {"memories": [...]};
