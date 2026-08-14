@@ -13,6 +13,7 @@
 | `POST /v1/images/generations` `/v1/images/edits` | 147ai | 绘图接口,multipart 原样透传 |
 | `GET /v1/models` | — | 模型清单(客户端模型选择器用) |
 | `POST /api/embeddings` | — | 暂 502,等聚合站 key;客户端会自动回落旧网关 |
+| `POST /v1/collect/sessions` | — | **数据贡献收集**(RL 训练数据):接收用户显式同意后的 agent/CLI 会话批次(`{contributorId, sessions[]}`,每批 ≤50),落盘 `/var/lib/vesti-gate/collect/sessions-YYYY-MM-DD.jsonl`。浏览器端数据客户端从不发送;含个人信息的会话客户端先过滤,服务端再用同一组 PII 模式复查丢弃(响应 `filtered` 计数) |
 | `GET /health` | — | 探活 + 各 provider key 配置状态 |
 
 ## 部署(8.153.195.205)

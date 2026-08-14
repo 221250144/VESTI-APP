@@ -42,8 +42,46 @@ const PROVIDERS = {
 
 const CHAT_BODY_CAP = 4 * 1024 * 1024;      // 4 MB — chat payloads
 const IMAGE_BODY_CAP = 32 * 1024 * 1024;    // 32 MB — multipart image edits
+const COLLECT_BODY_CAP = 16 * 1024 * 1024;  // 16 MB — data-contribution batches
 const UPSTREAM_CONNECT_TIMEOUT_MS = 20_000;
 const IMAGE_UPSTREAM_TIMEOUT_MS = 150_000; // 绘图上游 30-120s 才回响应头
+const COLLECT_DIR = env.COLLECT_DIR || '/var/lib/vesti-gate/collect';
+mkdirSync(COLLECT_DIR, { recursive: true });
+
+// 服务端 PII 复查(兜底;客户端已过滤一遍,这里再挡一层):
+// 命中任一模式的会话整条丢弃,只收干净会话。
+const PII_PATTERNS = [
+  /(?<!\d)1[3-9]\d{9}(?!\d)/,                          // 中国大陆手机号
+  /[\w.+-]+@[\w-]+\.[A-Za-z]{2,}/,                     // 邮箱
+  /(?<!\d)\d{17}[\dXx](?!\d)/,                         // 身份证号
+  /(?<!\d)\d{16,19}(?!\d)/,                            // 银行卡号
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,                // 私钥块
+  /AKIA[0-9A-Z]{16}/,                                  // AWS access key
+  /(?<![A-Za-z0-9])sk-[A-Za-z0-9]{16,}/,               // OpenAI 风格 API key
+];
+function containsPii(text) {
+  if (!text) return false;
+  return PII_PATTERNS.some((re) => re.test(text));
+}
+
+// 会话级复查:只扫正文文本字段(标题/摘要/消息正文/思考/工具输入输出),
+// 与客户端 src/main/piiFilter.ts 的视野保持一致。不能 JSON.stringify 整个
+// bundle 再扫——元数据里的 git_remote(git@github.com:... 形如邮箱)、
+// project_path 等不是 PII,会误杀全部会话。
+function sessionContainsPii(session) {
+  if (!session || typeof session !== 'object') return true; // 畸形整条丢弃
+  const conv = session.conversation;
+  if (conv && typeof conv === 'object') {
+    if (containsPii(conv.title) || containsPii(conv.snippet)) return true;
+  }
+  const messages = Array.isArray(session.messages) ? session.messages : [];
+  for (const msg of messages) {
+    if (!msg || typeof msg !== 'object') continue;
+    if (containsPii(msg.content_text) || containsPii(msg._thinking)
+      || containsPii(msg._tool_input) || containsPii(msg._tool_output)) return true;
+  }
+  return false;
+}
 
 // ---- usage metering (JSONL, best-effort) ------------------------------------
 
@@ -292,6 +330,46 @@ const server = http.createServer(async (req, res) => {
         model: typeof model === 'string' ? model : 'multipart',
         connectTimeoutMs: IMAGE_UPSTREAM_TIMEOUT_MS,
       });
+      return;
+    }
+
+    // 数据贡献收集:agent/CLI 编码会话(RL 训练数据),用户注册会员时显式同意。
+    // 客户端已排除浏览器端数据与含个人信息的会话;这里再做一道 PII 复查。
+    if (req.method === 'POST' && path === '/v1/collect/sessions') {
+      if (!rateLimitOk(ip, 'collect', 120, 10 * 60_000)) {
+        sendJson(res, 429, { error: { message: 'rate_limited', retryAfterSeconds: 600 } });
+        return;
+      }
+      const raw = await readBody(req, COLLECT_BODY_CAP);
+      let parsed;
+      try { parsed = JSON.parse(raw.toString('utf8')); } catch {
+        sendJson(res, 400, { error: { message: 'invalid_json' } });
+        return;
+      }
+      const contributorId = String(parsed?.contributorId || '');
+      const sessions = parsed?.sessions;
+      if (!/^[A-Za-z0-9-]{8,64}$/.test(contributorId) || !Array.isArray(sessions) || sessions.length === 0 || sessions.length > 50) {
+        sendJson(res, 400, { error: { message: 'invalid_batch' } });
+        return;
+      }
+      const clean = [];
+      let filtered = 0;
+      for (const session of sessions) {
+        if (sessionContainsPii(session)) { filtered += 1; continue; }
+        clean.push(session);
+      }
+      const day = new Date().toISOString().slice(0, 10);
+      try {
+        appendFileSync(
+          `${COLLECT_DIR}/sessions-${day}.jsonl`,
+          JSON.stringify({ receivedAt: Date.now(), contributorId, sessions: clean }) + '\n',
+        );
+      } catch {
+        sendJson(res, 500, { error: { message: 'collect_store_error' } });
+        return;
+      }
+      logUsage({ ip, route: 'collect', received: clean.length, filtered });
+      sendJson(res, 200, { ok: true, received: clean.length, filtered });
       return;
     }
 
