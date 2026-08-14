@@ -8,6 +8,7 @@ import {
   normalizeCompanionMood,
   normalizeCompanionPersona,
   saveCompanionPreference,
+  streamDisplayBody,
   stripCompanionMoodLine,
   toCompanionMessageView,
   toCompanionSessionPreview,
@@ -197,5 +198,33 @@ describe("companion ui-preferences", () => {
         "chat",
       ),
     ).resolves.toBeUndefined();
+  });
+});
+
+describe("streamDisplayBody", () => {
+  it("hides a completed [mood:xxx] tag line and keeps the body", () => {
+    expect(streamDisplayBody("[mood:calm]\n你好呀。")).toBe("你好呀。");
+    expect(streamDisplayBody("【mood: warm】\n第一行\n第二行")).toBe("第一行\n第二行");
+  });
+
+  it("hides a bare mood id line too (contract-shaped streams)", () => {
+    expect(streamDisplayBody("calm\n正文")).toBe("正文");
+  });
+
+  it("shows nothing while only a partial tag line has arrived", () => {
+    expect(streamDisplayBody("")).toBe("");
+    expect(streamDisplayBody("[")).toBe("");
+    expect(streamDisplayBody("[mood:ca")).toBe("");
+    expect(streamDisplayBody("cal")).toBe("");
+  });
+
+  it("shows ordinary first lines immediately (no false positives)", () => {
+    expect(streamDisplayBody("这")).toBe("这");
+    expect(streamDisplayBody("好的，我们来")).toBe("好的，我们来");
+    expect(streamDisplayBody("mood 不是标签的时候")).toBe("mood 不是标签的时候");
+  });
+
+  it("keeps content unchanged when the first line is not a tag", () => {
+    expect(streamDisplayBody("先回答问题\ncalm 在第二行不算")).toBe("先回答问题\ncalm 在第二行不算");
   });
 });

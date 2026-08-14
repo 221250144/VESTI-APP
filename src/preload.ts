@@ -1,10 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import {
   IPC,
+  type AgentActivityPayload,
+  type AgentStreamChunk,
   type CapsuleState,
   type ExtensionImportRequestPayload,
   type ExtensionImportResultPayload,
   type VestiCapsuleApi,
+  type VestiCreditApi,
   type VestiDesktopApi,
   type VestiMembershipApi,
   type VestiUiPrefsApi,
@@ -28,9 +31,13 @@ contextBridge.exposeInMainWorld('vestiWindow', windowControls);
 
 const membership: VestiMembershipApi = {
   getStatus: () => ipcRenderer.invoke(IPC.membershipStatus),
-  register: credentials => ipcRenderer.invoke(IPC.membershipRegister, credentials),
+  register: (credentials, dataConsent) =>
+    ipcRenderer.invoke(IPC.membershipRegister, credentials, dataConsent),
   login: credentials => ipcRenderer.invoke(IPC.membershipLogin, credentials),
   logout: () => ipcRenderer.invoke(IPC.membershipLogout),
+  getDataContribution: () => ipcRenderer.invoke(IPC.membershipDataContributionGet),
+  setDataContribution: enabled =>
+    ipcRenderer.invoke(IPC.membershipDataContributionSet, enabled),
   onStatusChanged: listener => {
     const wrapped = (_event: unknown, status: Parameters<typeof listener>[0]) => listener(status);
     ipcRenderer.on(IPC.membershipChanged, wrapped);
@@ -39,6 +46,17 @@ const membership: VestiMembershipApi = {
 };
 
 contextBridge.exposeInMainWorld('vestiMembership', membership);
+
+const credits: VestiCreditApi = {
+  getBalance: () => ipcRenderer.invoke(IPC.creditBalance),
+  onChanged: listener => {
+    const wrapped = (_event: unknown, balance: Parameters<typeof listener>[0]) => listener(balance);
+    ipcRenderer.on(IPC.creditChanged, wrapped);
+    return () => ipcRenderer.removeListener(IPC.creditChanged, wrapped);
+  },
+};
+
+contextBridge.exposeInMainWorld('vestiCredits', credits);
 
 const api: VestiDesktopApi = {
   getOverview: () => ipcRenderer.invoke(IPC.overview),
@@ -60,6 +78,16 @@ const api: VestiDesktopApi = {
   getThinkingMapSemantics: (sessionIds, totalConversationCount) =>
     ipcRenderer.invoke(IPC.thinkingMapSemantics, sessionIds, totalConversationCount),
   runAgent: request => ipcRenderer.invoke(IPC.agentRun, request),
+  runAgentStream: (request, runId) => ipcRenderer.invoke(IPC.agentRunStream, request, runId),
+  onAgentStreamChunk: (runId, listener) => {
+    const wrapped = (_event: unknown, chunk: AgentStreamChunk) => {
+      if (chunk?.runId === runId) listener(chunk);
+    };
+    ipcRenderer.on(IPC.agentStreamChunk, wrapped);
+    return () => ipcRenderer.removeListener(IPC.agentStreamChunk, wrapped);
+  },
+  generateCustomOwl: prompt => ipcRenderer.invoke(IPC.customOwlGenerate, prompt),
+  readCustomOwl: () => ipcRenderer.invoke(IPC.customOwlRead),
   getAgentResults: () => ipcRenderer.invoke(IPC.agentResults),
   exportConversations: () => ipcRenderer.invoke(IPC.exportConversations),
   getConversationTree: () => ipcRenderer.invoke(IPC.conversationTree),
@@ -90,6 +118,11 @@ const api: VestiDesktopApi = {
     const listener = () => callback();
     ipcRenderer.on(IPC.changed, listener);
     return () => ipcRenderer.removeListener(IPC.changed, listener);
+  },
+  onAgentActivity: listener => {
+    const wrapped = (_event: unknown, payload: AgentActivityPayload) => listener(payload);
+    ipcRenderer.on(IPC.agentActivity, wrapped);
+    return () => ipcRenderer.removeListener(IPC.agentActivity, wrapped);
   },
   chooseDirectory: title => ipcRenderer.invoke(IPC.chooseDirectory, title),
   writeUpstreamFile: request => ipcRenderer.invoke(IPC.upstreamWriteFile, request),

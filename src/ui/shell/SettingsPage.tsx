@@ -6,6 +6,7 @@ import type {
   AppSettingsView,
   AgentOutputLanguage,
   CapturePlatform,
+  CustomOwlAsset,
   ExtensionBridgeStatusView,
   ExtensionPairCodeView,
   MembershipStatus,
@@ -15,8 +16,11 @@ import type {
 import { useI18n } from "../i18n";
 import type { SupportedLocale } from "../i18n/locales";
 import { MembershipAccountCard } from "../membership/MembershipAccountCard";
+import { DataContributionCard } from "../membership/DataContributionCard";
+import { CreditCard } from "../membership/CreditCard";
 import { useUiPreference } from "./useUiPreference";
-import { DEFAULT_SKIN_ID, SKINS, resolveSkin } from "../../capsule/skins";
+import { AGENT_NOTIFY_PREF_KEY, AMBIENT_BUBBLE_PREF_KEY } from "../companion/ambientBubble";
+import { CUSTOM_SKIN_ID, DEFAULT_SKIN_ID, SKINS, resolveSkin } from "../../capsule/skins";
 import {
   DAILY_TIME_PREF_KEY,
   DEFAULT_DAILY_TIME,
@@ -96,6 +100,10 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     closeToTrayDesc: "点击窗口关闭按钮后继续在后台捕获;可从托盘菜单彻底退出。",
     showCapsule: "显示桌面悬浮球",
     showCapsuleDesc: "小猫头鹰常驻屏幕边缘,随时同步或打开主界面。",
+    ambientBubble: "猫头鹰环境气泡",
+    ambientBubbleDesc: "空闲时小猫头鹰会偶尔冒泡,聊聊你的梦境整理与最新对话。",
+    agentNotify: "Agent 完工提醒",
+    agentNotifyDesc: "当 Kimi Code、Claude Code 等 agent 完成一轮工作时,悬浮球会冒泡提示。",
     captureTitle: "采集引擎",
     captureDesc: "只读取已启用工具保存在本机的会话文件。停用来源不会删除已经归档的数据。",
     watchOnStartup: "启动后自动实时采集",
@@ -254,6 +262,15 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     language: "界面语言",
     owlSkinTitle: "悬浮球皮肤",
     owlSkinDesc: "选择小猫头鹰悬浮球的外观,点击立即生效。",
+    customOwlSlot: "自定义",
+    customOwlDiyTitle: "DIY 你的猫头鹰",
+    customOwlDiyDesc: "用一句话描述想要的风格，AI 会按统一的猫头鹰形象绘制专属皮肤，同时应用到悬浮球与夜话头像。",
+    customOwlPlaceholder: "例如：青花瓷纹样，淡雅蓝色",
+    customOwlGenerate: "生成皮肤",
+    customOwlGenerating: "绘制中…",
+    customOwlMemberHint: "DIY 皮肤为会员专属，每次生成消耗 20 积分。",
+    customOwlEmptyHint: "先描述一下想要的风格吧。",
+    customOwlFailed: "生成失败，请稍后再试。",
     aboutTitle: "关于 Vesti",
     aboutDesc: "本地优先的 AI 会话采集、归档与洞察工具。当前支持 Codex、Cursor、Kimi Code 和 Claude Code。",
     settingsDir: "设置目录",
@@ -292,6 +309,10 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     closeToTrayDesc: "Closing the window keeps capturing in the background; quit from the tray menu.",
     showCapsule: "Show desktop floating ball",
     showCapsuleDesc: "The little owl stays at the screen edge for quick sync and access.",
+    ambientBubble: "Owl ambient bubbles",
+    ambientBubbleDesc: "When idle, the owl occasionally surfaces a gentle line about your dreams and latest conversations.",
+    agentNotify: "Agent completion alerts",
+    agentNotifyDesc: "When Kimi Code, Claude Code, or another agent finishes a run, the floating ball lets you know.",
     captureTitle: "Capture Engine",
     captureDesc: "Only reads session files stored locally by the enabled tools. Disabling a source never deletes archived data.",
     watchOnStartup: "Watch in real time after launch",
@@ -450,6 +471,15 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     language: "Language",
     owlSkinTitle: "Floating ball skin",
     owlSkinDesc: "Pick a look for the owl floating ball; applies instantly.",
+    customOwlSlot: "Custom",
+    customOwlDiyTitle: "DIY your owl",
+    customOwlDiyDesc: "Describe a style in one line and AI draws your exclusive owl skin — applied to the floating ball and Night Talk avatar at once.",
+    customOwlPlaceholder: "e.g. blue-and-white porcelain, soft indigo",
+    customOwlGenerate: "Generate",
+    customOwlGenerating: "Drawing…",
+    customOwlMemberHint: "DIY skins are a member feature; each generation costs 20 credits.",
+    customOwlEmptyHint: "Describe the style you want first.",
+    customOwlFailed: "Generation failed. Please try again later.",
     aboutTitle: "About Vesti",
     aboutDesc: "A local-first AI conversation capture, archive, and insight tool. Currently supports Codex, Cursor, Kimi Code, and Claude Code.",
     settingsDir: "Settings directory",
@@ -488,6 +518,10 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     closeToTrayDesc: "ウィンドウを閉じてもバックグラウンド収集を続けます。終了はトレイメニューから行えます。",
     showCapsule: "デスクトップのフローティングボールを表示",
     showCapsuleDesc: "小さなフクロウを画面端に常駐させ、同期やメイン画面をすぐ開けます。",
+    ambientBubble: "フクロウの環境バブル",
+    ambientBubbleDesc: "アイドル時にフクロウが夢の整理や最新の会話についてそっと話しかけます。",
+    agentNotify: "エージェント完了通知",
+    agentNotifyDesc: "Kimi Code や Claude Code などのエージェントが作業を終えると、フローティングボールがお知らせします。",
     captureTitle: "収集エンジン",
     captureDesc: "有効なツールがローカルに保存した会話ファイルだけを読み取ります。無効にしても保存済みデータは削除されません。",
     watchOnStartup: "起動後にリアルタイム収集を開始",
@@ -628,6 +662,15 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     language: "表示言語",
     owlSkinTitle: "フローティングボールのスキン",
     owlSkinDesc: "小さなフクロウの外観を選択します。クリックするとすぐ反映されます。",
+    customOwlSlot: "カスタム",
+    customOwlDiyTitle: "フクロウをDIYする",
+    customOwlDiyDesc: "欲しいスタイルを一言で伝えると、AI が統一されたフクロウの形象で専用スキンを描きます。フローティングボールと夜話アバターの両方に適用されます。",
+    customOwlPlaceholder: "例：青花瓷の模様、淡い藍色",
+    customOwlGenerate: "スキンを生成",
+    customOwlGenerating: "描画中…",
+    customOwlMemberHint: "DIY スキンはメンバー限定です。生成ごとに 20 クレジットを消費します。",
+    customOwlEmptyHint: "まず欲しいスタイルを教えてください。",
+    customOwlFailed: "生成に失敗しました。後でもう一度お試しください。",
     aboutTitle: "Vesti について",
     aboutDesc: "ローカル優先の AI 会話収集・整理・インサイトツールです。Codex、Cursor、Kimi Code、Claude Code に対応しています。",
     settingsDir: "設定フォルダー",
@@ -666,6 +709,10 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     closeToTrayDesc: "창을 닫은 뒤에도 백그라운드 수집을 계속합니다. 트레이 메뉴에서 완전히 종료할 수 있습니다.",
     showCapsule: "데스크톱 플로팅 볼 표시",
     showCapsuleDesc: "작은 부엉이를 화면 가장자리에 두고 동기화하거나 메인 화면을 빠르게 엽니다.",
+    ambientBubble: "부엉이 앰비언트 버블",
+    ambientBubbleDesc: "한가할 때 부엉이가 꿈 정리와 최근 대화에 대해 가볍게 말을 겁니다.",
+    agentNotify: "에이전트 완료 알림",
+    agentNotifyDesc: "Kimi Code, Claude Code 등 에이전트가 작업을 마치면 플로팅 볼이 알려줍니다.",
     captureTitle: "수집 엔진",
     captureDesc: "활성화한 도구가 로컬에 저장한 대화 파일만 읽습니다. 소스를 꺼도 이미 보관된 데이터는 삭제되지 않습니다.",
     watchOnStartup: "시작 후 실시간 수집",
@@ -806,6 +853,15 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     language: "화면 언어",
     owlSkinTitle: "플로팅 볼 스킨",
     owlSkinDesc: "작은 부엉이 플로팅 볼의 모양을 선택합니다. 클릭하면 바로 적용됩니다.",
+    customOwlSlot: "사용자 지정",
+    customOwlDiyTitle: "나만의 부엉이 DIY",
+    customOwlDiyDesc: "원하는 스타일을 한 문장으로 설명하면 AI가 통일된 부엉이 이미지로 전용 스킨을 그립니다. 플로팅 볼과 밤의 대화 아바타에 동시에 적용됩니다.",
+    customOwlPlaceholder: "예: 청화백자 무늬, 은은한 남색",
+    customOwlGenerate: "스킨 생성",
+    customOwlGenerating: "그리는 중…",
+    customOwlMemberHint: "DIY 스킨은 멤버 전용이며, 생성할 때마다 20 크레딧이 차감됩니다.",
+    customOwlEmptyHint: "먼저 원하는 스타일을 알려 주세요.",
+    customOwlFailed: "생성에 실패했습니다. 잠시 후 다시 시도해 주세요.",
     aboutTitle: "Vesti 정보",
     aboutDesc: "로컬 우선 AI 대화 수집, 보관 및 인사이트 도구입니다. Codex, Cursor, Kimi Code와 Claude Code를 지원합니다.",
     settingsDir: "설정 폴더",
@@ -998,7 +1054,15 @@ export function SettingsPage({
   const { locale, setLocale } = useI18n();
   const copy = { ...COPY.en, ...COPY[locale] };
   const [capsuleEnabled, setCapsuleEnabled] = useUiPreference("capsule.enabled", true, value => value !== false);
-  const [owlSkin, setOwlSkin] = useUiPreference("owlSkin", DEFAULT_SKIN_ID, value => resolveSkin(value).id);
+  const [ambientBubbleEnabled, setAmbientBubbleEnabled] = useUiPreference(AMBIENT_BUBBLE_PREF_KEY, true, value => value !== false);
+  const [agentNotifyEnabled, setAgentNotifyEnabled] = useUiPreference(AGENT_NOTIFY_PREF_KEY, true, value => value !== false);
+  const [owlSkin, setOwlSkin] = useUiPreference("owlSkin", DEFAULT_SKIN_ID, value =>
+    value === CUSTOM_SKIN_ID ? CUSTOM_SKIN_ID : resolveSkin(value).id);
+  // DIY 自定义皮肤：生成表单状态 + 当前自定义图预览。
+  const [customOwlAsset, setCustomOwlAsset] = useState<CustomOwlAsset | null>(null);
+  const [customPrompt, setCustomPrompt] = useState("");
+  const [customBusy, setCustomBusy] = useState(false);
+  const [customError, setCustomError] = useState("");
   const [classifyEnabled, setClassifyEnabled] = useUiPreference("classify.enabled", true, value => value !== false);
   const [classifyMode, setClassifyMode] = useUiPreference<"auto" | "suggest">(
     "classify.mode",
@@ -1006,6 +1070,42 @@ export function SettingsPage({
     value => (value === "suggest" ? "suggest" : "auto"),
   );
   const [dailyTime, setDailyTime] = useUiPreference(DAILY_TIME_PREF_KEY, DEFAULT_DAILY_TIME, normalizeDailyTime);
+
+  // Load the current DIY skin once (the custom slot's preview + grid thumb).
+  useEffect(() => {
+    let cancelled = false;
+    void window.vesti
+      ?.readCustomOwl()
+      .then((asset) => {
+        if (!cancelled) setCustomOwlAsset(asset);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleGenerateCustomOwl = useCallback(async () => {
+    if (customBusy || !window.vesti?.generateCustomOwl) return;
+    const prompt = customPrompt.trim();
+    if (!prompt) {
+      setCustomError(copy.customOwlEmptyHint);
+      return;
+    }
+    setCustomBusy(true);
+    setCustomError("");
+    try {
+      const asset = await window.vesti.generateCustomOwl(prompt);
+      setCustomOwlAsset(asset);
+      setOwlSkin(CUSTOM_SKIN_ID);
+      // 胶囊/夜话监听这个 pref 作为自定义图更新的刷新信号。
+      void window.vestiUi?.setUiPreference("owlCustomUpdatedAt", asset.updatedAt);
+    } catch (error) {
+      setCustomError((error as Error)?.message || copy.customOwlFailed);
+    } finally {
+      setCustomBusy(false);
+    }
+  }, [customBusy, customPrompt, copy, setOwlSkin]);
 
   const [settings, setSettings] = useState<AppSettingsView | null>(null);
   const [draft, setDraft] = useState<SettingsDraft | null>(null);
@@ -1429,6 +1529,8 @@ export function SettingsPage({
     <div className="h-full overflow-y-auto overflow-x-hidden bg-bg-app px-8 py-8">
       <div className="mx-auto flex max-w-[880px] flex-col gap-6 pb-8">
         <MembershipAccountCard status={membership} onLogout={onLogout} locale={locale} />
+        <DataContributionCard locale={locale} />
+        <CreditCard membership={membership} llmMode={settings.llm.mode} locale={locale} />
 
         <Card eyebrow="GENERAL" title={copy.generalTitle} description={copy.generalDesc}>
           <div className="-mx-3 flex flex-col">
@@ -1462,6 +1564,18 @@ export function SettingsPage({
               title={copy.showCapsule}
               description={copy.showCapsuleDesc}
               onChange={setCapsuleEnabled}
+            />
+            <Toggle
+              checked={ambientBubbleEnabled}
+              title={copy.ambientBubble}
+              description={copy.ambientBubbleDesc}
+              onChange={setAmbientBubbleEnabled}
+            />
+            <Toggle
+              checked={agentNotifyEnabled}
+              title={copy.agentNotify}
+              description={copy.agentNotifyDesc}
+              onChange={setAgentNotifyEnabled}
             />
           </div>
         </Card>
@@ -2337,7 +2451,7 @@ export function SettingsPage({
         </Card>
 
         <Card eyebrow="PERSONALIZATION" title={copy.owlSkinTitle} description={copy.owlSkinDesc}>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
             {SKINS.map((skin) => {
               const selected = skin.id === owlSkin;
               return (
@@ -2359,6 +2473,62 @@ export function SettingsPage({
                 </button>
               );
             })}
+            {/* DIY 自定义槽位：有作品显示缩略图，没有显示引导占位。 */}
+            <button
+              type="button"
+              aria-pressed={owlSkin === CUSTOM_SKIN_ID}
+              onClick={() => setOwlSkin(CUSTOM_SKIN_ID)}
+              className={`flex flex-col items-center gap-2 rounded-xl border p-3 transition-colors [transition-duration:140ms] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus ${
+                owlSkin === CUSTOM_SKIN_ID
+                  ? "border-accent-primary/40 bg-accent-primary-light ring-2 ring-accent-primary/30"
+                  : "border-dashed border-border-default bg-bg-primary hover:bg-bg-surface-hover"
+              }`}
+            >
+              {customOwlAsset ? (
+                <img src={customOwlAsset.dataUrl} alt="" draggable={false} className="h-14 w-14" />
+              ) : (
+                <span className="flex h-14 w-14 items-center justify-center text-2xl" aria-hidden="true">
+                  ✨
+                </span>
+              )}
+              <span className="text-[12px] font-sans font-medium text-text-primary">
+                {copy.customOwlSlot}
+              </span>
+            </button>
+          </div>
+
+          {/* DIY 生成区：描述风格 → 网关绘图 → 同时应用到悬浮球与夜话头像。 */}
+          <div className="mt-3 rounded-xl border border-border-subtle bg-bg-primary p-3">
+            <p className="text-[12px] font-sans font-medium text-text-primary">{copy.customOwlDiyTitle}</p>
+            <p className="mt-1 text-[11px] font-sans leading-relaxed text-text-tertiary">
+              {copy.customOwlDiyDesc}
+            </p>
+            <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
+              <input
+                type="text"
+                value={customPrompt}
+                onChange={(event) => setCustomPrompt(event.target.value)}
+                placeholder={copy.customOwlPlaceholder}
+                disabled={customBusy}
+                maxLength={400}
+                className={`${inputClass} flex-1`}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void handleGenerateCustomOwl();
+                }}
+              />
+              <button
+                type="button"
+                className={buttonPrimary}
+                disabled={customBusy}
+                onClick={() => void handleGenerateCustomOwl()}
+              >
+                {customBusy ? copy.customOwlGenerating : copy.customOwlGenerate}
+              </button>
+            </div>
+            {customError ? (
+              <p className="mt-2 text-[12px] font-sans text-danger">{customError}</p>
+            ) : null}
+            <p className="mt-2 text-[11px] font-sans text-text-tertiary">{copy.customOwlMemberHint}</p>
           </div>
         </Card>
 

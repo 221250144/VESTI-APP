@@ -310,10 +310,25 @@ export function HomeDashboard({
 
   useEffect(() => {
     void load();
-    const unsubscribe = window.vesti.onCaptureChanged(() => void load());
+    // Capture ticks fire per stored file and in bursts during a full sync;
+    // coalesce them so a burst costs one getOverview IPC instead of one per
+    // tick (mirrors captureSync's debounce).
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    const unsubscribe = window.vesti.onCaptureChanged(() => {
+      if (debounceTimer !== null) {
+        clearTimeout(debounceTimer);
+      }
+      debounceTimer = setTimeout(() => {
+        debounceTimer = null;
+        void load();
+      }, 500);
+    });
     const onDataUpdated = () => void load();
     window.addEventListener("vesti:data-updated", onDataUpdated);
     return () => {
+      if (debounceTimer !== null) {
+        clearTimeout(debounceTimer);
+      }
       unsubscribe();
       window.removeEventListener("vesti:data-updated", onDataUpdated);
     };

@@ -2,10 +2,11 @@
 // (Codex / Cursor / Kimi Code / Claude Code, stored in SQLite) into the
 // renderer's Dexie database so the @vesti/ui dashboard reads real data.
 //
-// On startup it pulls the full snapshot via window.vesti.exportConversations()
-// and imports it idempotently; afterwards it re-imports on
-// window.vesti.onCaptureChanged, debounced. Conversations that disappear from
-// the snapshot are reconciled away — but only records stamped
+// On startup it pulls a full snapshot via window.vesti.exportConversations();
+// afterwards the main process diffs each export against its own fingerprint
+// cache and only changed bundles cross IPC, alongside the full session id
+// list used here for stale reconciliation. Conversations that disappear from
+// the id list are reconciled away — but only records stamped
 // _source === "local_terminal", never user data (notes, annotations, prompts,
 // topics, summaries live in other tables and are untouched).
 //
@@ -18,7 +19,12 @@ import type {
   ConversationExportBundle,
   VestiDesktopApi,
 } from "../../shared/contracts";
+import { computeBundleFingerprint } from "../../shared/exportFingerprint";
 import { bumpDexieDataVersion } from "./dataVersion";
+
+// Re-exported so existing consumers/tests keep one import site; the single
+// implementation lives in shared/ because the main process diffs with it too.
+export { computeBundleFingerprint } from "../../shared/exportFingerprint";
 
 export interface CaptureSyncState {
   syncing: boolean;
@@ -78,50 +84,6 @@ export function subscribeCaptureSync(
   };
 }
 
-/**
- * Content fingerprint for one exported bundle: a djb2-style 32-bit rolling
- * hash over the fields that move when the source capture changes —
- * conversation updated_at/message_count/title/snippet, and per message its
- * stable id, created_at, role and content length. O(messages) with O(1)
- * work per message (no content scan), so 2000 conversations x 40 messages
- * cost single-digit milliseconds.
- *
- * Coverage note: an in-place content edit that keeps the exact same length
- * AND the same updated_at would be missed; CLI captures are append-mostly
- * (streaming growth changes length), so this trade-off is deliberate.
- */
-export function computeBundleFingerprint(
-  conversation: ConversationExportBundle["conversation"],
-  messages: ConversationExportBundle["messages"]
-): number {
-  let hash = 5381;
-  const mix = (value: number) => {
-    hash = ((hash * 33) ^ (value | 0)) >>> 0;
-  };
-  mix(conversation.updated_at);
-  mix(conversation.message_count);
-  mix(conversation.first_captured_at);
-  mix(conversation.snippet?.length ?? 0);
-  const title = conversation.title ?? "";
-  for (let index = 0; index < title.length; index += 1) {
-    mix(title.charCodeAt(index));
-  }
-  // A1: subagent lineage can resolve after the transcript itself last moved
-  // (link resolution is a separate pass); mix it in so the stamp still
-  // propagates to the mirror even when nothing else changed.
-  const lineage = conversation._subagent_of ?? "";
-  for (let index = 0; index < lineage.length; index += 1) {
-    mix(lineage.charCodeAt(index));
-  }
-  for (const message of messages) {
-    mix(message.id);
-    mix(message.created_at);
-    mix(message.content_text?.length ?? 0);
-    mix(message.role === "user" ? 1 : 2);
-  }
-  return hash >>> 0;
-}
-
 export type ImportPlan = {
   /** Conversations to write: new or fingerprint-changed, merged over the
    * previous record's user-curated fields and stamped with the new hash. */
@@ -135,14 +97,18 @@ export type ImportPlan = {
 };
 
 /**
- * Diff an export snapshot against the current conversations table (pure).
- * Unchanged conversations are skipped entirely — no conversation put, no
- * message delete/rewrite — and records from before the fingerprint era
- * simply count as changed once, then self-heal.
+ * Diff an export against the current conversations table (pure). `bundles`
+ * carries only new/changed sessions (the main process pre-diffs by content
+ * fingerprint); `sessionIds` is the authoritative list of every session that
+ * still exists upstream and drives stale reconciliation. Unchanged
+ * conversations are skipped entirely — no conversation put, no message
+ * delete/rewrite — and records from before the fingerprint era simply count
+ * as changed once, then self-heal.
  */
 export function planImport(
   bundles: ConversationExportBundle[],
-  previousRecords: Array<ConversationRecord & LocalTerminalFields>
+  previousRecords: Array<ConversationRecord & LocalTerminalFields>,
+  sessionIds: readonly string[]
 ): ImportPlan {
   const previousById = new Map<number, ConversationRecord & LocalTerminalFields>();
   const previousByCliId = new Map<
@@ -234,22 +200,28 @@ export function planImport(
     }
   }
 
-  // Reconcile by source identity, not by the current numeric hash. A previous
-  // row matched through `_cli_id` remains retained even when its numeric key
-  // differs from the incoming bundle. Unmatched duplicate/removed rows are
-  // still cleaned up, while browser-extension records remain out of scope.
-  // An empty export can be a transient startup/read failure. Without snapshot
-  // generation metadata there is no safe way to distinguish that from a
-  // deliberate deletion of every source session, so preserve the mirror and
-  // wait for the next non-empty authoritative export instead of wiping it.
-  const staleIds = bundles.length === 0
+  // Reconcile against the authoritative session id list, not against the
+  // (incremental) bundles — unchanged sessions simply aren't in `bundles`
+  // anymore. A previous row matched through `_cli_id` remains retained even
+  // when its numeric key differs from the incoming bundle, and rows matched
+  // by a changed bundle are retained too. Browser-extension records remain
+  // out of scope. Mirror rows mirrored before `_cli_id` existed can't be
+  // matched against the id list, so they are kept rather than risk deleting
+  // user organization state. An empty id list can still mean a transient
+  // startup/read failure, so preserve the mirror and wait for the next
+  // non-empty authoritative export instead of wiping it.
+  const authoritativeIds = new Set(sessionIds);
+  const staleIds = sessionIds.length === 0
     ? []
     : previousRecords
         .filter(
           (record) =>
             record._source === "local_terminal" &&
             typeof record.id === "number" &&
-            !matchedPreviousIds.has(record.id)
+            !matchedPreviousIds.has(record.id) &&
+            typeof record._cli_id === "string" &&
+            record._cli_id.length > 0 &&
+            !authoritativeIds.has(record._cli_id)
         )
         .map((record) => record.id as number);
 
@@ -257,7 +229,8 @@ export function planImport(
 }
 
 async function importBundles(
-  bundles: ConversationExportBundle[]
+  bundles: ConversationExportBundle[],
+  sessionIds: readonly string[]
 ): Promise<{ changed: boolean }> {
   let changed = false;
   await db.transaction("rw", db.conversations, db.messages, async () => {
@@ -267,7 +240,7 @@ async function importBundles(
     const previous = (await db.conversations.toArray()) as Array<
       ConversationRecord & LocalTerminalFields
     >;
-    const plan = planImport(bundles, previous);
+    const plan = planImport(bundles, previous, sessionIds);
     changed =
       plan.toPut.length > 0 || plan.staleIds.length > 0;
     if (plan.toPut.length > 0) {
@@ -302,8 +275,11 @@ async function runSync(): Promise<void> {
   setState({ syncing: true });
   running = (async () => {
     try {
-      const bundles = await api.exportConversations();
-      const { changed } = await importBundles(bundles);
+      const exportResult = await api.exportConversations();
+      const { changed } = await importBundles(
+        exportResult.bundles,
+        exportResult.sessionIds
+      );
       setState({
         lastSyncAt: Date.now(),
         conversationCount: await db.conversations.count(),

@@ -1058,11 +1058,30 @@ export async function getConversationById(
   return record ? toConversation(record) : null
 }
 
-export async function getTopics(): Promise<Topic[]> {
-  const [topicRecords, conversations] = await Promise.all([
-    db.topics.toArray(),
-    db.conversations.toArray()
-  ])
+/**
+ * Minimal shape getTopics needs for per-topic counting. Both raw
+ * ConversationRecord rows and converted Conversation objects satisfy it.
+ */
+export type TopicCountSource = {
+  topic_id?: number | null
+  is_archived?: boolean
+  is_trash?: boolean
+}
+
+export async function getTopics(
+  prefetchedConversations?: readonly TopicCountSource[]
+): Promise<Topic[]> {
+  // Callers that already hold the conversation list (library refresh, learn
+  // recompute) pass it in so one conversations-table scan serves both;
+  // without a prefetched list we scan here. A prefetched list is the folded
+  // library view (no trash, no subagent children) — the same view
+  // updateConversationInState recomputes counts from, so the numbers stay
+  // consistent with that path.
+  const [topicRecords, conversations]: [TopicRecord[], readonly TopicCountSource[]] =
+    await Promise.all([
+      db.topics.toArray(),
+      prefetchedConversations ?? db.conversations.toArray()
+    ])
 
   const directCounts = new Map<number, number>()
   for (const convo of conversations) {
@@ -3068,6 +3087,10 @@ export async function getRecentExploreMessages(
   sessionId: string,
   limit = 6
 ): Promise<ExploreMessage[]> {
+  // Take the newest `limit` rows (reversed primary-key order), then hand back
+  // chronological order — sortBy already sorts ascending by timestamp, so no
+  // extra reverse here (an earlier double-reverse fed history newest-first
+  // into the companion prompt, which read as "no conversation memory").
   const records = await db.explore_messages
     .where("sessionId")
     .equals(sessionId)
@@ -3076,7 +3099,7 @@ export async function getRecentExploreMessages(
     .sortBy("timestamp")
 
   // Return in chronological order
-  return records.reverse().map((record) => ({
+  return records.map((record) => ({
     id: record.id,
     sessionId: record.sessionId,
     role: record.role,

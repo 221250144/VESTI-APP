@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   AgentResult,
   AgentRunRequest,
+  AgentStreamChunk,
   MemoryEntryView,
   SessionRecallHit,
 } from "../../shared/contracts";
@@ -17,9 +18,12 @@ import {
   buildCompanionContext,
   COMPANION_CONTEXT_BUDGET_CHARS,
   COMPANION_DEPOSIT_DIGEST_CHARS,
+  COMPANION_MEMORY_LIMIT,
+  COMPANION_RECALL_TOP_K,
   mapCompanionRecallSources,
   splitCompanionResult,
   stripCompanionMoodLine,
+  type CompanionAgentMeta,
   type CompanionConversationRecord,
   type CompanionDeps,
 } from "./companionService";
@@ -139,7 +143,9 @@ describe("buildCompanionContext", () => {
       makeHit({
         sessionId: `cli-${index}`,
         title: `会话${index}`,
-        oneLiner: "y".repeat(6_000),
+        // One retained hit must alone blow the budget so trimming only stops
+        // once the whole recall section is gone.
+        oneLiner: "y".repeat(12_000),
       }),
     );
     const text = buildCompanionContext({
@@ -155,7 +161,8 @@ describe("buildCompanionContext", () => {
   });
 
   it("drops the earliest history messages when recall trimming is not enough", () => {
-    const filler = "z".repeat(4_000);
+    // 2×8K alone overflows the 16K budget; dropping the earliest line fits.
+    const filler = "z".repeat(8_000);
     const text = buildCompanionContext({
       memories: [makeEntry({ id: "m1", contentMarkdown: "记得我" })],
       depositDigests: [],
@@ -261,6 +268,9 @@ interface CompanionMockOptions {
   history?: ExploreMessage[];
   records?: CompanionConversationRecord[];
   runAgentContent?: string;
+  /** Wire the streaming bridge pair (runAgentStream + onAgentStreamChunk). */
+  streaming?: boolean;
+  streamChunks?: Array<{ delta?: string; reasoning?: string }>;
 }
 
 function makeDeps(options: CompanionMockOptions = {}) {
@@ -269,6 +279,7 @@ function makeDeps(options: CompanionMockOptions = {}) {
     memoryQueries: [] as Array<Parameters<CompanionDeps["listMemoryEntries"]>[0]>,
     recallQueries: [] as Array<{ query: string; topK?: number }>,
     createdTitles: [] as string[],
+    renames: [] as Array<{ sessionId: string; title: string }>,
     addedMessages: [] as Array<{
       sessionId: string;
       message: Omit<ExploreMessage, "id" | "sessionId">;
@@ -294,6 +305,9 @@ function makeDeps(options: CompanionMockOptions = {}) {
       calls.createdTitles.push(title);
       return "sess-new";
     }),
+    renameSession: vi.fn(async (sessionId: string, title: string) => {
+      calls.renames.push({ sessionId, title });
+    }),
     getRecentMessages: vi.fn(async () => options.history ?? []),
     addMessage: vi.fn(async (sessionId, message) => {
       calls.addedMessages.push({ sessionId, message });
@@ -302,6 +316,33 @@ function makeDeps(options: CompanionMockOptions = {}) {
     listConversationRecords: vi.fn(async () => options.records ?? []),
     now: () => 5_000,
   };
+  if (options.streaming) {
+    const listeners = new Map<string, (chunk: AgentStreamChunk) => void>();
+    deps.onAgentStreamChunk = vi.fn(
+      (runId: string, listener: (chunk: AgentStreamChunk) => void) => {
+        listeners.set(runId, listener);
+        return () => {
+          listeners.delete(runId);
+        };
+      },
+    );
+    deps.runAgentStream = vi.fn(async (request: AgentRunRequest, runId: string) => {
+      calls.agentRequests.push(request);
+      const listener = listeners.get(runId);
+      for (const chunk of options.streamChunks ?? [
+        { reasoning: "用户在打招呼" },
+        { delta: "[mood:warm]\n" },
+        { delta: "晚上好" },
+        { delta: "，想聊点什么？" },
+      ]) {
+        listener?.({ runId, ...chunk });
+      }
+      listener?.({ runId, done: true });
+      return {
+        content: options.runAgentContent ?? "warm\n晚上好，想聊点什么？",
+      } as AgentResult;
+    });
+  }
   return { deps, calls };
 }
 
@@ -335,7 +376,7 @@ describe("askCompanion", () => {
     expect(request.transcriptOverride).toContain("【相关历史对话片段】");
     expect(request.transcriptOverride).toContain("发布片段");
     expect(request.transcriptOverride).toContain("【你们最近的交谈】");
-    expect(calls.recallQueries).toEqual([{ query: "心里有点没底", topK: 4 }]);
+    expect(calls.recallQueries).toEqual([{ query: "心里有点没底", topK: COMPANION_RECALL_TOP_K }]);
 
     expect(answer).toEqual({
       sessionId: "sess-1",
@@ -402,7 +443,7 @@ describe("askCompanion", () => {
       deps,
     );
     expect(calls.memoryQueries).toEqual([
-      { kind: "dream", status: "active", limit: 100 },
+      { kind: "dream", status: "active", limit: COMPANION_MEMORY_LIMIT },
       { kind: "deposit", status: "active", limit: 5 },
     ]);
     expect(calls.recallQueries).toEqual([]);
@@ -437,5 +478,98 @@ describe("askCompanion", () => {
     await expect(
       askCompanion({ sessionId: "sess-1", question: "hi" }, deps),
     ).rejects.toThrow("LLM offline");
+  });
+
+  it("streams deltas and reasoning to the callbacks and persists the reasoning", async () => {
+    const { deps, calls } = makeDeps({ streaming: true });
+    const streamed: string[] = [];
+    const reasonings: string[] = [];
+    const answer = await askCompanion(
+      {
+        sessionId: "sess-1",
+        question: "晚上好",
+        onStream: (raw) => streamed.push(raw),
+        onReasoning: (accumulated) => reasonings.push(accumulated),
+      },
+      deps,
+    );
+    // Accumulated RAW text (mood tag line included) reaches the live bubble.
+    expect(streamed).toEqual([
+      "[mood:warm]\n",
+      "[mood:warm]\n晚上好",
+      "[mood:warm]\n晚上好，想聊点什么？",
+    ]);
+    expect(reasonings).toEqual(["用户在打招呼"]);
+    expect(deps.runAgent).not.toHaveBeenCalled();
+    expect(deps.runAgentStream).toHaveBeenCalledTimes(1);
+    // The final answer/persisted message carry the parsed contract + trace.
+    expect(answer.mood).toBe("warm");
+    expect(answer.content).toBe("晚上好，想聊点什么？");
+    expect(answer.reasoning).toBe("用户在打招呼");
+    const meta = calls.addedMessages[1].message.agentMeta as CompanionAgentMeta | undefined;
+    expect(meta?.reasoning).toBe("用户在打招呼");
+    expect(calls.addedMessages[1].message.content).toBe("warm\n晚上好，想聊点什么？");
+  });
+
+  it("uses the plain call when no streaming callbacks are given, even if the bridge offers it", async () => {
+    const { deps } = makeDeps({ streaming: true });
+    const answer = await askCompanion({ sessionId: "sess-1", question: "hi" }, deps);
+    expect(deps.runAgent).toHaveBeenCalledTimes(1);
+    expect(deps.runAgentStream).not.toHaveBeenCalled();
+    expect(answer.reasoning).toBeUndefined();
+  });
+
+  it("streams nothing (and persists no reasoning) when the model only sends answer text", async () => {
+    const { deps, calls } = makeDeps({
+      streaming: true,
+      streamChunks: [{ delta: "calm\n" }, { delta: "没有思考痕迹的回答" }],
+      runAgentContent: "calm\n没有思考痕迹的回答",
+    });
+    const reasonings: string[] = [];
+    const answer = await askCompanion(
+      { sessionId: "sess-1", question: "hi", onStream: () => undefined, onReasoning: (r) => reasonings.push(r) },
+      deps,
+    );
+    expect(reasonings).toEqual([]);
+    expect(answer.reasoning).toBeUndefined();
+    const meta = calls.addedMessages[1].message.agentMeta as CompanionAgentMeta | undefined;
+    expect(meta?.reasoning).toBeUndefined();
+  });
+});
+
+describe("askCompanion opener turns", () => {
+  it("opens proactively: no user message persisted, no recall, session retitled from the opener", async () => {
+    const { deps, calls } = makeDeps({
+      memories: [makeEntry({ id: "m1", tags: ["event"], contentMarkdown: "展板昨天送印了" })],
+      runAgentContent: "warm\n展板送印顺利吗？这两天可以松半口气了。",
+    });
+    const answer = await askCompanion({ question: "", opener: true }, deps);
+    expect(calls.createdTitles).toEqual(["夜话 · 新的开场"]);
+    expect(calls.recallQueries).toEqual([]);
+    // Only the assistant opener is persisted — there is no empty user bubble.
+    expect(calls.addedMessages).toHaveLength(1);
+    expect(calls.addedMessages[0].message.role).toBe("assistant");
+    expect(calls.addedMessages[0].sessionId).toBe("sess-new");
+    expect(calls.renames).toEqual([
+      { sessionId: "sess-new", title: "夜话 · 展板送印顺利吗？这两天…" },
+    ]);
+    expect(answer.sessionId).toBe("sess-new");
+    expect(answer.mood).toBe("warm");
+    expect(answer.sources).toEqual([]);
+    // The agent request still carries the memory context.
+    expect(calls.agentRequests[0].transcriptOverride).toContain("展板昨天送印了");
+  });
+
+  it("keeps the placeholder title when the opener body is empty", async () => {
+    const { deps, calls } = makeDeps({ runAgentContent: "calm\n" });
+    await askCompanion({ question: "", opener: true }, deps);
+    expect(calls.renames).toEqual([]);
+  });
+
+  it("ignores the opener flag when a question is present", async () => {
+    const { deps, calls } = makeDeps({});
+    await askCompanion({ sessionId: "sess-1", question: "晚上好", opener: true }, deps);
+    expect(calls.addedMessages[0].message.role).toBe("user");
+    expect(calls.renames).toEqual([]);
   });
 });

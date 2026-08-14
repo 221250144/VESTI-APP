@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CapsuleBubbleMood, CapsuleDockStatus, CapsuleState } from '../shared/contracts';
 import { capsuleApi } from './api';
 import { COPY, type CapsuleLocale } from './copy';
-import { DEFAULT_SKIN_ID, resolveSkin } from './skins';
+import { CUSTOM_SKIN_ID, DEFAULT_SKIN_ID, resolveSkin } from './skins';
 import { QuickAsk } from './QuickAsk';
 import { RelayFlow } from './RelayFlow';
 import { PromptAssist } from './PromptAssist';
@@ -44,6 +44,10 @@ export function Capsule() {
   });
   const [locale, setLocale] = useState<CapsuleLocale>('zh');
   const [skinId, setSkinId] = useState<string>(DEFAULT_SKIN_ID);
+  // DIY 自定义皮肤：dataUrl 在运行时才存在（主进程 custom-owl.png），
+  // owlCustomUpdatedAt pref 是主窗口重新生成后的刷新信号。
+  const [customOwl, setCustomOwl] = useState<string | null>(null);
+  const [customOwlNonce, setCustomOwlNonce] = useState(0);
   const [view, setView] = useState<PanelView>('home');
   const [dockStatus, setDockStatus] = useState<CapsuleDockStatus | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -78,7 +82,10 @@ export function Capsule() {
         document.documentElement.dataset.theme = value === 'dark' ? 'dark' : 'light';
       }
       if (key === 'owlSkin') {
-        setSkinId(resolveSkin(value).id);
+        setSkinId(value === CUSTOM_SKIN_ID ? CUSTOM_SKIN_ID : resolveSkin(value).id);
+      }
+      if (key === 'owlCustomUpdatedAt') {
+        setCustomOwlNonce(nonce => nonce + 1);
       }
     };
     void bridge.getUiPreference('language').then(value => apply('language', value));
@@ -86,6 +93,26 @@ export function Capsule() {
     void bridge.getUiPreference('owlSkin').then(value => apply('owlSkin', value));
     return bridge.onUiPreferenceChanged(apply);
   }, []);
+
+  // Load the DIY skin artwork when the custom slot is selected.
+  useEffect(() => {
+    if (skinId !== CUSTOM_SKIN_ID) {
+      setCustomOwl(null);
+      return;
+    }
+    let cancelled = false;
+    void window.vesti
+      ?.readCustomOwl()
+      .then(asset => {
+        if (!cancelled) setCustomOwl(asset?.dataUrl ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setCustomOwl(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [skinId, customOwlNonce]);
 
   // Collapsing the ball always returns the panel to the home view.
   useEffect(() => {
@@ -113,6 +140,8 @@ export function Capsule() {
 
   const copy = COPY[locale];
   const skin = resolveSkin(skinId);
+  // 自定义槽位有图用图，没图（还没生成过）回落默认皮肤。
+  const skinImage = skinId === CUSTOM_SKIN_ID && customOwl ? customOwl : skin.collapsed;
 
   const handlePointerDown = useCallback((event: React.PointerEvent) => {
     if (event.button !== 0) return;
@@ -242,7 +271,7 @@ export function Capsule() {
               onClick={handleDismissBubble}
               onContextMenu={handleContextMenu}
             >
-              <img src={skin.collapsed} alt="Vesti" draggable={false} data-skin={skin.id} />
+              <img src={skinImage} alt="Vesti" draggable={false} data-skin={skin.id} />
               <span className={`status-dot${state.watching ? ' watching' : ''}`} />
             </div>
           </div>
@@ -264,7 +293,7 @@ export function Capsule() {
           onPointerCancel={handlePointerCancel}
           onContextMenu={handleContextMenu}
         >
-          <img src={skin.collapsed} alt="Vesti" draggable={false} data-skin={skin.id} />
+          <img src={skinImage} alt="Vesti" draggable={false} data-skin={skin.id} />
           <span className={`status-dot${state.watching ? ' watching' : ''}`} />
         </div>
       </div>
@@ -284,7 +313,7 @@ export function Capsule() {
           onPointerUp={handlePointerUp}
           onPointerCancel={handlePointerCancel}
         >
-          <img src={skin.collapsed} alt="Vesti" draggable={false} data-skin={skin.id} />
+          <img src={skinImage} alt="Vesti" draggable={false} data-skin={skin.id} />
           <span className="title">{copy.dock}</span>
           <button
             type="button"

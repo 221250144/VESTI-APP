@@ -10,13 +10,16 @@ import type { AgentRunRequest, MemoryEntryView } from "../../shared/contracts";
 import type { DreamMaintainOp } from "../../shared/dreamMaintain";
 import { todayDateString } from "../daily/dailyActivity";
 import {
+  DREAM_AGENT_MIN_MESSAGES,
   DREAM_BATCH_BUDGET_CHARS,
+  DREAM_MAX_AUTO_BATCHES,
   applyDreamMaintainOps,
   buildDreamJournalMarkdown,
   buildDreamMaintainTranscript,
   packDreamBatches,
   parseDreamExtractResult,
   parseDreamMaintainResult,
+  passesDreamGate,
   renderDreamSessionBlock,
   runDreamPipeline,
   selectDreamSessions,
@@ -40,6 +43,7 @@ function makeSession(
     projectLabel: "/work/vesti",
     activityAt: 1_000 + overrides.id,
     messageCount: 2,
+    origin: "browser",
     ...overrides,
   };
 }
@@ -159,6 +163,25 @@ describe("selectDreamSessions", () => {
       selectDreamSessions(sessions, { full: false, lastSessionTs: 150 }).map((s) => s.id),
     ).toEqual([2, 3]);
     expect(selectDreamSessions(sessions, { full: false, lastSessionTs: 300 })).toEqual([]);
+  });
+});
+
+describe("passesDreamGate", () => {
+  it("browser sessions always qualify, even tiny ones", () => {
+    expect(passesDreamGate(makeSession({ id: 1, origin: "browser", messageCount: 1 }))).toBe(true);
+  });
+
+  it("agent sessions need the engagement floor", () => {
+    expect(
+      passesDreamGate(
+        makeSession({ id: 1, origin: "agent", messageCount: DREAM_AGENT_MIN_MESSAGES - 1 }),
+      ),
+    ).toBe(false);
+    expect(
+      passesDreamGate(
+        makeSession({ id: 1, origin: "agent", messageCount: DREAM_AGENT_MIN_MESSAGES }),
+      ),
+    ).toBe(true);
   });
 });
 
@@ -481,6 +504,110 @@ describe("runDreamPipeline", () => {
     // Only lastRunAt is stamped (today counts as checked); the session
     // watermark stays put.
     expect(calls.metaSets).toEqual([["dream.lastRunAt", String(FIXED_NOW)]]);
+  });
+
+  it("quality gate: low-engagement agent sessions are skipped, browser weight kept", async () => {
+    const gatedSessions = [
+      makeSession({ id: 1, activityAt: 1_000, origin: "agent", messageCount: 2 }),
+      makeSession({
+        id: 2,
+        activityAt: 2_000,
+        origin: "agent",
+        messageCount: DREAM_AGENT_MIN_MESSAGES,
+      }),
+      makeSession({
+        id: 3,
+        activityAt: 3_000,
+        origin: "browser",
+        messageCount: 1,
+        sessionKey: "browser:3",
+      }),
+    ];
+    const gatedMessages = {
+      1: [{ role: "user" as const, contentText: "改一下这个错别字" }],
+      2: [{ role: "user" as const, contentText: "帮我重构积分体系" }],
+      3: [{ role: "user" as const, contentText: "今天学到了什么" }],
+    };
+    const { calls } = makeVestiMock({
+      onRunAgent: () => ({ content: "[]" }),
+    });
+    const result = await runDreamPipeline(
+      { mode: "auto" },
+      makeDeps(gatedSessions, gatedMessages),
+    );
+    expect(result.ok).toBe(true);
+    expect(result.gatedSessions).toBe(1);
+    expect(result.sessionsProcessed).toBe(2);
+    const transcript = calls.agentRequests
+      .filter((r) => r.kind === "dream-extract")
+      .map((r) => r.transcriptOverride)
+      .join("\n");
+    expect(transcript).not.toContain("### 会话 cli-1");
+    expect(transcript).toContain("### 会话 cli-2");
+    expect(transcript).toContain("### 会话 browser:3");
+    // The journal records the gate so the user understands the skip.
+    const journal = calls.upserts.find((entry) => entry.kind === "dream-log");
+    expect(journal?.contentMarkdown).toContain("未达做梦质量门槛");
+  });
+
+  it("token-budget cap: auto runs process at most MAX batches and hold the watermark", async () => {
+    const batchCount = DREAM_MAX_AUTO_BATCHES + 2;
+    const manySessions = Array.from({ length: batchCount }, (_, index) =>
+      makeSession({ id: index + 1, activityAt: 1_000 * (index + 1) }),
+    );
+    const manyMessages = Object.fromEntries(
+      manySessions.map((session) => [
+        session.id,
+        [{ role: "user" as const, contentText: `长${"话".repeat(30_000)}` }],
+      ]),
+    );
+    const { calls } = makeVestiMock({
+      onRunAgent: () => ({ content: "[]" }),
+    });
+    const result = await runDreamPipeline(
+      { mode: "auto" },
+      makeDeps(manySessions, manyMessages),
+    );
+    expect(result.ok).toBe(true);
+    expect(result.cappedBatches).toBe(2);
+    const extractCalls = calls.agentRequests.filter((r) => r.kind === "dream-extract");
+    expect(extractCalls).toHaveLength(DREAM_MAX_AUTO_BATCHES);
+    // Watermark stops at the last processed session (12th oldest), so the
+    // remaining two are re-selected by the next run.
+    expect(calls.metaSets).toContainEqual([
+      "dream.lastSessionTs",
+      String(1_000 * DREAM_MAX_AUTO_BATCHES),
+    ]);
+    const journal = calls.upserts.find((entry) => entry.kind === "dream-log");
+    expect(journal?.contentMarkdown).toContain("token 预算");
+  });
+
+  it("full mode stays uncapped", async () => {
+    const batchCount = DREAM_MAX_AUTO_BATCHES + 2;
+    const manySessions = Array.from({ length: batchCount }, (_, index) =>
+      makeSession({ id: index + 1, activityAt: 1_000 * (index + 1) }),
+    );
+    const manyMessages = Object.fromEntries(
+      manySessions.map((session) => [
+        session.id,
+        [{ role: "user" as const, contentText: `长${"话".repeat(30_000)}` }],
+      ]),
+    );
+    const { calls } = makeVestiMock({
+      onRunAgent: () => ({ content: "[]" }),
+    });
+    const result = await runDreamPipeline(
+      { mode: "full" },
+      makeDeps(manySessions, manyMessages),
+    );
+    expect(result.ok).toBe(true);
+    expect(result.cappedBatches).toBe(0);
+    const extractCalls = calls.agentRequests.filter((r) => r.kind === "dream-extract");
+    expect(extractCalls).toHaveLength(batchCount);
+    expect(calls.metaSets).toContainEqual([
+      "dream.lastSessionTs",
+      String(1_000 * batchCount),
+    ]);
   });
 
   it("retries a failed extract batch once and only records the warning when both attempts fail", async () => {

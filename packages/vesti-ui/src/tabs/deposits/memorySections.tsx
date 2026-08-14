@@ -91,16 +91,32 @@ function renderMarkdown(markdown: string): string {
 
 // ---- shared reader modal ----------------------------------------------------------------
 
-/** Full-Markdown reader for one memory entry (backdrop / Esc closes). */
+/**
+ * Full-Markdown reader for one memory entry (backdrop / Esc closes), upgraded
+ * to the 陈列/管理 surface: metadata footer (version, updated time, source
+ * sessions), inline Markdown editing, and a two-step delete. Mutation IO is
+ * injected — the modal stays storage-agnostic.
+ */
 export function MemoryReaderModal({
   entry,
   onClose,
   l,
+  onSave,
+  onDelete,
 }: {
   entry: MemoryEntryView;
   onClose: () => void;
   l: MemoryLabelFn;
+  onSave?: (next: MemoryEntryView) => Promise<void>;
+  onDelete?: (id: string) => Promise<void>;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [draftTitle, setDraftTitle] = useState(entry.title);
+  const [draftBody, setDraftBody] = useState(entry.contentMarkdown);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
@@ -110,6 +126,44 @@ export function MemoryReaderModal({
   }, [onClose]);
 
   const html = useMemo(() => renderMarkdown(entry.contentMarkdown), [entry.contentMarkdown]);
+  const sourceIds = entry.sourceSessionIds ?? [];
+
+  const save = async (): Promise<void> => {
+    if (!onSave || busy) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      await onSave({
+        ...entry,
+        title: draftTitle.trim() || entry.title,
+        contentMarkdown: draftBody,
+        version: entry.version + 1,
+        updatedAt: Date.now(),
+      });
+      onClose();
+    } catch (error) {
+      setActionError((error as Error)?.message ?? String(error));
+      setBusy(false);
+    }
+  };
+
+  const remove = async (): Promise<void> => {
+    if (!onDelete || busy) return;
+    if (!confirmingDelete) {
+      setConfirmingDelete(true);
+      return;
+    }
+    setBusy(true);
+    setActionError(null);
+    try {
+      await onDelete(entry.id);
+      onClose();
+    } catch (error) {
+      setActionError((error as Error)?.message ?? String(error));
+      setBusy(false);
+      setConfirmingDelete(false);
+    }
+  };
 
   return (
     <div
@@ -123,10 +177,19 @@ export function MemoryReaderModal({
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h2 className="text-vesti-xl font-serif text-text-primary">
-              {entry.title || l("untitled", "Untitled")}
-            </h2>
+          <div className="min-w-0 flex-1">
+            {editing ? (
+              <input
+                value={draftTitle}
+                onChange={(event) => setDraftTitle(event.target.value)}
+                className="w-full rounded-md border border-border-subtle bg-bg-surface-card px-2.5 py-1.5 text-vesti-xl font-serif text-text-primary focus:border-accent-primary focus:outline-none"
+                placeholder={l("untitled", "Untitled")}
+              />
+            ) : (
+              <h2 className="text-vesti-xl font-serif text-text-primary">
+                {entry.title || l("untitled", "Untitled")}
+              </h2>
+            )}
             <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-vesti-sm font-sans text-text-tertiary">
               {entry.tags.map((tag) => (
                 <span key={tag} className="inline-flex items-center gap-1">
@@ -135,6 +198,14 @@ export function MemoryReaderModal({
                 </span>
               ))}
               <span>{entryDateLabel(entry)}</span>
+              <span>
+                v{entry.version}
+                {" · "}
+                {l("updatedAt", "Updated {date}").replace(
+                  "{date}",
+                  new Date(entry.updatedAt).toLocaleString(),
+                )}
+              </span>
             </p>
           </div>
           <button
@@ -146,10 +217,107 @@ export function MemoryReaderModal({
             <X strokeWidth={1.75} className="h-4 w-4" />
           </button>
         </div>
-        <div
-          className="prose prose-slate dark:prose-invert mt-4 max-w-none prose-headings:text-text-primary prose-p:leading-relaxed prose-p:text-text-primary prose-li:leading-relaxed prose-li:text-text-primary prose-strong:text-text-primary prose-em:text-text-primary prose-code:text-text-primary prose-a:text-accent-primary prose-blockquote:text-text-secondary"
-          dangerouslySetInnerHTML={{ __html: html }}
-        />
+
+        {editing ? (
+          <textarea
+            value={draftBody}
+            onChange={(event) => setDraftBody(event.target.value)}
+            rows={16}
+            className="mt-4 w-full resize-y rounded-md border border-border-subtle bg-bg-surface-card px-3 py-2.5 font-mono text-vesti-sm leading-relaxed text-text-primary focus:border-accent-primary focus:outline-none"
+          />
+        ) : (
+          <div
+            className="prose prose-slate dark:prose-invert mt-4 max-w-none prose-headings:text-text-primary prose-p:leading-relaxed prose-p:text-text-primary prose-li:leading-relaxed prose-li:text-text-primary prose-strong:text-text-primary prose-em:text-text-primary prose-code:text-text-primary prose-a:text-accent-primary prose-blockquote:text-text-secondary"
+            dangerouslySetInnerHTML={{ __html: html }}
+          />
+        )}
+
+        {sourceIds.length > 0 ? (
+          <div className="mt-4 border-t border-border-subtle pt-3">
+            <p className="text-vesti-sm font-sans text-text-tertiary">
+              {l("sourceSessions", "Source sessions")}
+            </p>
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              {sourceIds.slice(0, 8).map((id) => (
+                <span
+                  key={id}
+                  className="max-w-56 truncate rounded-full bg-bg-surface-card px-2 py-0.5 font-mono text-[11px] text-text-tertiary"
+                  title={id}
+                >
+                  {id}
+                </span>
+              ))}
+              {sourceIds.length > 8 ? (
+                <span className="rounded-full bg-bg-surface-card px-2 py-0.5 text-[11px] text-text-tertiary">
+                  +{sourceIds.length - 8}
+                </span>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
+        {actionError ? (
+          <p role="alert" className="mt-3 text-vesti-sm font-sans text-danger">
+            {l("failed", "Failed: {message}").replace("{message}", actionError)}
+          </p>
+        ) : null}
+
+        {onSave || onDelete ? (
+          <div className="mt-4 flex items-center justify-end gap-2 border-t border-border-subtle pt-3">
+            {editing ? (
+              <>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => {
+                    setEditing(false);
+                    setDraftTitle(entry.title);
+                    setDraftBody(entry.contentMarkdown);
+                  }}
+                  className="rounded-md px-3 py-1.5 text-vesti-sm font-sans text-text-secondary transition-colors hover:bg-bg-surface-card"
+                >
+                  {l("cancel", "Cancel")}
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void save()}
+                  className="rounded-md bg-accent-primary px-3 py-1.5 text-vesti-sm font-sans font-medium text-text-inverse transition-colors hover:opacity-90 disabled:opacity-50"
+                >
+                  {busy ? l("saving", "Saving…") : l("save", "Save")}
+                </button>
+              </>
+            ) : (
+              <>
+                {onSave ? (
+                  <button
+                    type="button"
+                    onClick={() => setEditing(true)}
+                    className="rounded-md px-3 py-1.5 text-vesti-sm font-sans text-text-secondary transition-colors hover:bg-bg-surface-card"
+                  >
+                    {l("edit", "Edit")}
+                  </button>
+                ) : null}
+                {onDelete ? (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void remove()}
+                    className={`rounded-md px-3 py-1.5 text-vesti-sm font-sans transition-colors disabled:opacity-50 ${
+                      confirmingDelete
+                        ? "bg-danger/10 text-danger"
+                        : "text-text-tertiary hover:bg-bg-surface-card hover:text-danger"
+                    }`}
+                  >
+                    {confirmingDelete
+                      ? l("memoryDeleteConfirm", "Click again to delete")
+                      : l("delete", "Delete")}
+                  </button>
+                ) : null}
+              </>
+            )}
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -161,9 +329,10 @@ function useMemoryEntries(
   storage: StorageApi,
   kind: MemoryEntryView["kind"],
   refreshKey: number,
-): { entries: MemoryEntryView[] | null; loadError: string | null } {
+): { entries: MemoryEntryView[] | null; loadError: string | null; reload: () => void } {
   const [entries, setEntries] = useState<MemoryEntryView[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [localTick, setLocalTick] = useState(0);
 
   useEffect(() => {
     if (!storage.listMemoryEntries) {
@@ -185,9 +354,9 @@ function useMemoryEntries(
     return () => {
       cancelled = true;
     };
-  }, [storage, kind, refreshKey]);
+  }, [storage, kind, refreshKey, localTick]);
 
-  return { entries, loadError };
+  return { entries, loadError, reload: () => setLocalTick((tick) => tick + 1) };
 }
 
 function SectionState({
@@ -223,8 +392,9 @@ function SectionState({
 // ---- 记忆 (dream memories) -----------------------------------------------------------------
 
 export function DreamMemorySection({ storage, l, refreshKey }: SectionProps) {
-  const { entries, loadError } = useMemoryEntries(storage, "dream", refreshKey);
+  const { entries, loadError, reload } = useMemoryEntries(storage, "dream", refreshKey);
   const [activeTag, setActiveTag] = useState<string>("all");
+  const [query, setQuery] = useState("");
   const [reading, setReading] = useState<MemoryEntryView | null>(null);
 
   const presentTags = useMemo(
@@ -234,12 +404,31 @@ export function DreamMemorySection({ storage, l, refreshKey }: SectionProps) {
 
   const filtered = useMemo(() => {
     const list = entries ?? [];
-    return activeTag === "all"
-      ? list
-      : list.filter((entry) => entry.tags.includes(activeTag));
-  }, [entries, activeTag]);
+    const byTag =
+      activeTag === "all" ? list : list.filter((entry) => entry.tags.includes(activeTag));
+    const q = query.trim().toLowerCase();
+    if (!q) return byTag;
+    return byTag.filter(
+      (entry) =>
+        entry.title.toLowerCase().includes(q) ||
+        (entry.summary ?? "").toLowerCase().includes(q) ||
+        entry.contentMarkdown.toLowerCase().includes(q),
+    );
+  }, [entries, activeTag, query]);
 
   const showList = !loadError && entries !== null && filtered.length > 0;
+
+  const saveEntry = async (next: MemoryEntryView): Promise<void> => {
+    if (!storage.upsertMemoryEntry) return;
+    await storage.upsertMemoryEntry(next);
+    reload();
+  };
+
+  const deleteEntry = async (id: string): Promise<void> => {
+    if (!storage.deleteMemoryEntry) return;
+    await storage.deleteMemoryEntry(id);
+    reload();
+  };
 
   return (
     <div className="h-full overflow-y-auto">
@@ -272,6 +461,13 @@ export function DreamMemorySection({ storage, l, refreshKey }: SectionProps) {
                 {tagLabel(l, tag)}
               </button>
             ))}
+            <input
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={l("memorySearch", "Search memories…")}
+              className="ml-auto w-48 rounded-full border border-border-subtle bg-bg-surface-card px-3 py-1 text-vesti-sm font-sans text-text-primary placeholder:text-text-tertiary focus:border-accent-primary focus:outline-none"
+            />
           </div>
         ) : null}
 
@@ -314,16 +510,24 @@ export function DreamMemorySection({ storage, l, refreshKey }: SectionProps) {
             entries={entries}
             loadError={loadError}
             emptyText={
-              activeTag === "all"
-                ? l("memoryEmpty", "No memories yet — sleep on it and have a dream.")
-                : l("memoryTagEmpty", "No memories under this tag yet.")
+              query.trim()
+                ? l("memorySearchEmpty", "No memories match this search.")
+                : activeTag === "all"
+                  ? l("memoryEmpty", "No memories yet — sleep on it and have a dream.")
+                  : l("memoryTagEmpty", "No memories under this tag yet.")
             }
             l={l}
           />
         )}
       </div>
       {reading ? (
-        <MemoryReaderModal entry={reading} onClose={() => setReading(null)} l={l} />
+        <MemoryReaderModal
+          entry={reading}
+          onClose={() => setReading(null)}
+          l={l}
+          onSave={storage.upsertMemoryEntry ? saveEntry : undefined}
+          onDelete={storage.deleteMemoryEntry ? deleteEntry : undefined}
+        />
       ) : null}
     </div>
   );
@@ -332,8 +536,14 @@ export function DreamMemorySection({ storage, l, refreshKey }: SectionProps) {
 // ---- 梦境日志 (dream run logs) --------------------------------------------------------------
 
 export function DreamLogSection({ storage, l, refreshKey }: SectionProps) {
-  const { entries, loadError } = useMemoryEntries(storage, "dream-log", refreshKey);
+  const { entries, loadError, reload } = useMemoryEntries(storage, "dream-log", refreshKey);
   const [reading, setReading] = useState<MemoryEntryView | null>(null);
+
+  const deleteEntry = async (id: string): Promise<void> => {
+    if (!storage.deleteMemoryEntry) return;
+    await storage.deleteMemoryEntry(id);
+    reload();
+  };
 
   const sorted = useMemo(
     () =>
@@ -387,7 +597,12 @@ export function DreamLogSection({ storage, l, refreshKey }: SectionProps) {
         )}
       </div>
       {reading ? (
-        <MemoryReaderModal entry={reading} onClose={() => setReading(null)} l={l} />
+        <MemoryReaderModal
+          entry={reading}
+          onClose={() => setReading(null)}
+          l={l}
+          onDelete={storage.deleteMemoryEntry ? deleteEntry : undefined}
+        />
       ) : null}
     </div>
   );

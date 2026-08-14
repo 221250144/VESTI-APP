@@ -628,6 +628,7 @@ const DEFAULT_LABELS: DashboardLabels = {
       inputPlaceholder: "Say something to Night Talk… (Enter to send, Shift+Enter for a new line)",
       send: "Send",
       thinking: "Night Talk is thinking…",
+      thinkingProcess: "Thinking process",
       errorTitle: "Night Talk couldn't catch that one",
     },
   },
@@ -859,6 +860,7 @@ const DEFAULT_LABELS: DashboardLabels = {
     summariesResult: "Finished: {done} generated, {failed} failed.",
     llmMissing: "No model configured — set up an LLM in Settings first, then generate summaries.",
     allSummarized: "Every conversation already has a structured summary.",
+    memberOnly: "AITI portrait generation is a Beta member feature — this account is currently on the free tier.",
   },
   learn: {
     modeLearn: "Learn",
@@ -979,6 +981,11 @@ type DashboardProps = {
    * request, cleared through the callback once the library applies it. */
   libraryPlatformFilter?: string | null;
   onLibraryPlatformFilterApplied?: () => void;
+  /**
+   * 会员门控: false (free tier) disables member-only entries (做梦 / AITI 画像
+   * generation) with a hint. Defaults to true so other hosts are unaffected.
+   */
+  membershipActive?: boolean;
 };
 
 export function VestiDashboard({
@@ -1004,6 +1011,7 @@ export function VestiDashboard({
   onTabChange,
   libraryPlatformFilter,
   onLibraryPlatformFilterApplied,
+  membershipActive = true,
 }: DashboardProps) {
   const labels = providedLabels ?? DEFAULT_LABELS;
   const SETTINGS_KEY = "vesti_llm_settings";
@@ -1096,7 +1104,8 @@ export function VestiDashboard({
   // one click; failures are counted and the run continues. 停止 cancels.
   const handleGenerateSummaries = useCallback(async () => {
     const generateSummary = storage.generateSummary;
-    if (!generateSummary || !aitiCoverage || summaryBatch?.status === "running") return;
+    // 会员门控: free-tier accounts never start the AITI generation batch.
+    if (!membershipActive || !generateSummary || !aitiCoverage || summaryBatch?.status === "running") return;
     const ids = planSummaryBatch(
       aitiCoverage.pendingConversationIds,
       aitiCoverage.pendingConversationIds.length
@@ -1130,7 +1139,7 @@ export function VestiDashboard({
       window.dispatchEvent(new CustomEvent("vesti:data-updated"));
     }
     await refreshAitiCoverage();
-  }, [storage, aitiCoverage, summaryBatch?.status, refreshAitiCoverage]);
+  }, [storage, aitiCoverage, summaryBatch?.status, refreshAitiCoverage, membershipActive]);
 
   const handleCancelSummaryBatch = useCallback(() => {
     summaryBatchCancelRef.current = true;
@@ -1658,6 +1667,7 @@ export function VestiDashboard({
                       storage.generateSummary ? handleGenerateSummaries : undefined
                     }
                     onCancelSummaryBatch={handleCancelSummaryBatch}
+                    memberLocked={!membershipActive}
                   />
                 </div>
               )}
@@ -1725,6 +1735,7 @@ export function VestiDashboard({
                 storage={storage}
                 labels={labels.deposits}
                 sendToLabels={labels.library}
+                dreamLocked={!membershipActive}
               />
             </div>
           )}

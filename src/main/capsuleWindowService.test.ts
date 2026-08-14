@@ -252,3 +252,19 @@ describe('CapsuleWindowService bubble form', () => {
     expect(service.getState().bubble).toBeNull();
   });
 });
+
+describe('drag end size normalization', () => {
+  it('keeps the ball at BALL_SIZE when the OS inflates reported bounds', async () => {
+    const { service, win } = await shownService();
+    service.handleDragStart(1876, 948);
+    service.handleDragMove(1500, 600);
+    // Windows transparent-window quirk: each getBounds→setBounds round trip
+    // inflates the reported height/width by a few px.
+    win.bounds = { ...win.bounds, width: BALL + 3, height: BALL + 3 };
+    await service.handleDragEnd(1500, 600);
+    expect(win.bounds.width).toBe(BALL);
+    expect(win.bounds.height).toBe(BALL);
+    expect(win.bounds.x).toBe(1472);
+    expect(win.bounds.y).toBe(572);
+  });
+});

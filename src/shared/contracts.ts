@@ -249,7 +249,7 @@ export interface NotionExportResult {
   url: string;
 }
 
-export type AgentKind = 'summary' | 'explore' | 'digest' | 'classify' | 'relay' | 'extract' | 'distill' | 'deposit-maintain' | 'daily' | 'persona' | 'roundtable-turn' | 'roundtable-synthesis' | 'learn-deepen' | 'learn-synthesis' | 'prompt-improve' | 'prompt-continue' | 'dream-extract' | 'dream-maintain' | 'companion';
+export type AgentKind = 'summary' | 'explore' | 'digest' | 'classify' | 'relay' | 'extract' | 'distill' | 'deposit-maintain' | 'daily' | 'persona' | 'roundtable-turn' | 'roundtable-synthesis' | 'learn-deepen' | 'learn-synthesis' | 'prompt-improve' | 'prompt-continue' | 'prompt-distill' | 'dream-extract' | 'dream-maintain' | 'companion';
 
 /** P4b deposit distillation templates ('custom' carries the user's own
  * instruction in AgentRunRequest.question). */
@@ -302,6 +302,27 @@ export interface AgentResult {
 export interface LlmTestResult {
   ok: boolean;
   message: string;
+}
+
+/**
+ * main → renderer live chunk of a streaming agent run (夜话 live typing).
+ * The renderer filters on runId; `delta` carries raw (pre-parse) answer text,
+ * `reasoning` the model's thinking trace when exposed, and `done` marks the
+ * final chunk sent right before the invoke resolves.
+ */
+export interface AgentStreamChunk {
+  runId: string;
+  delta?: string;
+  reasoning?: string;
+  done?: boolean;
+}
+
+/** DIY 猫头鹰皮肤 asset (custom-owl.png under the data directory), served to
+ * renderers as a data URL since neither the capsule nor the main window may
+ * read arbitrary filesystem paths. */
+export interface CustomOwlAsset {
+  dataUrl: string;
+  updatedAt: number;
 }
 
 export interface EmbeddingStatus {
@@ -519,6 +540,9 @@ export interface MembershipStatus {
   memberSince: number | null;
   expiresAt: number | null;
   daysRemaining: number;
+  /** Data-contribution consent recorded with the account (optional while the
+   * main-process side rolls out; renderers fall back to getDataContribution). */
+  dataContribution?: DataContributionState | null;
 }
 
 export interface MembershipCredentials {
@@ -536,11 +560,39 @@ export type MembershipErrorCode =
   | 'AUTHENTICATION_REQUIRED'
   | 'MEMBERSHIP_EXPIRED'
   | 'MEMBERSHIP_DATA_CORRUPT'
+  | 'CONSENT_REQUIRED'
   | 'STORAGE_ERROR';
 
 export type MembershipActionResult =
   | { ok: true; status: MembershipStatus }
   | { ok: false; status: MembershipStatus; error: MembershipErrorCode };
+
+// ---- Local credit ledger (Beta metering) ----
+
+/** 'member' = active Beta membership; 'free' = registered but expired. */
+export type CreditTier = 'member' | 'free';
+export type CreditCategory = 'chat' | 'image' | 'embedding';
+
+export interface CreditEntry {
+  ts: number;
+  category: CreditCategory;
+  credits: number;
+  label: string;
+}
+
+/** Public credit balance exposed to renderers (Beta: local ledger mode). */
+export interface CreditBalance {
+  tier: CreditTier;
+  /** Cycle allowance: 50,000 monthly (member) / 300 daily (free). */
+  quota: number;
+  used: number;
+  remaining: number;
+  /** Cycle-end timestamp (member anchor-day month / next local midnight). */
+  resetsAt: number;
+  lifetimeUsed: number;
+  /** Up to 20 most recent deductions, newest first. */
+  recent: CreditEntry[];
+}
 
 export const IPC = {
   windowMinimize: 'vesti:window-minimize',
@@ -553,6 +605,10 @@ export const IPC = {
   membershipLogin: 'vesti:membership-login',
   membershipLogout: 'vesti:membership-logout',
   membershipChanged: 'vesti:membership-changed',
+  membershipDataContributionGet: 'vesti:membership-data-contribution-get',
+  membershipDataContributionSet: 'vesti:membership-data-contribution-set',
+  creditBalance: 'vesti:credit-balance',
+  creditChanged: 'vesti:credit-changed',
   overview: 'vesti:overview',
   sessions: 'vesti:sessions',
   session: 'vesti:session',
@@ -561,6 +617,7 @@ export const IPC = {
   wslStatus: 'vesti:wsl-status',
   wslRedetect: 'vesti:wsl-redetect',
   changed: 'vesti:capture-changed',
+  agentActivity: 'vesti:agent-activity',
   settings: 'vesti:settings',
   settingsSave: 'vesti:settings-save',
   chooseDataDirectory: 'vesti:choose-data-directory',
@@ -572,6 +629,8 @@ export const IPC = {
   embeddingStatus: 'vesti:embedding-status',
   thinkingMapSemantics: 'vesti:thinking-map-semantics',
   agentRun: 'vesti:agent-run',
+  agentRunStream: 'vesti:agent-run-stream',
+  agentStreamChunk: 'vesti:agent-stream-chunk',
   agentResults: 'vesti:agent-results',
   exportConversations: 'vesti:export-conversations',
   conversationTree: 'vesti:conversation-tree',
@@ -637,6 +696,8 @@ export const IPC = {
   memoryImport: 'vesti:memory-import',
   memoryMetaGet: 'vesti:memory-meta-get',
   memoryMetaSet: 'vesti:memory-meta-set',
+  customOwlGenerate: 'vesti:custom-owl-generate',
+  customOwlRead: 'vesti:custom-owl-read',
 } as const;
 
 // ---- Desktop floating capsule ----
@@ -671,6 +732,19 @@ export const CAPSULE_BUBBLE_MOODS: readonly CapsuleBubbleMood[] = [
   'sleepy',
   'warm',
 ];
+
+/**
+ * Agent completion signal (完工提醒): the file watch stored new content for a
+ * session and the session then stayed quiet for a while — a good moment for
+ * the owl to surface a gentle notification.
+ */
+export interface AgentActivityPayload {
+  platform: CapturePlatform;
+  sessionId: string;
+  title: string;
+  /** Timestamp of the last stored activity (quiet period starts there). */
+  at: number;
+}
 
 /** Renderer → main request to show the capsule bubble form. */
 export interface CapsuleBubblePayload {
@@ -951,6 +1025,18 @@ export interface ConversationExportBundle {
   messages: VestiMessageRecord[];
 }
 
+/**
+ * Incremental conversation export. `bundles` carries only sessions whose
+ * content fingerprint moved since the main process's previous export (the
+ * first export after app start is a full snapshot); `sessionIds` always
+ * lists every current session's durable `_cli_id` so the renderer can
+ * reconcile upstream deletions without receiving unchanged payloads.
+ */
+export interface ConversationExportResult {
+  bundles: ConversationExportBundle[];
+  sessionIds: string[];
+}
+
 // ---- Browser extension bridge (Bridge Protocol v1) ----
 
 export interface ExtensionBridgeClientView {
@@ -1095,8 +1181,16 @@ export interface VestiDesktopApi {
     totalConversationCount: number,
   ): Promise<ThinkingMapSemanticIpcSnapshot>;
   runAgent(request: AgentRunRequest): Promise<AgentResult>;
+  /** Streaming variant: live chunks arrive via onAgentStreamChunk (filtered by
+   * runId) while the invoke resolves with the final parsed result. */
+  runAgentStream(request: AgentRunRequest, runId: string): Promise<AgentResult>;
+  onAgentStreamChunk(runId: string, listener: (chunk: AgentStreamChunk) => void): () => void;
+  /** DIY 猫头鹰皮肤: generate a custom owl through the gateway images API
+   * (member-only, credit-metered) / read the current one (null = none yet). */
+  generateCustomOwl(prompt: string): Promise<CustomOwlAsset>;
+  readCustomOwl(): Promise<CustomOwlAsset | null>;
   getAgentResults(): Promise<AgentResult[]>;
-  exportConversations(): Promise<ConversationExportBundle[]>;
+  exportConversations(): Promise<ConversationExportResult>;
   getConversationTree(): Promise<ConversationTree>;
   recallSessions(query: string, topK?: number): Promise<SessionRecallHit[]>;
   getProjectStates(): Promise<ProjectStateView[]>;
@@ -1113,6 +1207,8 @@ export interface VestiDesktopApi {
   onExtensionImportRequest(listener: (payload: ExtensionImportRequestPayload) => void): () => void;
   onExtensionBridgeChanged(callback: () => void): () => void;
   onCaptureChanged(callback: () => void): () => void;
+  /** main → renderer: an agent session went quiet after new activity (完工提醒). */
+  onAgentActivity(listener: (payload: AgentActivityPayload) => void): () => void;
   chooseDirectory(title?: string): Promise<string | null>;
   writeUpstreamFile(request: UpstreamWriteFileRequest): Promise<UpstreamWriteFileResult>;
   testNotionConnection(): Promise<NotionTestResult>;
@@ -1138,13 +1234,38 @@ export interface VestiDesktopApi {
   onMainTabNavigate(listener: (tab: string) => void): () => void;
 }
 
+/**
+ * Data-contribution (RL training data) consent state, stored with the account.
+ * The agreement text lives in docs/PRIVACY-DATA-CONTRIBUTION.md.
+ */
+export const PRIVACY_AGREEMENT_VERSION = '1.0';
+
+export interface DataContributionState {
+  enabled: boolean;
+  consentedAt: number | null;
+  /** Agreement version the user consented to. */
+  version: string | null;
+}
+
 /** Authentication bridge available before the product shell is unlocked. */
 export interface VestiMembershipApi {
   getStatus(): Promise<MembershipStatus>;
-  register(credentials: MembershipCredentials): Promise<MembershipActionResult>;
+  /** Registering (claiming the free beta membership) requires consenting to
+   * the privacy & data-contribution agreement: `dataConsent` must be true. */
+  register(credentials: MembershipCredentials, dataConsent: boolean): Promise<MembershipActionResult>;
   login(credentials: MembershipCredentials): Promise<MembershipActionResult>;
   logout(): Promise<MembershipStatus>;
+  getDataContribution(): Promise<DataContributionState>;
+  /** Turning contribution off is always allowed; turning it back on records a
+   * fresh consent timestamp (the UI re-shows the agreement first). */
+  setDataContribution(enabled: boolean): Promise<DataContributionState>;
   onStatusChanged(listener: (status: MembershipStatus) => void): () => void;
+}
+
+/** Credit ledger bridge, exposed as window.vestiCredits. */
+export interface VestiCreditApi {
+  getBalance(): Promise<CreditBalance>;
+  onChanged(listener: (balance: CreditBalance) => void): () => void;
 }
 
 /**

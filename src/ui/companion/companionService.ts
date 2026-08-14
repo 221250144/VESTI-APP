@@ -13,6 +13,7 @@
 import type {
   AgentResult,
   AgentRunRequest,
+  AgentStreamChunk,
   MemoryEntryListOptions,
   MemoryEntryView,
   SessionRecallHit,
@@ -30,20 +31,25 @@ import {
   addExploreMessage,
   createExploreSession,
   getRecentExploreMessages,
+  updateExploreSession,
 } from "../db/repository";
 
 // ---- Tunables ----------------------------------------------------------------
 
 /** Hard cap for the assembled context. The main process caps
- * transcriptOverride at 30K; 8K leaves ample headroom for the prompt
- * template around it. */
-export const COMPANION_CONTEXT_BUDGET_CHARS = 8_000;
+ * transcriptOverride at 30K; 16K feeds a generous memory section while
+ * leaving ample headroom for the prompt template around it. */
+export const COMPANION_CONTEXT_BUDGET_CHARS = 16_000;
 /** Deposit documents enter the context as a digest of this many chars. */
 export const COMPANION_DEPOSIT_DIGEST_CHARS = 200;
 /** Recall hit snippets are collapsed and capped at this many chars. */
 export const COMPANION_RECALL_SNIPPET_CHARS = 200;
 /** Recent turns of the current conversation fed back into the context. */
 export const COMPANION_HISTORY_LIMIT = 12;
+/** Long-term memories fetched per turn (trimmed to budget by tag priority). */
+export const COMPANION_MEMORY_LIMIT = 400;
+/** Cross-session recall hits fetched per question. */
+export const COMPANION_RECALL_TOP_K = 6;
 
 // ---- Public types --------------------------------------------------------------
 
@@ -63,6 +69,8 @@ export interface CompanionAnswer {
   persona: CompanionPersona;
   /** Answer body with the mood tag line stripped. */
   content: string;
+  /** Thinking trace when the turn streamed and the model exposed one. */
+  reasoning?: string;
   sources: RelatedConversation[];
 }
 
@@ -71,6 +79,18 @@ export interface AskCompanionInput {
   question: string;
   persona?: CompanionPersona;
   memoryScope?: CompanionMemoryScope;
+  /** Live-typing callbacks. When set (and the host bridge supports streaming)
+   * the turn streams: onStream gets the accumulated RAW answer text (mood tag
+   * line included — the UI hides it while typing), onReasoning the
+   * accumulated thinking trace. Without them the turn behaves exactly as
+   * before (single non-streaming call). */
+  onStream?: (accumulatedRaw: string) => void;
+  onReasoning?: (accumulated: string) => void;
+  /** Proactive opening turn (新的夜话): the owl opens the conversation from
+   * long-term memories alone — no user message is persisted, recall is skipped
+   * (there is no query to recall with) and the fresh session is renamed from
+   * the opener's first words. Only meaningful with an empty question. */
+  opener?: boolean;
 }
 
 /** agentMeta payload persisted on the assistant message: the explore fields
@@ -79,7 +99,14 @@ export type CompanionAgentMeta = ExploreAgentMeta & {
   mood?: CompanionMood;
   persona?: CompanionPersona;
   memoryScope?: CompanionMemoryScope;
+  /** Persisted thinking trace (capped) so the collapsible 思考过程 block
+   * survives a reload. */
+  reasoning?: string;
 };
+
+/** Persisted reasoning is a convenience for the 思考过程 fold, not a document —
+ * keep it bounded. */
+export const COMPANION_REASONING_PERSIST_CHARS = 4_000;
 
 // ---- Pure core (unit-tested) ----------------------------------------------------
 
@@ -178,40 +205,68 @@ function renderHistorySection(history: ExploreMessage[]): string | null {
 }
 
 /**
+ * 个人信息优先级: profile/preference/goal memories are the ones the user
+ * most wants the owl to "remember about me" — they enter the context first
+ * and are dropped last; within a tag, freshest first.
+ */
+export const COMPANION_MEMORY_TAG_PRIORITY: Record<string, number> = {
+  profile: 0,
+  preference: 1,
+  goal: 2,
+  emotion: 3,
+  relationship: 4,
+  event: 5,
+};
+
+export function prioritizeMemories(memories: MemoryEntryView[]): MemoryEntryView[] {
+  return [...memories].sort((a, b) => {
+    const pa = COMPANION_MEMORY_TAG_PRIORITY[a.tags[0] ?? ""] ?? 6;
+    const pb = COMPANION_MEMORY_TAG_PRIORITY[b.tags[0] ?? ""] ?? 6;
+    if (pa !== pb) return pa - pb;
+    return b.updatedAt - a.updatedAt;
+  });
+}
+
+/**
  * Assemble the companion context: up to four sections (【关于用户的长期记忆】
  * 【用户的沉淀文档（摘要）】 【相关历史对话片段】 【你们最近的交谈】), empty
  * sections omitted entirely, everything under a hard char budget. When over
- * budget, recall hits are dropped first (lowest-ranked last), then the
- * earliest history messages; a final hard slice guards against oversized
- * memory/deposit sections. An all-empty input yields '' (plain small talk).
+ * budget, sections shrink in rising-value order: recall hits first
+ * (lowest-ranked last), then deposit digests, then the earliest history
+ * messages, finally the lowest-priority memory lines; a final hard slice
+ * guards the remainder. An all-empty input yields '' (plain small talk).
  */
 export function buildCompanionContext(input: CompanionContextInput): string {
-  const fixedSections = [
-    renderMemorySection(input.memories),
-    renderDepositSection(input.depositDigests),
-  ];
-  const assemble = (
-    recallHits: SessionRecallHit[],
-    history: ExploreMessage[],
-  ): string =>
+  let memories = input.memories;
+  let deposits = input.depositDigests;
+  let recallHits = input.recallHits;
+  let history = input.history;
+  const assemble = (): string =>
     [
-      ...fixedSections,
+      renderMemorySection(memories),
+      renderDepositSection(deposits),
       renderRecallSection(recallHits),
       renderHistorySection(history),
     ]
       .filter((section): section is string => section !== null)
       .join("\n\n");
 
-  let recallHits = input.recallHits;
-  let history = input.history;
-  let text = assemble(recallHits, history);
+  let text = assemble();
   while (text.length > COMPANION_CONTEXT_BUDGET_CHARS && recallHits.length > 0) {
     recallHits = recallHits.slice(0, -1);
-    text = assemble(recallHits, history);
+    text = assemble();
+  }
+  while (text.length > COMPANION_CONTEXT_BUDGET_CHARS && deposits.length > 0) {
+    deposits = deposits.slice(0, -1);
+    text = assemble();
   }
   while (text.length > COMPANION_CONTEXT_BUDGET_CHARS && history.length > 0) {
     history = history.slice(1);
-    text = assemble(recallHits, history);
+    text = assemble();
+  }
+  while (text.length > COMPANION_CONTEXT_BUDGET_CHARS && memories.length > 0) {
+    memories = memories.slice(0, -1);
+    text = assemble();
   }
   if (text.length > COMPANION_CONTEXT_BUDGET_CHARS) {
     text = `${text.slice(0, COMPANION_CONTEXT_BUDGET_CHARS - 1)}…`;
@@ -286,9 +341,15 @@ export function mapCompanionRecallSources(
 /** Injectable seams so the turn pipeline is testable without Dexie/window. */
 export interface CompanionDeps {
   runAgent(request: AgentRunRequest): Promise<AgentResult>;
+  /** Streaming bridge pair — when absent the turn silently uses runAgent. */
+  runAgentStream?(request: AgentRunRequest, runId: string): Promise<AgentResult>;
+  onAgentStreamChunk?(runId: string, listener: (chunk: AgentStreamChunk) => void): () => void;
   listMemoryEntries(options?: MemoryEntryListOptions): Promise<MemoryEntryView[]>;
   recallSessions(query: string, topK?: number): Promise<SessionRecallHit[]>;
   createSession(title: string): Promise<string>;
+  /** Optional rename so an opener turn can retitle its fresh session from the
+   * opener's first words. */
+  renameSession?(sessionId: string, title: string): Promise<void>;
   getRecentMessages(sessionId: string, limit: number): Promise<ExploreMessage[]>;
   addMessage(
     sessionId: string,
@@ -338,9 +399,18 @@ async function listDexieCompanionConversations(): Promise<
 function defaultCompanionDeps(): CompanionDeps {
   return {
     runAgent: (request) => requireVestiApi().runAgent(request),
+    runAgentStream: (request, runId) => {
+      const api = requireVestiApi();
+      if (!api.runAgentStream) throw new Error("流式通道不可用");
+      return api.runAgentStream(request, runId);
+    },
+    onAgentStreamChunk: (runId, listener) =>
+      requireVestiApi().onAgentStreamChunk?.(runId, listener) ?? (() => undefined),
     listMemoryEntries: (options) => requireVestiApi().listMemoryEntries(options),
     recallSessions: (query, topK) => requireVestiApi().recallSessions(query, topK),
     createSession: (title) => createExploreSession(title),
+    renameSession: (sessionId, title) =>
+      updateExploreSession(sessionId, { title }),
     getRecentMessages: (sessionId, limit) => getRecentExploreMessages(sessionId, limit),
     addMessage: (sessionId, message) => addExploreMessage(sessionId, message),
     listConversationRecords: listDexieCompanionConversations,
@@ -359,27 +429,35 @@ export async function askCompanion(
 ): Promise<CompanionAnswer> {
   const persona: CompanionPersona = input.persona ?? "listener";
   const memoryScope: CompanionMemoryScope = input.memoryScope ?? "full";
+  // Opener turns: the owl speaks first. No user message exists to persist or
+  // to recall with — memories/deposits carry the whole context.
+  const isOpener = input.opener === true && !input.question.trim();
   const question = input.question;
   const sessionId =
-    input.sessionId ?? (await deps.createSession(`夜话 · ${question.slice(0, 18)}`));
+    input.sessionId ??
+    (await deps.createSession(
+      isOpener ? "夜话 · 新的开场" : `夜话 · ${question.slice(0, 18)}`,
+    ));
 
   const wantMemory = memoryScope !== "chat";
-  const wantRecall = memoryScope === "full";
+  const wantRecall = memoryScope === "full" && !isOpener;
   const [history, memories, depositDigests, recallHits] = await Promise.all([
     deps.getRecentMessages(sessionId, COMPANION_HISTORY_LIMIT),
     wantMemory
-      ? deps.listMemoryEntries({ kind: "dream", status: "active", limit: 100 })
+      ? deps
+          .listMemoryEntries({ kind: "dream", status: "active", limit: COMPANION_MEMORY_LIMIT })
+          .then(prioritizeMemories)
       : Promise.resolve([] as MemoryEntryView[]),
     wantMemory
       ? deps.listMemoryEntries({ kind: "deposit", status: "active", limit: 5 })
       : Promise.resolve([] as MemoryEntryView[]),
     wantRecall
-      ? deps.recallSessions(question, 4).catch(() => [] as SessionRecallHit[])
+      ? deps.recallSessions(question, COMPANION_RECALL_TOP_K).catch(() => [] as SessionRecallHit[])
       : Promise.resolve([] as SessionRecallHit[]),
   ]);
 
   const context = buildCompanionContext({ memories, depositDigests, recallHits, history });
-  const result = await deps.runAgent({
+  const request: AgentRunRequest = {
     kind: "companion",
     sessionId,
     question,
@@ -389,25 +467,58 @@ export async function askCompanion(
     // fresh session) still needs a non-blank placeholder riding the channel.
     transcriptOverride: context.trim() ? context : "（暂无可参考的记忆或对话前文）",
     persist: false,
-  });
+  };
+
+  // Streaming is opt-in per turn: the UI passes live-typing callbacks and the
+  // host bridge must expose the stream pair; otherwise the plain call runs.
+  let reasoning = "";
+  let result: AgentResult;
+  if (input.onStream && deps.runAgentStream && deps.onAgentStreamChunk) {
+    const runId = crypto.randomUUID();
+    let accumulated = "";
+    const off = deps.onAgentStreamChunk(runId, (chunk) => {
+      if (chunk.delta) {
+        accumulated += chunk.delta;
+        input.onStream?.(accumulated);
+      }
+      if (chunk.reasoning) {
+        reasoning += chunk.reasoning;
+        input.onReasoning?.(reasoning);
+      }
+    });
+    try {
+      result = await deps.runAgentStream(request, runId);
+    } finally {
+      off();
+    }
+  } else {
+    result = await deps.runAgent(request);
+  }
   const { mood, body } = splitCompanionResult(result.content);
+  const trimmedReasoning = reasoning.trim();
+  const persistedReasoning = trimmedReasoning
+    ? trimmedReasoning.slice(0, COMPANION_REASONING_PERSIST_CHARS)
+    : undefined;
   const sources =
     recallHits.length > 0
       ? mapCompanionRecallSources(recallHits, await deps.listConversationRecords())
       : [];
 
   const now = deps.now();
-  await deps.addMessage(sessionId, {
-    role: "user",
-    content: question,
-    timestamp: now,
-  });
+  if (!isOpener) {
+    await deps.addMessage(sessionId, {
+      role: "user",
+      content: question,
+      timestamp: now,
+    });
+  }
   const agentMeta: CompanionAgentMeta = {
     mode: "agent",
     toolCalls: [],
     mood,
     persona,
     memoryScope,
+    ...(persistedReasoning ? { reasoning: persistedReasoning } : {}),
   };
   await deps.addMessage(sessionId, {
     role: "assistant",
@@ -417,5 +528,24 @@ export async function askCompanion(
     timestamp: now + 1,
   });
 
-  return { sessionId, mood, persona, content: body, sources };
+  // An opener session was created with a placeholder title; retitle it from
+  // the opener's first words. Best-effort — a rename failure must not sink
+  // the turn.
+  if (isOpener && deps.renameSession) {
+    const firstWords = firstLine(body, 12);
+    if (firstWords) {
+      await deps
+        .renameSession(sessionId, `夜话 · ${firstWords}`)
+        .catch(() => undefined);
+    }
+  }
+
+  return {
+    sessionId,
+    mood,
+    persona,
+    content: body,
+    sources,
+    ...(persistedReasoning ? { reasoning: persistedReasoning } : {}),
+  };
 }

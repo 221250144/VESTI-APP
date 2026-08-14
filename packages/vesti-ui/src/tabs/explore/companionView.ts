@@ -86,6 +86,9 @@ export interface CompanionMessageView {
    * line, else calm. User rows carry calm (unused). */
   mood: CompanionMood;
   persona?: CompanionPersona;
+  /** Persisted thinking trace (streaming turns); the chat folds it into a
+   * collapsible 思考过程 block above the answer bubble. */
+  reasoning?: string;
   sources?: RelatedConversation[];
   timestamp: number;
 }
@@ -101,6 +104,7 @@ export function toCompanionMessageView(message: ExploreMessage): CompanionMessag
     };
   }
   const metaMood = message.agentMeta?.mood;
+  const reasoning = message.agentMeta?.reasoning?.trim();
   return {
     id: message.id,
     role: "assistant",
@@ -110,9 +114,30 @@ export function toCompanionMessageView(message: ExploreMessage): CompanionMessag
         ? normalizeCompanionMood(metaMood)
         : (sniffMoodLine(message.content) ?? DEFAULT_COMPANION_MOOD),
     persona: message.agentMeta?.persona,
+    ...(reasoning ? { reasoning } : {}),
     sources: message.sources,
     timestamp: message.timestamp,
   };
+}
+
+// ---- live-stream display ---------------------------------------------------------
+
+const FULL_MOOD_TAG_PATTERN = /^[\[【]\s*mood\s*:\s*[A-Za-z]+\s*[\]】]$/;
+/** A partial first line that could still grow into a [mood:xxx] tag. */
+const MOOD_TAG_PREFIX_PATTERN = /^[\[【]?\s*(m?o?o?d?\s*:?)?\s*[A-Za-z]*\s*[\]】]?$/;
+
+/** What the streaming bubble shows while the RAW answer is still typing: the
+ * [mood:xxx] tag line is chrome, not content — hide it (including its
+ * in-progress prefixes) and only reveal the body once it starts arriving. */
+export function streamDisplayBody(raw: string): string {
+  const newline = raw.indexOf("\n");
+  const firstLine = (newline === -1 ? raw : raw.slice(0, newline)).trim();
+  const isTagLine =
+    FULL_MOOD_TAG_PATTERN.test(firstLine) || MOOD_LINE_PATTERN.test(firstLine);
+  if (newline === -1) {
+    return isTagLine || MOOD_TAG_PREFIX_PATTERN.test(firstLine) ? "" : raw;
+  }
+  return isTagLine ? raw.slice(newline + 1).trimStart() : raw;
 }
 
 /** Sidebar preview: the stored preview of a companion turn starts with the

@@ -70,9 +70,14 @@ export const jaDesktopCompletion = {
       dreamFullRebuild: "全量やり直し",
       dreamFullConfirm: "全量やり直しはすべての会話履歴を再整理するため、時間がかかります。続行しますか？",
       dreamFailed: "夢の実行に失敗：{message}",
+      dreamMemberOnly: "夢を見る機能は Beta メンバー専用です。このアカウントは現在無料版です。",
       memoryEmpty: "まだメモリーがありません。眠って夢を見ましょう。", memoryTagEmpty: "このタグのメモリーはまだありません。",
       dreamLogEmpty: "夢ログはまだありません。夢を実行すると記録されます。",
       tagAll: "すべて", tagProfile: "背景", tagPreference: "好み", tagGoal: "目標", tagEmotion: "感情", tagRelationship: "協働", tagEvent: "出来事",
+      memorySearch: "メモリーを検索…", memorySearchEmpty: "一致するメモリーがありません。",
+      updatedAt: "{date} に更新", sourceSessions: "ソースセッション",
+      edit: "編集", saving: "保存中…",
+      memoryDeleteConfirm: "もう一度クリックして削除",
       close: "閉じる",
     },
     daily: {
@@ -90,7 +95,7 @@ export const jaDesktopCompletion = {
     aiti: {
       axisSignalFaint: "弱いシグナル", imageryFaint: "輪郭はまだ淡く、一部の軸はシグナルを集めている途中です。軽い参考として読んでください。",
       personaNoteLabel: "心の欄外注", evidenceBecause: "あなたらしさが表れている理由…", evidenceConversation: "会話 #{id}", exportCard: "イメージカードを出力",
-      mindMapTitle: "思考マップ", repoQrCaption: "オープンソース — スキャンしてリポジトリへ", coverageSummary: "{y} 件中 {x} 件を要約済み（構造化 {z} 件）", coverageNeedMore: "イメージには構造化要約が 5 件必要です。あと {n} 件です。", coverageEmpty: "会話がまだありません。先に AI セッションを同期すると要約を生成できます。", generateSummaries: "要約を生成", generatingSummaries: "生成中 {done}/{total}…", cancelGeneration: "停止", summariesResult: "完了：{done} 件生成、{failed} 件失敗。", llmMissing: "モデルが未設定です。先に設定で LLM を構成してから要約を生成してください。", allSummarized: "すべての会話に構造化要約があります。",
+      mindMapTitle: "思考マップ", repoQrCaption: "オープンソース — スキャンしてリポジトリへ", coverageSummary: "{y} 件中 {x} 件を要約済み（構造化 {z} 件）", coverageNeedMore: "イメージには構造化要約が 5 件必要です。あと {n} 件です。", coverageEmpty: "会話がまだありません。先に AI セッションを同期すると要約を生成できます。", generateSummaries: "要約を生成", generatingSummaries: "生成中 {done}/{total}…", cancelGeneration: "停止", summariesResult: "完了：{done} 件生成、{failed} 件失敗。", llmMissing: "モデルが未設定です。先に設定で LLM を構成してから要約を生成してください。", allSummarized: "すべての会話に構造化要約があります。", memberOnly: "AITI 画像の生成は Beta メンバー専用機能です。このアカウントは現在無料版です。",
     },
     explore: {
       libraryEmptyTitle: "まだ呼び出せるものがありません", libraryEmptyHint: "先に AI セッションを同期してください。回答は会話ライブラリ全体から呼び出され、出典付きで示されます。", fromSubagent: "（サブエージェントより）",
@@ -113,6 +118,7 @@ export const jaDesktopCompletion = {
         inputPlaceholder: "夜話に話しかける…（Enter で送信、Shift+Enter で改行）",
         send: "送信",
         thinking: "夜話が考え中…",
+        thinkingProcess: "思考プロセス",
         errorTitle: "夜話がうまく受け取れませんでした",
       },
     },
@@ -209,9 +215,14 @@ export const koDesktopCompletion = {
       dreamFullRebuild: "전체 재정리",
       dreamFullConfirm: "전체 재정리는 모든 대화 기록을 다시 정리하므로 시간이 오래 걸립니다. 계속할까요?",
       dreamFailed: "꿈 실행 실패: {message}",
+      dreamMemberOnly: "꿈꾸기는 Beta 멤버 전용 기능입니다. 현재 계정은 무료 버전입니다.",
       memoryEmpty: "아직 기억이 없습니다. 잠을 자며 꿈을 꿔보세요.", memoryTagEmpty: "이 태그에는 아직 기억이 없습니다.",
       dreamLogEmpty: "아직 꿈 로그가 없습니다. 꿈을 실행하면 로그가 남습니다.",
       tagAll: "전체", tagProfile: "배경", tagPreference: "선호", tagGoal: "목표", tagEmotion: "감정", tagRelationship: "협업", tagEvent: "사건",
+      memorySearch: "기억 검색…", memorySearchEmpty: "검색과 일치하는 기억이 없습니다.",
+      updatedAt: "{date} 업데이트됨", sourceSessions: "소스 세션",
+      edit: "편집", saving: "저장 중…",
+      memoryDeleteConfirm: "한 번 더 클릭하면 삭제됩니다",
       close: "닫기",
     },
     daily: {
@@ -229,7 +240,7 @@ export const koDesktopCompletion = {
     aiti: {
       axisSignalFaint: "희미한 신호", imageryFaint: "윤곽이 아직 희미합니다. 일부 축은 신호를 모으는 중이므로 가볍게 참고하세요.",
       personaNoteLabel: "마음의 각주", evidenceBecause: "이 모습이 당신다운 이유…", evidenceConversation: "대화 #{id}", exportCard: "이미지 카드 내보내기",
-      mindMapTitle: "사고 지도", repoQrCaption: "오픈 소스 — 스캔하여 저장소로 이동", coverageSummary: "대화 {y}개 중 {x}개 요약됨(구조화 {z}개)", coverageNeedMore: "이미지를 만들려면 구조화된 요약이 5개 필요합니다. {n}개 남았습니다.", coverageEmpty: "아직 대화가 없습니다. 먼저 AI 세션을 동기화하면 요약을 생성할 수 있습니다.", generateSummaries: "요약 생성", generatingSummaries: "생성 중 {done}/{total}…", cancelGeneration: "중지", summariesResult: "완료: {done}개 생성, {failed}개 실패.", llmMissing: "모델이 구성되지 않았습니다. 먼저 설정에서 LLM을 구성한 뒤 요약을 생성하세요.", allSummarized: "모든 대화에 구조화된 요약이 있습니다.",
+      mindMapTitle: "사고 지도", repoQrCaption: "오픈 소스 — 스캔하여 저장소로 이동", coverageSummary: "대화 {y}개 중 {x}개 요약됨(구조화 {z}개)", coverageNeedMore: "이미지를 만들려면 구조화된 요약이 5개 필요합니다. {n}개 남았습니다.", coverageEmpty: "아직 대화가 없습니다. 먼저 AI 세션을 동기화하면 요약을 생성할 수 있습니다.", generateSummaries: "요약 생성", generatingSummaries: "생성 중 {done}/{total}…", cancelGeneration: "중지", summariesResult: "완료: {done}개 생성, {failed}개 실패.", llmMissing: "모델이 구성되지 않았습니다. 먼저 설정에서 LLM을 구성한 뒤 요약을 생성하세요.", allSummarized: "모든 대화에 구조화된 요약이 있습니다.", memberOnly: "AITI 프로필 생성은 Beta 멤버 전용 기능입니다. 현재 계정은 무료 버전입니다.",
     },
     explore: {
       libraryEmptyTitle: "아직 불러올 내용이 없습니다", libraryEmptyHint: "먼저 AI 세션을 동기화하세요. 답변은 대화 라이브러리 전체에서 불러오며 출처와 함께 표시됩니다.", fromSubagent: "(서브 에이전트에서)",
@@ -252,6 +263,7 @@ export const koDesktopCompletion = {
         inputPlaceholder: "밤의 대화에 말을 걸어 보세요… (Enter 전송, Shift+Enter 줄바꿈)",
         send: "보내기",
         thinking: "밤의 대화가 생각 중…",
+        thinkingProcess: "생각 과정",
         errorTitle: "밤의 대화가 이번 말을 받지 못했어요",
       },
     },

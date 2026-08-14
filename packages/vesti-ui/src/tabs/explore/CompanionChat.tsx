@@ -20,7 +20,11 @@ import type {
   ExploreMessage,
 } from "../../types";
 import { ExploreSourceChips } from "../../components/ExploreBits";
-import { toCompanionMessageView, type CompanionMessageView } from "./companionView";
+import {
+  streamDisplayBody,
+  toCompanionMessageView,
+  type CompanionMessageView,
+} from "./companionView";
 
 // ---- owl avatar ------------------------------------------------------------------
 
@@ -135,6 +139,16 @@ function AssistantRow({
         <OwlAvatar icons={owlIcons} mood={view.mood} className="h-9 w-9 shrink-0 rounded-full" />
         <div className="min-w-0 flex-1">
           <p className="mb-1 text-xs font-sans text-text-tertiary">{labels.companion.title}</p>
+          {view.reasoning ? (
+            <details className="mb-2 rounded-xl border border-border-subtle bg-bg-primary px-3 py-2">
+              <summary className="cursor-pointer select-none text-xs font-sans text-text-tertiary transition-colors hover:text-text-primary">
+                {labels.companion.thinkingProcess}
+              </summary>
+              <p className="mt-2 whitespace-pre-wrap text-xs font-sans leading-relaxed text-text-secondary">
+                {view.reasoning}
+              </p>
+            </details>
+          ) : null}
           <div className="rounded-2xl rounded-tl-sm border border-border-subtle bg-bg-surface-card px-4 py-3">
             <CompanionMarkdown body={view.body} />
           </div>
@@ -146,6 +160,55 @@ function AssistantRow({
               <ExploreSourceChips sources={view.sources} onOpenConversation={onOpenConversation} />
             </div>
           ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** The in-flight streaming bubble: live-typed body (mood tag line hidden) and
+ * the thinking trace folding open while it grows. */
+function StreamingRow({
+  labels,
+  owlIcons,
+  streaming,
+}: {
+  labels: ExploreLabels;
+  owlIcons: CompanionOwlIcons | undefined;
+  streaming: { raw: string; reasoning: string };
+}) {
+  const body = streamDisplayBody(streaming.raw);
+  return (
+    <div className="py-3">
+      <div className="mx-auto flex max-w-3xl gap-3 px-4">
+        <OwlAvatar
+          icons={owlIcons}
+          mood="thinking"
+          className="h-9 w-9 shrink-0 animate-pulse rounded-full"
+        />
+        <div className="min-w-0 flex-1">
+          <p className="mb-1 text-xs font-sans text-text-tertiary">{labels.companion.title}</p>
+          {streaming.reasoning.trim() ? (
+            <details open className="mb-2 rounded-xl border border-border-subtle bg-bg-primary px-3 py-2">
+              <summary className="cursor-pointer select-none text-xs font-sans text-text-tertiary transition-colors hover:text-text-primary">
+                {labels.companion.thinkingProcess}
+              </summary>
+              <p className="mt-2 whitespace-pre-wrap text-xs font-sans leading-relaxed text-text-secondary">
+                {streaming.reasoning}
+              </p>
+            </details>
+          ) : null}
+          <div className="rounded-2xl rounded-tl-sm border border-border-subtle bg-bg-surface-card px-4 py-3">
+            {body ? (
+              <CompanionMarkdown body={body} />
+            ) : (
+              <span className="flex items-center gap-1" aria-hidden="true">
+                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-accent-primary [animation-delay:0ms]" />
+                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-accent-primary [animation-delay:150ms]" />
+                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-accent-primary [animation-delay:300ms]" />
+              </span>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -229,6 +292,8 @@ export interface CompanionChatProps {
   messages: ExploreMessage[];
   messagesLoading: boolean;
   isSubmitting: boolean;
+  /** In-flight streaming turn (null = idle or host without streaming). */
+  streaming?: { raw: string; reasoning: string } | null;
   error: string | null;
   onDismissError: () => void;
   currentSessionTitle?: string | null;
@@ -254,6 +319,7 @@ export function CompanionChat({
   messages,
   messagesLoading,
   isSubmitting,
+  streaming,
   error,
   onDismissError,
   currentSessionTitle,
@@ -371,7 +437,11 @@ export function CompanionChat({
                 />
               ),
             )}
-            {isSubmitting ? <ThinkingRow labels={labels} owlIcons={owlIcons} /> : null}
+            {streaming ? (
+              <StreamingRow labels={labels} owlIcons={owlIcons} streaming={streaming} />
+            ) : isSubmitting ? (
+              <ThinkingRow labels={labels} owlIcons={owlIcons} />
+            ) : null}
             {error ? (
               <ErrorRow
                 error={error}

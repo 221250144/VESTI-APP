@@ -101,3 +101,81 @@ describe('AgentService Demo proxy contract', () => {
     expect(result.modelUsed).toBe('legacy/qwen-plus');
   });
 });
+
+describe('AgentService.runStream', () => {
+  beforeEach(() => {
+    vi.mocked(net.fetch).mockReset();
+  });
+
+  const sseBody = (frames: string[]) =>
+    new Response(frames.map((frame) => `data: ${frame}\n\n`).join(''), { status: 200 });
+
+  it('streams SSE deltas to emit and resolves with the parsed result', async () => {
+    vi.mocked(net.fetch).mockResolvedValue(sseBody([
+      JSON.stringify({ model: 'deepseek-v4-flash', choices: [{ delta: { reasoning_content: '想想…' } }] }),
+      JSON.stringify({ choices: [{ delta: { content: 'Use' } }] }),
+      JSON.stringify({ choices: [{ delta: { content: 'ful answer' } }] }),
+      JSON.stringify({ choices: [], usage: { prompt_tokens: 10, completion_tokens: 4 } }),
+      '[DONE]',
+    ]));
+
+    const chunks: Array<{ delta?: string; reasoning?: string; done?: boolean }> = [];
+    const result = await service(runtime({ baseUrl: 'https://vesti.world/gate/api' }))
+      .runStream(request, (chunk) => chunks.push(chunk), { persist: false });
+
+    expect(result.content).toBe('Useful answer');
+    expect(result.modelUsed).toBe('deepseek-v4-flash');
+    expect(chunks).toEqual([
+      { delta: undefined, reasoning: '想想…' },
+      { delta: 'Use', reasoning: undefined },
+      { delta: 'ful answer', reasoning: undefined },
+      { done: true },
+    ]);
+    // The demo gateway streams over the OpenAI-compatible /v1 surface.
+    const [url, init] = vi.mocked(net.fetch).mock.calls[0];
+    expect(url).toBe('https://vesti.world/gate/v1/chat/completions');
+    expect((init?.headers as Record<string, string>)['x-vesti-service-token']).toBe('test-service-token');
+    const body = JSON.parse(String(init?.body));
+    expect(body.stream).toBe(true);
+    expect(body.stream_options).toEqual({ include_usage: true });
+  });
+
+  it('degrades to the non-streaming call when the transport fails before any delta', async () => {
+    vi.mocked(net.fetch)
+      .mockRejectedValueOnce(new Error('connection reset'))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        choices: [{ message: { content: 'Non-stream answer' } }],
+      }), { status: 200 }));
+
+    const chunks: Array<{ delta?: string; reasoning?: string; done?: boolean }> = [];
+    const result = await service().runStream(request, (chunk) => chunks.push(chunk), { persist: false });
+
+    expect(result.content).toBe('Non-stream answer');
+    expect(chunks).toEqual([{ done: true }]);
+    // First call = stream endpoint; the fallback re-uses the legacy /chat route.
+    expect(vi.mocked(net.fetch)).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(net.fetch).mock.calls[0][0]).toBe('https://api.ccvg1218.online/v1/chat/completions');
+    expect(vi.mocked(net.fetch).mock.calls[1][0]).toBe('https://api.ccvg1218.online/api/chat');
+  });
+
+  it('does not retry once a delta was already shown', async () => {
+    const brokenStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(
+          'data: {"choices":[{"delta":{"content":"部分"}}]}\n\n',
+        ));
+        // Async error: undici discards a synchronously-errored stream's queued
+        // chunk, real mid-stream failures deliver the chunk first.
+        setTimeout(() => controller.error(new Error('mid-stream boom')), 0);
+      },
+    });
+    vi.mocked(net.fetch).mockResolvedValue(new Response(brokenStream, { status: 200 }));
+
+    const chunks: Array<{ delta?: string }> = [];
+    await expect(
+      service().runStream(request, (chunk) => chunks.push(chunk), { persist: false }),
+    ).rejects.toThrow('mid-stream boom');
+    expect(chunks).toEqual([{ delta: '部分', reasoning: undefined }]);
+    expect(vi.mocked(net.fetch)).toHaveBeenCalledTimes(1);
+  });
+});

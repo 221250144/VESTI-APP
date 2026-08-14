@@ -1032,6 +1032,7 @@ export const enTranslations = {
       dreamFullRebuild: "Full rebuild",
       dreamFullConfirm: "A full rebuild re-organizes your entire history and can take a long time. Continue?",
       dreamFailed: "Dream failed: {message}",
+      dreamMemberOnly: "Dreaming is a Beta member feature — this account is currently on the free tier.",
       memoryEmpty: "No memories yet — sleep on it and have a dream.",
       memoryTagEmpty: "No memories under this tag yet.",
       dreamLogEmpty: "No dream logs yet — run a dream and one will be left here.",
@@ -1042,6 +1043,13 @@ export const enTranslations = {
       tagEmotion: "Emotion",
       tagRelationship: "Collaboration",
       tagEvent: "Event",
+      memorySearch: "Search memories…",
+      memorySearchEmpty: "No memories match this search.",
+      updatedAt: "Updated {date}",
+      sourceSessions: "Source sessions",
+      edit: "Edit",
+      saving: "Saving…",
+      memoryDeleteConfirm: "Click again to delete",
       close: "Close",
     },
     daily: {
@@ -1403,6 +1411,7 @@ export const enTranslations = {
         send: "Send",
         thinking: "Night Talk is thinking…",
         errorTitle: "Night Talk couldn't catch that one",
+        thinkingProcess: "Thinking process",
       },
     },
     data: {
@@ -1633,6 +1642,7 @@ export const enTranslations = {
       summariesResult: "Finished: {done} generated, {failed} failed.",
       llmMissing: "No model configured — set up an LLM in Settings first, then generate summaries.",
       allSummarized: "Every conversation already has a structured summary.",
+      memberOnly: "AITI portrait generation is a Beta member feature — this account is currently on the free tier.",
     },
     learn: {
       modeLearn: "Learn",

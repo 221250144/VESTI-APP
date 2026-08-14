@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { PRIVACY_AGREEMENT_VERSION } from '../shared/contracts';
 import {
   BETA_MEMBERSHIP_MONTHS,
   MEMBERSHIP_FILE_NAME,
@@ -28,7 +29,14 @@ describe('MembershipService', () => {
       state: 'unregistered',
       registered: false,
       canUseApp: false,
+      dataContribution: null,
     });
+    expect(service.getDataContribution()).toEqual({
+      enabled: false,
+      consentedAt: null,
+      version: null,
+    });
+    await expect(service.getContributorId()).resolves.toBeNull();
     expect(() => service.requireActiveMember()).toThrowError(
       expect.objectContaining({ code: 'AUTHENTICATION_REQUIRED' }),
     );
@@ -38,7 +46,7 @@ describe('MembershipService', () => {
     const service = createService();
     await service.initialize();
 
-    const status = await service.register({ username: '测试用户', password: 'correct horse battery' });
+    const status = await service.register({ username: '测试用户', password: 'correct horse battery' }, true);
 
     expect(status).toMatchObject({
       state: 'active',
@@ -60,7 +68,7 @@ describe('MembershipService', () => {
     const service = createService();
     await service.initialize();
     const password = 'never-write-this-password';
-    await service.register({ username: 'beta-user', password });
+    await service.register({ username: 'beta-user', password }, true);
 
     const raw = await fs.readFile(path.join(directory, MEMBERSHIP_FILE_NAME), 'utf8');
     const stored = JSON.parse(raw) as {
@@ -76,7 +84,7 @@ describe('MembershipService', () => {
   it('persists the signed-in session across service restarts', async () => {
     const first = createService();
     await first.initialize();
-    await first.register({ username: 'Beta.User', password: 'password-123' });
+    await first.register({ username: 'Beta.User', password: 'password-123' }, true);
 
     const restarted = createService();
     expect(await restarted.initialize()).toMatchObject({
@@ -97,7 +105,7 @@ describe('MembershipService', () => {
   it('validates credentials without leaking whether only one field was wrong', async () => {
     const service = createService();
     await service.initialize();
-    await service.register({ username: 'Beta-User', password: 'password-123' });
+    await service.register({ username: 'Beta-User', password: 'password-123' }, true);
     await service.logout();
 
     await expect(service.login({ username: 'other-user', password: 'password-123' }))
@@ -112,27 +120,27 @@ describe('MembershipService', () => {
   it('allows only one local registration', async () => {
     const service = createService();
     await service.initialize();
-    await service.register({ username: 'first-user', password: 'password-123' });
+    await service.register({ username: 'first-user', password: 'password-123' }, true);
 
-    await expect(service.register({ username: 'second-user', password: 'password-456' }))
+    await expect(service.register({ username: 'second-user', password: 'password-456' }, true))
       .rejects.toMatchObject({ code: 'ALREADY_REGISTERED' });
   });
 
-  it('marks the membership expired at the exact expiry time and blocks access', async () => {
+  it('marks the membership expired at the exact expiry time and downgrades to the free tier', async () => {
     const service = createService();
     await service.initialize();
-    const registered = await service.register({ username: 'beta-user', password: 'password-123' });
+    const registered = await service.register({ username: 'beta-user', password: 'password-123' }, true);
     now = registered.expiresAt!;
 
     expect(service.getStatus()).toMatchObject({
       state: 'expired',
       authenticated: true,
-      canUseApp: false,
+      active: false,
+      // Free tier: an expired-but-signed-in account keeps using the app.
+      canUseApp: true,
       daysRemaining: 0,
     });
-    expect(() => service.requireActiveMember()).toThrowError(
-      expect.objectContaining({ code: 'MEMBERSHIP_EXPIRED' }),
-    );
+    expect(service.requireActiveMember().username).toBe('beta-user');
   });
 
   it('rejects malformed account data instead of silently granting access', async () => {
@@ -151,11 +159,106 @@ describe('MembershipService', () => {
     const service = createService();
     await service.initialize();
 
-    await expect(service.register({ username: '../invalid', password: 'password-123' }))
+    await expect(service.register({ username: '../invalid', password: 'password-123' }, true))
       .rejects.toMatchObject({ code: 'INVALID_USERNAME' });
-    await expect(service.register({ username: 'valid-user', password: 'short' }))
+    await expect(service.register({ username: 'valid-user', password: 'short' }, true))
       .rejects.toMatchObject({ code: 'WEAK_PASSWORD' });
     await expect(fs.access(path.join(directory, MEMBERSHIP_FILE_NAME))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  // ---- Data contribution consent (docs/PRIVACY-DATA-CONTRIBUTION.md) ----
+
+  it('refuses registration without data-contribution consent', async () => {
+    const service = createService();
+    await service.initialize();
+
+    await expect(service.register({ username: 'beta-user', password: 'password-123' }, false))
+      .rejects.toMatchObject({ code: 'CONSENT_REQUIRED' });
+    // No account may be persisted when consent is missing.
+    await expect(fs.access(path.join(directory, MEMBERSHIP_FILE_NAME))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('records consent, agreement version and a contributor id at registration', async () => {
+    const service = createService();
+    await service.initialize();
+
+    const status = await service.register({ username: 'beta-user', password: 'password-123' }, true);
+
+    expect(status.dataContribution).toEqual({
+      enabled: true,
+      consentedAt: now,
+      version: PRIVACY_AGREEMENT_VERSION,
+    });
+    expect(service.getDataContribution()).toEqual(status.dataContribution);
+    const contributorId = await service.getContributorId();
+    expect(contributorId).toMatch(/^[0-9a-f-]{36}$/);
+    // The id is stable across calls and service restarts.
+    expect(await service.getContributorId()).toBe(contributorId);
+    const restarted = createService();
+    await restarted.initialize();
+    expect(await restarted.getContributorId()).toBe(contributorId);
+  });
+
+  it('migrates pre-contribution accounts to opted-out defaults and backfills the contributor id lazily', async () => {
+    const first = createService();
+    await first.initialize();
+    await first.register({ username: 'beta-user', password: 'password-123' }, true);
+
+    // Simulate a membership.json written before data contribution existed.
+    const filePath = path.join(directory, MEMBERSHIP_FILE_NAME);
+    const stored = JSON.parse(await fs.readFile(filePath, 'utf8')) as {
+      account: Record<string, unknown>;
+    };
+    delete stored.account.contributorId;
+    delete stored.account.dataContribution;
+    await fs.writeFile(filePath, JSON.stringify(stored), 'utf8');
+
+    const migrated = createService();
+    const status = await migrated.initialize();
+    // Existing users never get contribution enabled by default.
+    expect(status.dataContribution).toEqual({ enabled: false, consentedAt: null, version: null });
+    expect(migrated.getDataContribution()).toEqual({ enabled: false, consentedAt: null, version: null });
+
+    const contributorId = await migrated.getContributorId();
+    expect(contributorId).toMatch(/^[0-9a-f-]{36}$/);
+    const persisted = JSON.parse(await fs.readFile(filePath, 'utf8')) as {
+      account: { contributorId?: string };
+    };
+    expect(persisted.account.contributorId).toBe(contributorId);
+  });
+
+  it('toggles data contribution with fresh consent only when authenticated', async () => {
+    const service = createService();
+    await service.initialize();
+    await service.register({ username: 'beta-user', password: 'password-123' }, true);
+
+    // Signed out: toggling is rejected.
+    await service.logout();
+    expect(service.getDataContribution()).toEqual({ enabled: false, consentedAt: null, version: null });
+    await expect(service.setDataContribution(false)).rejects.toMatchObject({ code: 'AUTHENTICATION_REQUIRED' });
+
+    await service.login({ username: 'beta-user', password: 'password-123' });
+    const disabled = await service.setDataContribution(false);
+    // Disabling keeps the original consent record as an audit trail.
+    expect(disabled).toEqual({
+      enabled: false,
+      consentedAt: now,
+      version: PRIVACY_AGREEMENT_VERSION,
+    });
+
+    now += 60_000;
+    const reenabled = await service.setDataContribution(true);
+    // Re-enabling records a fresh consent timestamp and the current version.
+    expect(reenabled).toEqual({
+      enabled: true,
+      consentedAt: now,
+      version: PRIVACY_AGREEMENT_VERSION,
+    });
+
+    // The toggle survives a service restart.
+    const restarted = createService();
+    await restarted.initialize();
+    expect(restarted.getDataContribution()).toEqual(reenabled);
   });
 
   function createService(): MembershipService {

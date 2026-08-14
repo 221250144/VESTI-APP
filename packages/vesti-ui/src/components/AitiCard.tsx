@@ -113,6 +113,8 @@ interface AitiCardProps {
   summaryBatch?: SummaryBatchState | null;
   onGenerateSummaries?: () => void;
   onCancelSummaryBatch?: () => void;
+  /** 会员门控: true → generation entry disabled with the member-only hint. */
+  memberLocked?: boolean;
 }
 
 export function AitiCard({
@@ -129,6 +131,7 @@ export function AitiCard({
   summaryBatch,
   onGenerateSummaries,
   onCancelSummaryBatch,
+  memberLocked,
 }: AitiCardProps) {
   type AxisMeta = {
     label: string;
@@ -242,8 +245,14 @@ export function AitiCard({
                 <button
                   type="button"
                   onClick={onGenerateSummaries}
-                  disabled={llmConfigured === false}
-                  title={llmConfigured === false ? labels.llmMissing : undefined}
+                  disabled={llmConfigured === false || memberLocked === true}
+                  title={
+                    memberLocked === true
+                      ? labels.memberOnly
+                      : llmConfigured === false
+                        ? labels.llmMissing
+                        : undefined
+                  }
                   className="inline-flex items-center gap-1.5 rounded-full bg-accent-primary px-3 py-1.5 text-[12px] font-medium text-text-inverse transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Sparkles className="h-3.5 w-3.5" strokeWidth={1.75} />
@@ -257,6 +266,12 @@ export function AitiCard({
           coverage.pendingConversationIds.length > 0 &&
           !batchRunning ? (
             <p className="w-full text-[11.5px] text-text-tertiary">{labels.llmMissing}</p>
+          ) : null}
+          {memberLocked === true &&
+          coverage &&
+          coverage.pendingConversationIds.length > 0 &&
+          !batchRunning ? (
+            <p className="w-full text-[11.5px] text-text-tertiary">{labels.memberOnly}</p>
           ) : null}
           {!batchRunning && summaryBatch?.status === "done" ? (
             <p className="w-full text-[11.5px] text-text-tertiary">

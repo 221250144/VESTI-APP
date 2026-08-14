@@ -14,13 +14,16 @@ import {
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { AgentService } from './main/agentService';
+import { AgentService, type AgentCreditMeter } from './main/agentService';
+import { ImageService, type ImageCreditMeter } from './main/imageService';
 import { AgentMcpRegistry, createAgentMcpRegistry, resolveAgentMcpTargetId } from './main/agentMcpRegistry';
 import { CaptureService } from './main/captureService';
+import { ContributionService } from './main/contributionService';
 import { CapsuleWindowService, normalizeCapsuleBubblePayload } from './main/capsuleWindowService';
+import { CreditError, CreditService } from './main/creditService';
 import { DigestService } from './main/digestService';
 import { ProjectMemoryService } from './main/projectMemoryService';
-import { EmbeddingService } from './main/embeddingService';
+import { EmbeddingService, type EmbeddingCreditMeter } from './main/embeddingService';
 import { ThinkingMapSemanticService } from './main/thinkingMapSemanticService';
 import { ExtensionBridgeService, MAX_OUTBOX_PROMPT_CHARS } from './main/extensionBridgeService';
 import { NotionService } from './main/notionService';
@@ -58,6 +61,8 @@ import {
   type CapsuleQuickAskTurn,
   type CapsuleRelayDraft,
   type CapsuleRelaySessionView,
+  type CreditBalance,
+  type CreditTier,
   type ExtensionImportRequestPayload,
   type ExtensionImportResultPayload,
   type MembershipActionResult,
@@ -83,10 +88,13 @@ let isQuitting = false;
 const capture = new CaptureService();
 let settings: SettingsService;
 let membership: MembershipService;
+let credits: CreditService;
 let agent: AgentService;
+let image: ImageService;
 let embedding: EmbeddingService;
 let thinkingMapSemantics: ThinkingMapSemanticService;
 let digest: DigestService;
+let contribution: ContributionService;
 let projectMemory: ProjectMemoryService;
 let notion: NotionService;
 const uiPrefs = new UiPrefsService();
@@ -115,13 +123,15 @@ function publicMembershipStatus(): MembershipStatus {
     plan: status.plan,
     registered: status.registered,
     authenticated: status.authenticated,
-    // The public `active` flag means the product is unlocked, not merely that
-    // the entitlement date is still in the future.
-    active: status.canUseApp,
+    // The public `active` flag is the real member entitlement (drives the
+    // member/free tier and member-only feature gates); an expired account
+    // reports active:false yet keeps using the app as the free tier.
+    active: status.active,
     username: status.username,
     memberSince: status.memberSince,
     expiresAt: status.expiresAt,
     daysRemaining: status.daysRemaining,
+    dataContribution: status.dataContribution,
   };
 }
 
@@ -161,8 +171,93 @@ function broadcastMembershipChange(): MembershipStatus {
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed()) window.webContents.send(IPC.membershipChanged, status);
   }
+  // The credit tier derives from membership, so push a fresh balance too.
+  broadcastCreditChange();
   return status;
 }
+
+// ---- Credit ledger (Beta metering) ----
+
+function creditTierContext(): { tier: CreditTier; memberSince: number | null } {
+  const status = membership.getStatus();
+  return { tier: status.active ? 'member' : 'free', memberSince: status.startedAt };
+}
+
+function currentCreditBalance(): CreditBalance {
+  const { tier, memberSince } = creditTierContext();
+  return credits.getBalance(tier, { memberSince });
+}
+
+function broadcastCreditChange(): void {
+  if (!credits) return;
+  let balance: CreditBalance;
+  try {
+    balance = currentCreditBalance();
+  } catch {
+    return; // ledger not initialized yet (early startup)
+  }
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send(IPC.creditChanged, balance);
+  }
+}
+
+/**
+ * Friendly exhaustion message with the CREDITS_EXHAUSTED marker embedded so
+ * the renderer can recognize it after Electron re-wraps the IPC error.
+ */
+function creditExhaustedError(tier: CreditTier): CreditError {
+  const detail = tier === 'member'
+    ? '本月会员积分已用完，将在下个结算周期自动重置；你也可以在设置中切换为自带密钥（BYOK），不再消耗积分。'
+    : '今日免费积分已用完，零点自动重置；你也可以在设置中切换为自带密钥（BYOK），不再消耗积分。';
+  return new CreditError('CREDITS_EXHAUSTED', `[CREDITS_EXHAUSTED] ${detail}`);
+}
+
+/** Demo-gateway chat metering; BYOK calls are billed by the user's provider. */
+const agentCreditMeter: AgentCreditMeter = {
+  beforeChat(estimatedChars, label) {
+    if (settings.getRuntimeLlm().mode !== 'demo_proxy') return;
+    const context = creditTierContext();
+    const peeked = credits.peek({ ...context, category: 'chat', estimatedChars, label });
+    if (peeked.balance.remaining <= 0) throw creditExhaustedError(context.tier);
+  },
+  afterChat(usage, estimatedChars, label) {
+    if (settings.getRuntimeLlm().mode !== 'demo_proxy') return;
+    void credits.consume({
+      ...creditTierContext(),
+      category: 'chat',
+      tokens: usage ? usage.promptTokens + usage.completionTokens : undefined,
+      estimatedChars,
+      label,
+    })
+      .then(() => broadcastCreditChange())
+      .catch(error => console.warn('[vesti] credit accounting failed:', error));
+  },
+};
+
+/** Demo-gateway embeddings metering (accounted, never blocks the pipeline). */
+const embeddingCreditMeter: EmbeddingCreditMeter = {
+  afterEmbedding(label) {
+    if (settings.getRuntimeLlm().mode !== 'demo_proxy') return;
+    void credits.consume({ ...creditTierContext(), category: 'embedding', label })
+      .then(() => broadcastCreditChange())
+      .catch(error => console.warn('[vesti] credit accounting failed:', error));
+  },
+};
+
+/** Image generations (custom owl DIY): ALWAYS metered — BYOK users' images
+ * also ride our gateway (their own key has no gpt-image upstream). */
+const imageCreditMeter: ImageCreditMeter = {
+  beforeImage() {
+    const context = creditTierContext();
+    const peeked = credits.peek({ ...context, category: 'image', label: 'custom-owl' });
+    if (peeked.balance.remaining < peeked.cost) throw creditExhaustedError(context.tier);
+  },
+  afterImage(label) {
+    void credits.consume({ ...creditTierContext(), category: 'image', label })
+      .then(() => broadcastCreditChange())
+      .catch(error => console.warn('[vesti] credit accounting failed:', error));
+  },
+};
 
 function reloadRendererAfterMembershipLock(): void {
   if (membershipLockReloadTimer) return;
@@ -188,14 +283,15 @@ function scheduleMembershipExpiryCheck(): void {
   );
   membershipExpiryTimer = setTimeout(() => {
     membershipExpiryTimer = null;
-    if (membership.isActive()) {
+    if (membership.getStatus().active) {
+      // Woke before the real expiry (clock adjustments); keep waiting.
       scheduleMembershipExpiryCheck();
       return;
     }
-    void deactivateProductRuntime().finally(() => {
-      broadcastMembershipChange();
-      reloadRendererAfterMembershipLock();
-    });
+    // Expiry downgrades to the free tier in place — no lock, no reload; the
+    // broadcast flips the renderer's tier (badge, credit quota, member-only
+    // gates) while local data and the runtime keep running.
+    broadcastMembershipChange();
   }, delay);
   membershipExpiryTimer.unref?.();
 }
@@ -208,6 +304,7 @@ async function activateProductRuntime(): Promise<void> {
     productRuntimeActive = true;
     thinkingMapSemantics.start();
     digest.start();
+    contribution.start();
     projectMemory.requestScan();
     await extensionBridge.start();
     if (!membership.isActive()) {
@@ -235,6 +332,7 @@ async function deactivateProductRuntime(): Promise<void> {
   productRuntimeActive = false;
   thinkingMapSemantics.stop();
   digest.stop();
+  contribution.stop();
   projectMemory.stop();
   await capture.setWatching(false).catch(() => false);
   await extensionBridge.stop().catch(() => undefined);
@@ -363,7 +461,8 @@ function forwardExtensionImport(bundle: unknown, since: string | undefined): Pro
 function updateTrayMenu(): void {
   if (!tray || !settings || !membership) return;
   const visible = Boolean(mainWindow?.isVisible());
-  const active = publicMembershipStatus().active;
+  // Free tier (expired membership) keeps the capture tray entries.
+  const active = publicMembershipStatus().authenticated;
   const template: Electron.MenuItemConstructorOptions[] = [
     { label: visible ? '隐藏 Vesti' : '打开 Vesti', click: () => visible ? mainWindow?.hide() : showMainWindow() },
   ];
@@ -412,7 +511,7 @@ function validAgentRequest(value: unknown): value is AgentRunRequest {
   // dream batches pack many sessions per LLM call for throughput and get a
   // raised override budget; every other kind keeps the original 30K cap.
   const transcriptCap = request.kind === 'dream-extract' || request.kind === 'dream-maintain' ? 60_000 : 30_000;
-  return (request.kind === 'summary' || request.kind === 'explore' || request.kind === 'digest' || request.kind === 'classify' || request.kind === 'relay' || request.kind === 'extract' || request.kind === 'distill' || request.kind === 'deposit-maintain' || request.kind === 'daily' || request.kind === 'persona' || request.kind === 'roundtable-turn' || request.kind === 'roundtable-synthesis' || request.kind === 'learn-deepen' || request.kind === 'learn-synthesis' || request.kind === 'prompt-improve' || request.kind === 'prompt-continue' || request.kind === 'dream-extract' || request.kind === 'dream-maintain' || request.kind === 'companion')
+  return (request.kind === 'summary' || request.kind === 'explore' || request.kind === 'digest' || request.kind === 'classify' || request.kind === 'relay' || request.kind === 'extract' || request.kind === 'distill' || request.kind === 'deposit-maintain' || request.kind === 'daily' || request.kind === 'persona' || request.kind === 'roundtable-turn' || request.kind === 'roundtable-synthesis' || request.kind === 'learn-deepen' || request.kind === 'learn-synthesis' || request.kind === 'prompt-improve' || request.kind === 'prompt-continue' || request.kind === 'prompt-distill' || request.kind === 'dream-extract' || request.kind === 'dream-maintain' || request.kind === 'companion')
     && validSessionId(request.sessionId)
     && (request.question === undefined || typeof request.question === 'string')
     && (request.template === undefined || (typeof request.template === 'string' && request.template.length <= 64))
@@ -815,14 +914,15 @@ function registerIpc(): void {
     BrowserWindow.fromWebContents(event.sender)?.isMaximized() ?? false);
   ipcMain.handle(IPC.membershipStatus, async () => {
     const status = publicMembershipStatus();
-    if (!status.active && productRuntimeActive) {
+    // Only a sign-out locks the runtime; an expired member keeps the free tier.
+    if (!status.authenticated && productRuntimeActive) {
       await deactivateProductRuntime();
       reloadRendererAfterMembershipLock();
     }
     return status;
   });
-  ipcMain.handle(IPC.membershipRegister, (_event, value: unknown) =>
-    finishMembershipAction(() => membership.register(normalizeMembershipCredentials(value))));
+  ipcMain.handle(IPC.membershipRegister, (_event, value: unknown, dataConsent: unknown) =>
+    finishMembershipAction(() => membership.register(normalizeMembershipCredentials(value), dataConsent === true)));
   ipcMain.handle(IPC.membershipLogin, (_event, value: unknown) =>
     finishMembershipAction(() => membership.login(normalizeMembershipCredentials(value))));
   ipcMain.handle(IPC.membershipLogout, async () => {
@@ -832,6 +932,15 @@ function registerIpc(): void {
     reloadRendererAfterMembershipLock();
     return status;
   });
+  memberIpcHandle(IPC.membershipDataContributionGet, () => membership.getDataContribution());
+  memberIpcHandle(IPC.membershipDataContributionSet, async (_event, enabled: unknown) => {
+    const state = await membership.setDataContribution(enabled === true);
+    // Consent changes take effect immediately: a withdrawn consent drops the
+    // pending upload queue inside runOnce instead of waiting for the timer.
+    void contribution.runOnce();
+    return state;
+  });
+  memberIpcHandle(IPC.creditBalance, () => currentCreditBalance());
   memberIpcHandle(IPC.overview, () => capture.getOverview());
   memberIpcHandle(IPC.sessions, () => capture.getSessions());
   memberIpcHandle(IPC.session, (_event, id: unknown) => {
@@ -949,7 +1058,27 @@ function registerIpc(): void {
     if (!validAgentRequest(request)) throw new Error('Agent 请求无效');
     return agent.run(request, { persist: request.persist });
   });
+  memberIpcHandle(IPC.agentRunStream, (event, request: unknown, runId: unknown) => {
+    if (!validAgentRequest(request) || typeof runId !== 'string' || !runId) {
+      throw new Error('Agent 请求无效');
+    }
+    return agent.runStream(
+      request,
+      chunk => {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send(IPC.agentStreamChunk, { runId, ...chunk });
+        }
+      },
+      { persist: request.persist },
+    );
+  });
   memberIpcHandle(IPC.agentResults, () => agent.listResults());
+  // DIY 猫头鹰皮肤：生成会员专属（计积分）；读取自己已生成的皮肤不需要会员。
+  memberIpcHandle(IPC.customOwlGenerate, (_event, prompt: unknown) => {
+    if (typeof prompt !== 'string') throw new Error('绘图请求无效');
+    return image.generateCustomOwl(prompt);
+  });
+  ipcMain.handle(IPC.customOwlRead, () => image.readCustomOwl());
   memberIpcHandle(IPC.exportConversations, () => capture.exportConversations());
   memberIpcHandle(IPC.conversationTree, () => capture.getConversationTree());
   memberIpcHandle(IPC.projectStates, () => capture.listProjectStates());
@@ -1385,6 +1514,10 @@ app.whenReady().then(async () => {
     app.quit();
     return;
   }
+  // Credit ledger (Beta metering): never blocks startup — a corrupt file
+  // resets to a fresh ledger inside initialize().
+  credits = new CreditService(app.getPath('userData'));
+  await credits.initialize();
   await uiPrefs.initialize(app.getPath('userData'), (key, value) => {
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed()) window.webContents.send(IPC.uiPrefChanged, key, value);
@@ -1410,12 +1543,20 @@ app.whenReady().then(async () => {
   await applyProxySettings();
   applyGeneralSettings();
   await capture.initialize(broadcastChange, settings.dataDirectory, settings.capture.enabledPlatforms);
-  agent = new AgentService(capture, settings);
-  embedding = new EmbeddingService(settings);
+  agent = new AgentService(capture, settings, agentCreditMeter);
+  image = new ImageService(capture, settings, imageCreditMeter);
+  embedding = new EmbeddingService(settings, embeddingCreditMeter);
   thinkingMapSemantics = new ThinkingMapSemanticService(capture, embedding);
   digest = new DigestService(capture, agent, embedding, () => settings.isLlmConfigured());
   digest.setScanCompletedListener(() => {
     if (productRuntimeActive) thinkingMapSemantics.requestScan();
+  });
+  // RL data contribution: consent-gated uploader with its own persisted
+  // incremental state, living next to the capture store.
+  contribution = new ContributionService({
+    captureService: capture,
+    membershipService: membership,
+    stateFilePath: path.join(settings.dataDirectory, 'contribution-state.json'),
   });
   notion = new NotionService(settings);
   projectMemory = new ProjectMemoryService(capture, agent);
@@ -1424,6 +1565,13 @@ app.whenReady().then(async () => {
     if (!productRuntimeActive) return;
     digest.requestScan();
     projectMemory.requestScan();
+    // Freshly stored captures also feed the consent-gated contribution
+    // uploader (debounced inside requestRun).
+    contribution.requestRun();
+  });
+  capture.setAgentActivityListener(payload => {
+    if (!productRuntimeActive) return;
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC.agentActivity, payload);
   });
   extensionBridge = new ExtensionBridgeService({
     appVersion: app.getVersion(),
@@ -1453,8 +1601,8 @@ app.whenReady().then(async () => {
   registerIpc();
   await createWindow();
   createTray();
-  // Product background services stay completely idle until a signed-in,
-  // unexpired member unlocks the app.
+  // Product background services stay completely idle until a signed-in
+  // account (member or free tier) unlocks the app.
   if (membership.isActive()) await activateProductRuntime();
   app.on('activate', showMainWindow);
 });
@@ -1472,6 +1620,7 @@ app.on('before-quit', () => {
   tray = null;
   if (extensionBridge) void extensionBridge.stop().catch(console.error);
   digest?.stop();
+  contribution?.stop();
   projectMemory?.stop();
   if (agent) void capture.close().catch(console.error);
 });

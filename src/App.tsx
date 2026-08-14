@@ -30,7 +30,7 @@ import { resolveClassifyLanguage, startAutoClassifyTrigger } from "./ui/organize
 import { startUpstreamAutoExport } from "./ui/upstream/autoExport";
 import { startDailyScheduler } from "./ui/daily/dailyScheduler";
 import { startDreamScheduler } from "./ui/memory/dreamScheduler";
-import { startAmbientBubbleScheduler } from "./ui/companion/ambientBubble";
+import { startAgentActivityNotifier, startAmbientBubbleScheduler } from "./ui/companion/ambientBubble";
 import { migrateDepositsToMemory } from "./ui/deposits/migrateDeposits";
 import { startPromptSnapshotSync } from "./ui/sync/promptSnapshot";
 import { getAllSummaries, getTopics, listConversations } from "./ui/db/repository";
@@ -89,14 +89,50 @@ function Shell({
   const [learn, setLearn] = useState<LearnProfile | undefined>(undefined);
   const [aitiImagery, setAitiImagery] = useState<AitiImagery | null>(null);
   const [aitiPersonaNote, setAitiPersonaNote] = useState<string | null>(null);
+  // 夜话头像:默认心情图标集;owlSkin==='custom' 时整套换成 DIY 皮肤。
+  const [owlIcons, setOwlIcons] = useState(OWL_MOOD_ICONS);
+
+  // Follow the floating-ball skin pref: the custom DIY owl replaces every
+  // mood icon (it has no mood variants of its own), built-in skins restore
+  // the default set. Regeneration signals via owlCustomUpdatedAt.
+  useEffect(() => {
+    const bridge = window.vestiUi;
+    if (!bridge) return;
+    let cancelled = false;
+    const apply = async () => {
+      const skinPref = await bridge.getUiPreference("owlSkin").catch(() => null);
+      if (skinPref === "custom") {
+        const asset = await window.vesti?.readCustomOwl().catch(() => null);
+        if (asset?.dataUrl) {
+          const all = { ...OWL_MOOD_ICONS };
+          for (const mood of Object.keys(all)) {
+            all[mood as keyof typeof all] = asset.dataUrl;
+          }
+          if (!cancelled) setOwlIcons(all);
+          return;
+        }
+      }
+      if (!cancelled) setOwlIcons(OWL_MOOD_ICONS);
+    };
+    void apply();
+    const off = bridge.onUiPreferenceChanged((key) => {
+      if (key === "owlSkin" || key === "owlCustomUpdatedAt") void apply();
+    });
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, []);
 
   useEffect(() => {
     startCaptureSync();
     startAutoClassifyTrigger();
     startUpstreamAutoExport();
     startDailyScheduler();
-    startDreamScheduler();
+    // 做梦为会员专属: the free tier never starts the auto-dream scheduler.
+    if (membership.active) startDreamScheduler();
     startAmbientBubbleScheduler();
+    startAgentActivityNotifier();
     // One-shot Dexie→memory_entries deposit migration; idempotent (same-id
     // upserts) and a no-op once the memory_meta watermark is stamped.
     void migrateDepositsToMemory().catch(() => undefined);
@@ -128,10 +164,16 @@ function Shell({
     let cancelled = false;
     let debounce: ReturnType<typeof setTimeout> | null = null;
     const recompute = () => {
+      // Topic counts reuse the same conversation list (one Dexie scan);
+      // getTopics falls back to its own scan if the list load fails.
+      const conversationsPromise = listConversations();
       void Promise.all([
         getAllSummaries(),
-        getTopics(),
-        listConversations(),
+        conversationsPromise.then(
+          (conversations) => getTopics(conversations),
+          () => getTopics()
+        ),
+        conversationsPromise,
         // Learn's synthesized route names follow the agent output-language
         // setting (UI locale as fallback), mirroring the classify pipeline.
         window.vesti?.getSettings().catch(() => null) ?? Promise.resolve(null),
@@ -173,6 +215,9 @@ function Shell({
   // P5 思维意象: resolve the 16-imagery card from the AITI axes (localized),
   // then fetch the LLM persona footnote — recomputed only when the profile or
   // locale changes; the note itself is cached in ui-prefs by personaNote.ts.
+  // 会员门控: the persona footnote is an LLM call inside the member-only AITI
+  // 画像 feature, so the free tier never requests it (the locally-computed
+  // imagery card itself stays visible).
   useEffect(() => {
     if (!aiti?.available) {
       setAitiImagery(null);
@@ -183,7 +228,9 @@ function Shell({
     const localized = resolved ? localizeImagery(resolved, lang) : null;
     setAitiImagery(localized);
     setAitiPersonaNote(null);
-    if (!localized) return;
+    // 会员门控: the persona footnote is a 'persona' agent LLM call; the free
+    // tier keeps the locally-computed imagery but never fetches the note.
+    if (!localized || !membership.active) return;
     let cancelled = false;
     const sampleLabel = t.dashboard.aiti.sample.replace("{n}", String(aiti.sampleSize));
     void getPersonaNote(localized, aiti, sampleLabel).then((note) => {
@@ -192,7 +239,7 @@ function Shell({
     return () => {
       cancelled = true;
     };
-  }, [aiti, lang, t]);
+  }, [aiti, lang, t, membership.active]);
   const plaza = useMemo(() => {
     const daily = buildPlazaPrompts(lang, Date.now()).filter((prompt) => prompt.featured);
     const resolved = resolveCuratedPrompts(lang);
@@ -258,7 +305,8 @@ function Shell({
               aitiImagery={aitiImagery}
               aitiEmblemUrl={aitiImagery ? emblemUrl(aitiImagery.emblemId) : undefined}
               aitiPersonaNote={aitiPersonaNote}
-              companionOwlIcons={OWL_MOOD_ICONS}
+              membershipActive={membership.active}
+              companionOwlIcons={owlIcons}
               learn={learn}
               lang={lang}
               tab={dashboardTab}

@@ -107,7 +107,7 @@ describe("computeBundleFingerprint", () => {
 describe("planImport", () => {
   it("puts new conversations with a stamped fingerprint", () => {
     const bundle = makeBundle(1, ["a", "b"]);
-    const plan = planImport([bundle], []);
+    const plan = planImport([bundle], [], ["cli-1"]);
     expect(plan.toPut).toHaveLength(1);
     expect(plan.changedIds).toEqual([1]);
     expect(plan.changedMessages).toHaveLength(2);
@@ -131,7 +131,7 @@ describe("planImport", () => {
         _sync_fingerprint: fingerprint,
       },
     ];
-    const plan = planImport([bundle], previous as never);
+    const plan = planImport([bundle], previous as never, ["cli-1"]);
     expect(plan.toPut).toHaveLength(0);
     expect(plan.changedIds).toEqual([]);
     expect(plan.changedMessages).toEqual([]);
@@ -141,7 +141,7 @@ describe("planImport", () => {
   it("re-imports records from before the fingerprint era once", () => {
     const bundle = makeBundle(1, ["a"]);
     const legacy = [{ ...bundle.conversation }];
-    const plan = planImport([bundle], legacy as never);
+    const plan = planImport([bundle], legacy as never, ["cli-1"]);
     expect(plan.toPut).toHaveLength(1);
   });
 
@@ -163,7 +163,7 @@ describe("planImport", () => {
         ),
       },
     ];
-    const plan = planImport([after], previous as never);
+    const plan = planImport([after], previous as never, ["cli-1"]);
     expect(plan.toPut).toHaveLength(1);
     const merged = plan.toPut[0] as unknown as Record<string, unknown>;
     expect(merged.topic_id).toBe(42);
@@ -194,7 +194,9 @@ describe("planImport", () => {
       },
     ];
 
-    const plan = planImport([bundle], previous as never);
+    const plan = planImport([bundle], previous as never, [
+      "codex:stable-session-id",
+    ]);
 
     expect(plan.staleIds).toEqual([]);
     expect(plan.changedIds).toEqual([legacyId]);
@@ -236,7 +238,9 @@ describe("planImport", () => {
       },
     ];
 
-    const plan = planImport([bundle], previous as never);
+    const plan = planImport([bundle], previous as never, [
+      "kimi:stable-session-id",
+    ]);
 
     expect(plan.toPut).toEqual([]);
     expect(plan.changedIds).toEqual([]);
@@ -244,7 +248,7 @@ describe("planImport", () => {
     expect(plan.staleIds).toEqual([66_000_001]);
   });
 
-  it("reconciles only local_terminal records absent from the snapshot", () => {
+  it("reconciles only local_terminal records absent from the id list", () => {
     const bundle = makeBundle(1, ["a"]);
     const fingerprint = computeBundleFingerprint(
       bundle.conversation,
@@ -257,9 +261,39 @@ describe("planImport", () => {
       // reconciled away by a capture snapshot.
       { ...makeConversation(3, { message_count: 5 }), _source: "browser_extension" },
     ];
-    const plan = planImport([bundle], previous as never);
+    const plan = planImport([bundle], previous as never, ["cli-1"]);
     expect(plan.staleIds).toEqual([2]);
     expect(plan.toPut).toHaveLength(0);
+  });
+
+  it("keeps unchanged sessions that are absent from incremental bundles", () => {
+    // Steady-state tick: main re-sent nothing, but both sessions still exist
+    // upstream — nothing may be written or reconciled away.
+    const previous = [
+      { ...makeConversation(1), _sync_fingerprint: 1 },
+      { ...makeConversation(2), _sync_fingerprint: 2 },
+    ];
+    const plan = planImport([], previous as never, ["cli-1", "cli-2"]);
+    expect(plan.toPut).toEqual([]);
+    expect(plan.changedIds).toEqual([]);
+    expect(plan.changedMessages).toEqual([]);
+    expect(plan.staleIds).toEqual([]);
+  });
+
+  it("marks sessions missing from the authoritative id list as stale", () => {
+    const previous = [
+      { ...makeConversation(1), _sync_fingerprint: 1 },
+      { ...makeConversation(2), _sync_fingerprint: 2 },
+    ];
+    const plan = planImport([], previous as never, ["cli-1"]);
+    expect(plan.staleIds).toEqual([2]);
+  });
+
+  it("retains mirror rows that predate _cli_id instead of guessing", () => {
+    const legacy: Record<string, unknown> = { ...makeConversation(9) };
+    delete legacy._cli_id;
+    const plan = planImport([], [legacy] as never, ["cli-1"]);
+    expect(plan.staleIds).toEqual([]);
   });
 
   it("does not wipe the local mirror when an export is transiently empty", () => {
@@ -268,7 +302,7 @@ describe("planImport", () => {
       { ...makeConversation(2), _cli_id: "cursor:session-2" },
     ];
 
-    const plan = planImport([], previous as never);
+    const plan = planImport([], previous as never, []);
 
     expect(plan.toPut).toEqual([]);
     expect(plan.changedIds).toEqual([]);

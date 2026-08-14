@@ -19,6 +19,9 @@ export interface OwlSkin {
 }
 
 export const DEFAULT_SKIN_ID = 'classic';
+/** ui-pref `owlSkin` 的特殊值：用户 DIY 生成的自定义猫头鹰（图片不走静态
+ * 注册表，运行时经 window.vesti.readCustomOwl() 取 dataUrl）。 */
+export const CUSTOM_SKIN_ID = 'custom';
 
 export const SKINS: OwlSkin[] = [
   { id: 'classic', name: { zh: '经典', en: 'Classic', ja: 'クラシック', ko: '클래식' }, collapsed: classicCollapsed },

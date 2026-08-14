@@ -36,6 +36,21 @@ export const DREAM_ASSISTANT_SNIPPET_CHARS = 300;
 export const DREAM_EXTRACT_LANES = 3;
 /** Pause between extract batches per lane so a full sweep doesn't flood the gateway. */
 export const DREAM_EXTRACT_DELAY_MS = 300;
+/**
+ * 做梦质量门槛 (agent side only): browser conversations keep their full
+ * weight, but agent/app sessions need a minimal engagement floor so short
+ * tool-noise runs (a one-shot fix, an interrupted turn) never reach the LLM.
+ * The gate is per-run: a session that later grows re-qualifies because its
+ * activityAt moves past the watermark again.
+ */
+export const DREAM_AGENT_MIN_MESSAGES = 6;
+/**
+ * Per-run extract-batch cap for auto/manual modes (token 控制). The watermark
+ * only advances past processed sessions, so an oversized backlog is chipped
+ * away over subsequent runs instead of burning the budget in one night.
+ * 'full' (explicit 全量重做) stays uncapped — the user opted into the cost.
+ */
+export const DREAM_MAX_AUTO_BATCHES = 12;
 /** Existing-library cap fed into the maintain step. */
 export const DREAM_EXISTING_LIMIT = 500;
 /** Candidates per maintain round; large sweeps run at most two rounds. */
@@ -67,6 +82,10 @@ export interface DreamRunResult {
   ok: boolean;
   firstFull: boolean;
   sessionsProcessed: number;
+  /** Agent sessions skipped by the quality gate this run. */
+  gatedSessions: number;
+  /** Extract batches deferred to later runs by the token-budget cap. */
+  cappedBatches: number;
   added: number;
   updated: number;
   deleted: number;
@@ -91,6 +110,9 @@ export interface DreamSessionRecord {
   /** lastActivityAt equivalent: conversation updated_at. */
   activityAt: number;
   messageCount: number;
+  /** browser = web/extension captures (full dream weight); agent = local
+   * CLI/desktop captures (subject to the DREAM_AGENT_MIN_MESSAGES gate). */
+  origin: "browser" | "agent";
 }
 
 export interface DreamMessageRecord {
@@ -123,6 +145,16 @@ export function selectDreamSessions(
   return sessions
     .filter((session) => opts.full || session.activityAt > opts.lastSessionTs)
     .sort((a, b) => a.activityAt - b.activityAt);
+}
+
+/**
+ * 做梦质量门槛: browser sessions always qualify; agent sessions need the
+ * message floor. Kept separate from selectDreamSessions so the pipeline can
+ * count (and report) the gated-out sessions.
+ */
+export function passesDreamGate(session: DreamSessionRecord): boolean {
+  if (session.origin !== "agent") return true;
+  return session.messageCount >= DREAM_AGENT_MIN_MESSAGES;
 }
 
 function truncate(value: string, maxChars: number): string {
@@ -412,6 +444,10 @@ export interface DreamJournalInput {
   today: string;
   firstFull: boolean;
   sessionsProcessed: number;
+  /** Agent sessions skipped by the quality gate (0 in fixtures before the gate). */
+  gatedSessions?: number;
+  /** Batches deferred by the token-budget cap (0/undefined when uncapped). */
+  cappedBatches?: number;
   counts: { added: number; updated: number; deleted: number; noop: number };
   orphans: number;
   warnings: string[];
@@ -426,6 +462,12 @@ export function buildDreamJournalMarkdown(input: DreamJournalInput): string {
   lines.push(
     `本次处理了 ${input.sessionsProcessed} 个会话${input.firstFull ? "（首次全量整理）" : ""}。`,
   );
+  if (input.gatedSessions) {
+    lines.push(`另有 ${input.gatedSessions} 个 agent 会话未达做梦质量门槛，本次跳过。`);
+  }
+  if (input.cappedBatches) {
+    lines.push(`按 token 预算本次处理部分批次，剩余 ${input.cappedBatches} 批将在后续整理中继续。`);
+  }
   lines.push(
     `新增 ${counts.added} · 更新 ${counts.updated} · 删除 ${counts.deleted} · 跳过 ${counts.noop}${
       input.orphans > 0 ? ` · 丢弃孤儿操作 ${input.orphans}` : ""
@@ -488,6 +530,9 @@ async function listDexieDreamSessions(): Promise<DreamSessionRecord[]> {
   for (const record of records) {
     if (typeof record.id !== "number" || record.is_trash) continue;
     if (record._subagent_of) continue;
+    const isAgent =
+      record._source === "local_terminal" ||
+      (typeof record._cli_id === "string" && record._cli_id.length > 0);
     sessions.push({
       id: record.id,
       sessionKey:
@@ -502,6 +547,7 @@ async function listDexieDreamSessions(): Promise<DreamSessionRecord[]> {
           : null,
       activityAt: record.updated_at ?? record.created_at ?? 0,
       messageCount: record.message_count ?? 0,
+      origin: isAgent ? "agent" : "browser",
     });
   }
   return sessions;
@@ -539,6 +585,8 @@ function emptyResult(firstFull: boolean): DreamRunResult {
     ok: true,
     firstFull,
     sessionsProcessed: 0,
+    gatedSessions: 0,
+    cappedBatches: 0,
     added: 0,
     updated: 0,
     deleted: 0,
@@ -596,18 +644,37 @@ export async function runDreamPipeline(
       (await api.getMemoryMeta(META_FIRST_FULL_DONE).catch(() => null)) !== "1";
     const lastSessionTs =
       Number((await api.getMemoryMeta(META_LAST_SESSION_TS).catch(() => null)) ?? 0) || 0;
-    const sessions = selectDreamSessions(await deps.listSessions(), {
+    const timeSelected = selectDreamSessions(await deps.listSessions(), {
       full: firstFull,
       lastSessionTs,
     });
+    // 做梦质量门槛: browser sessions keep their weight; agent sessions below
+    // the engagement floor are skipped (and counted) — their watermark still
+    // advances below, so a grown session re-qualifies on a later run.
+    const sessions = timeSelected.filter(passesDreamGate);
+    const gatedSessions = timeSelected.length - sessions.length;
     if (sessions.length === 0) {
-      // Nothing new: no LLM call, no journal. Stamp lastRunAt so the
-      // scheduler treats today as done instead of re-checking every tick.
+      // Nothing new (or everything gated): no LLM call, no journal. Stamp
+      // lastRunAt so the scheduler treats today as done instead of
+      // re-checking every tick. Gated sessions advance the watermark too —
+      // they were inspected and rejected, and a grown session re-enters via
+      // its updated_at anyway.
       await api.setMemoryMeta(META_LAST_RUN_AT, String(deps.now())).catch(() => undefined);
+      if (gatedSessions > 0 && timeSelected.length > 0) {
+        const maxGatedTs = timeSelected[timeSelected.length - 1].activityAt;
+        await api.setMemoryMeta(META_LAST_SESSION_TS, String(maxGatedTs)).catch(() => undefined);
+      }
       if (firstFull) {
         await api.setMemoryMeta(META_FIRST_FULL_DONE, "1").catch(() => undefined);
       }
-      return { ...emptyResult(firstFull), message: "没有新的对话需要整理" };
+      return {
+        ...emptyResult(firstFull),
+        gatedSessions,
+        message:
+          gatedSessions > 0
+            ? `没有新的对话需要整理（${gatedSessions} 个 agent 会话未达做梦质量门槛）`
+            : "没有新的对话需要整理",
+      };
     }
 
     // ---- render + pack --------------------------------------------------------
@@ -629,15 +696,37 @@ export async function runDreamPipeline(
       }
       return { ...emptyResult(firstFull), message: "没有包含用户内容的新对话" };
     }
-    const batches = packDreamBatches(blocks);
+    const batchesAll = packDreamBatches(blocks);
+    const candidates: DreamMemoryCandidate[] = [];
+    const warnings: string[] = [];
+    // token 控制: auto/manual runs cap the extract batches per pass. Blocks are
+    // time-ascending, so slicing keeps the oldest work and the watermark only
+    // advances past the sessions inside the kept batches — the remainder is
+    // re-selected by the next run. 'full' mode is explicitly uncapped.
+    const capped =
+      opts.mode !== "full" && batchesAll.length > DREAM_MAX_AUTO_BATCHES;
+    const batches = capped ? batchesAll.slice(0, DREAM_MAX_AUTO_BATCHES) : batchesAll;
+    const cappedBatches = batchesAll.length - batches.length;
+    // Watermark target: uncapped runs advance past every selected session
+    // (content-less ones included); capped runs stop at the last session that
+    // actually reached the LLM this pass.
+    const keptKeys = capped ? new Set(batches.flatMap((batch) => batch.sessionIds)) : null;
+    let watermarkTs = maxSessionTs;
+    if (keptKeys) {
+      watermarkTs = 0;
+      for (const block of blocks) {
+        if (keptKeys.has(block.sessionKey)) watermarkTs = block.activityAt;
+      }
+      warnings.push(
+        `按 token 预算本次处理前 ${batches.length} 批，剩余 ${cappedBatches} 批将在后续整理中继续`,
+      );
+    }
 
     // ---- extract --------------------------------------------------------------
     // Parallel lanes: batches are independent; results are collected per batch
     // index so candidate order stays deterministic. `cursor++` between awaits
     // is safe (JS runs to completion between suspension points).
-    console.info(`[dream] collect done: ${blocks.length} sessions -> ${batches.length} batches, extract with ${Math.min(DREAM_EXTRACT_LANES, batches.length)} lanes`);
-    const candidates: DreamMemoryCandidate[] = [];
-    const warnings: string[] = [];
+    console.info(`[dream] collect done: ${blocks.length} sessions -> ${batches.length} batches${capped ? ` (capped from ${batchesAll.length})` : ""}, extract with ${Math.min(DREAM_EXTRACT_LANES, batches.length)} lanes`);
     const laneResults: Array<DreamMemoryCandidate[] | null> = new Array(batches.length).fill(null);
     let cursor = 0;
     let finished = 0;
@@ -780,7 +869,8 @@ export async function runDreamPipeline(
     const previousJournal = (
       await api.getMemoryEntries([journalId]).catch(() => [] as MemoryEntryView[])
     )[0];
-    const summary = `整理 ${blocks.length} 个会话：新增 ${counts.added} / 更新 ${counts.updated} / 删除 ${counts.deleted} / 跳过 ${counts.noop}`;
+    const processedSessionKeys = [...new Set(batches.flatMap((batch) => batch.sessionIds))];
+    const summary = `整理 ${processedSessionKeys.length} 个会话：新增 ${counts.added} / 更新 ${counts.updated} / 删除 ${counts.deleted} / 跳过 ${counts.noop}`;
     const journal: MemoryEntryView = {
       id: journalId,
       kind: "dream-log",
@@ -788,7 +878,9 @@ export async function runDreamPipeline(
       contentMarkdown: buildDreamJournalMarkdown({
         today,
         firstFull,
-        sessionsProcessed: blocks.length,
+        sessionsProcessed: processedSessionKeys.length,
+        gatedSessions,
+        cappedBatches,
         counts,
         orphans,
         warnings,
@@ -798,7 +890,7 @@ export async function runDreamPipeline(
       summary,
       scope: null,
       template: null,
-      sourceSessionIds: blocks.map((block) => block.sessionKey).slice(0, 100),
+      sourceSessionIds: processedSessionKeys.slice(0, 100),
       tags: ["dream-log"],
       version: previousJournal ? previousJournal.version + 1 : 1,
       prevId: null,
@@ -812,7 +904,7 @@ export async function runDreamPipeline(
 
     // ---- watermarks (advanced even on partial failure; the journal records it) -----
     await api.setMemoryMeta(META_LAST_RUN_AT, String(deps.now()));
-    await api.setMemoryMeta(META_LAST_SESSION_TS, String(maxSessionTs));
+    await api.setMemoryMeta(META_LAST_SESSION_TS, String(watermarkTs));
     await api.setMemoryMeta(META_FIRST_FULL_DONE, "1");
     console.info(`[dream] run done: ${summary}${warnings.length ? `, ${warnings.length} warnings` : ""}`);
 
@@ -825,7 +917,7 @@ export async function runDreamPipeline(
         text:
           touched > 0
             ? `梦境整理好了：新增 ${counts.added} 条记忆，更新 ${counts.updated} 条`
-            : `梦境整理好了：看过 ${blocks.length} 个会话，记忆没有新变化`,
+            : `梦境整理好了：看过 ${processedSessionKeys.length} 个会话，记忆没有新变化`,
         mood: "sleepy",
       });
     } catch {
@@ -835,7 +927,9 @@ export async function runDreamPipeline(
     return {
       ok: true,
       firstFull,
-      sessionsProcessed: blocks.length,
+      sessionsProcessed: processedSessionKeys.length,
+      gatedSessions,
+      cappedBatches,
       added: counts.added,
       updated: counts.updated,
       deleted: counts.deleted,

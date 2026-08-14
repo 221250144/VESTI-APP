@@ -63,6 +63,8 @@ type DepositsTabProps = {
   labels?: Record<string, string>;
   /** Library labels for the SendToMenu (Notion/Obsidian export). */
   sendToLabels?: Record<string, any>;
+  /** 会员门控: true → dream entries disabled with the member-only hint. */
+  dreamLocked?: boolean;
 };
 
 type DistillTemplateKey = Exclude<DepositTemplate, "extract">;
@@ -176,7 +178,7 @@ function topicPathLabel(topic: Topic, byId: Map<number, Topic>): string {
   return names.join(" / ");
 }
 
-export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps) {
+export function DepositsTab({ storage, labels, sendToLabels, dreamLocked = false }: DepositsTabProps) {
   const l = (key: string, fallback: string) => labels?.[key] ?? fallback;
 
   const [deposits, setDeposits] = useState<Deposit[] | null>(null);
@@ -506,7 +508,7 @@ export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps)
   // underneath). The service itself is single-flight; the button state here
   // just mirrors the run and refreshes the dream sections when it lands.
   const handleDream = async (mode: "manual" | "full") => {
-    if (!storage.runDream || dreaming || llmMissing) return;
+    if (!storage.runDream || dreaming || llmMissing || dreamLocked) return;
     if (mode === "full") {
       const confirmed = window.confirm(
         l(
@@ -553,7 +555,7 @@ export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps)
   };
 
   const handleDreamAutoToggle = async () => {
-    if (!storage.setDreamAutoEnabled || dreamAutoEnabled === null) return;
+    if (!storage.setDreamAutoEnabled || dreamAutoEnabled === null || dreamLocked) return;
     const next = !dreamAutoEnabled;
     setDreamAutoEnabledState(next);
     try {
@@ -741,9 +743,16 @@ export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps)
               <button
                 type="button"
                 onClick={() => void handleDream("full")}
-                disabled={dreaming || llmMissing}
+                disabled={dreaming || llmMissing || dreamLocked}
                 title={
-                  llmMissing ? l("llmMissing", "Configure a model in Settings first.") : undefined
+                  dreamLocked
+                    ? l(
+                        "dreamMemberOnly",
+                        "Dreaming is a Beta member feature — this account is currently on the free tier.",
+                      )
+                    : llmMissing
+                      ? l("llmMissing", "Configure a model in Settings first.")
+                      : undefined
                 }
                 className="inline-flex items-center gap-1 rounded-md border border-border-subtle px-2.5 py-1 text-vesti-sm font-sans text-text-secondary transition-colors hover:bg-bg-surface-card disabled:cursor-not-allowed disabled:opacity-50"
               >
@@ -755,8 +764,17 @@ export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps)
                   type="button"
                   role="switch"
                   aria-checked={dreamAutoEnabled}
+                  disabled={dreamLocked}
+                  title={
+                    dreamLocked
+                      ? l(
+                          "dreamMemberOnly",
+                          "Dreaming is a Beta member feature — this account is currently on the free tier.",
+                        )
+                      : undefined
+                  }
                   onClick={() => void handleDreamAutoToggle()}
-                  className="inline-flex items-center gap-1.5 text-vesti-sm font-sans text-text-secondary transition-colors hover:text-text-primary"
+                  className="inline-flex items-center gap-1.5 text-vesti-sm font-sans text-text-secondary transition-colors hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <span
                     className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
@@ -775,9 +793,16 @@ export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps)
               <button
                 type="button"
                 onClick={() => void handleDream("manual")}
-                disabled={dreaming || llmMissing}
+                disabled={dreaming || llmMissing || dreamLocked}
                 title={
-                  llmMissing ? l("llmMissing", "Configure a model in Settings first.") : undefined
+                  dreamLocked
+                    ? l(
+                        "dreamMemberOnly",
+                        "Dreaming is a Beta member feature — this account is currently on the free tier.",
+                      )
+                    : llmMissing
+                      ? l("llmMissing", "Configure a model in Settings first.")
+                      : undefined
                 }
                 className="inline-flex items-center gap-1.5 rounded-md bg-accent-primary px-3 py-1.5 text-vesti-base font-sans text-text-inverse transition-colors hover:bg-accent-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
               >
@@ -793,6 +818,14 @@ export function DepositsTab({ storage, labels, sendToLabels }: DepositsTabProps)
         </div>
         {dreaming && dreamProgress ? (
           <p className="mt-2 text-vesti-sm font-sans text-text-secondary">{dreamProgress}</p>
+        ) : null}
+        {dreamLocked ? (
+          <p className="mt-2 text-vesti-sm font-sans text-text-tertiary">
+            {l(
+              "dreamMemberOnly",
+              "Dreaming is a Beta member feature — this account is currently on the free tier.",
+            )}
+          </p>
         ) : null}
         {!dreaming && hasDreamLog === false && !llmMissing ? (
           <p className="mt-2 text-vesti-sm font-sans text-text-tertiary">

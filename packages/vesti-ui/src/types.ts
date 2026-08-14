@@ -91,6 +91,15 @@ export interface CompanionAskInput {
   question: string;
   persona?: CompanionPersona;
   memoryScope?: CompanionMemoryScope;
+  /** Live-typing callbacks (host-dependent): onStream receives the accumulated
+   * RAW answer text (mood tag line included), onReasoning the accumulated
+   * thinking trace. Omit both for the classic single-shot turn. */
+  onStream?: (accumulatedRaw: string) => void;
+  onReasoning?: (accumulated: string) => void;
+  /** Proactive opening turn (新的夜话): no user message is persisted; the owl
+   * opens the conversation from long-term memories alone. Only meaningful
+   * with an empty question. */
+  opener?: boolean;
 }
 
 export interface CompanionAnswer {
@@ -99,6 +108,8 @@ export interface CompanionAnswer {
   persona: CompanionPersona;
   /** Answer body with the mood tag line stripped. */
   content: string;
+  /** Thinking trace when the turn streamed and the model exposed one. */
+  reasoning?: string;
   sources: RelatedConversation[];
 }
 
@@ -216,6 +227,9 @@ export interface ExploreAgentMeta {
   mood?: CompanionMood;
   persona?: CompanionPersona;
   memoryScope?: CompanionMemoryScope;
+  /** Persisted thinking trace (companion streaming turns): the chat renders
+   * it as a collapsible 思考过程 block above the answer. */
+  reasoning?: string;
 }
 
 export interface RagResponse {
@@ -482,7 +496,10 @@ export interface ExploreMessage {
 }
 
 export type StorageApi = {
-  getTopics: () => Promise<Topic[]>;
+  /** Optional prefetch: platforms whose topic counts derive from the
+   * conversation list (desktop Dexie) reuse it to avoid a second table scan;
+   * other platforms may ignore it. */
+  getTopics: (conversations?: Conversation[]) => Promise<Topic[]>;
   getConversations: (filters?: ConversationFilters) => Promise<Conversation[]>;
   runGardener?: (
     conversationId: number
@@ -650,6 +667,9 @@ export type StorageApi = {
   // (kind 'dream') and dream run logs (kind 'dream-log'). Migrated deposits
   // keep flowing through listDeposits above.
   listMemoryEntries?: (options?: MemoryEntryListOptions) => Promise<MemoryEntryView[]>;
+  /** 记忆空间管理: edit/delete one entry (reader-modal actions). */
+  upsertMemoryEntry?: (entry: MemoryEntryView) => Promise<void>;
+  deleteMemoryEntry?: (id: string) => Promise<void>;
   /** Run the dream pipeline once (manual incremental / full rebuild). */
   runDream?: (options: DreamRunOptions) => Promise<DreamRunResultView>;
   /** Nightly auto-dream toggle state + setter (persisted by the platform). */
@@ -1458,6 +1478,8 @@ export interface CompanionLabels {
   send: string;
   /** Generating indicator / composer-disabled text. */
   thinking: string;
+  /** Collapsible block holding the model's streamed thinking trace. */
+  thinkingProcess: string;
   /** Gentle error bubble title (the LLM failure message follows). */
   errorTitle: string;
 }
@@ -2186,6 +2208,8 @@ export interface DashboardLabels {
     llmMissing: string;
     /** Pending queue is empty — everything already has a structured summary. */
     allSummarized: string;
+    /** 会员门控: hint on the generation entry for free-tier accounts. */
+    memberOnly: string;
   };
   learn: {
     modeLearn: string;

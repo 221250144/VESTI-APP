@@ -9,6 +9,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 
 import type { VestiDatabase } from './db.js';
+import { vestiSearchFiles } from './files.js';
 import { vestiMemoryGet, vestiMemorySearch } from './memory.js';
 import { vestiGetHandoffContext, vestiGetProjectContext } from './projectContext.js';
 import { vestiGetTurns, vestiProjectBrief, vestiSearch, vestiTimeline } from './tools.js';
@@ -24,6 +25,7 @@ const SERVER_INSTRUCTIONS = [
   'MERGE / CROSS-PROJECT WORK: pass every involved project path to vesti_get_project_context at once — besides per-project packs it returns cross-project links (shared files, shared topics, overlapping work windows).',
   'HANDOFF to another agent or session: call vesti_get_handoff_context, then assemble the handoff from its file anchors, open questions and verify-first hints; the receiving side must re-verify before trusting it.',
   'HISTORY DETAILS: vesti_search (keywords) → vesti_timeline (pick turns) → vesti_get_turns (only those turns). Never call vesti_get_turns without narrowing first — it is the expensive layer. confidence:"low" search hits are leads, not facts.',
+  'FILE LOOKUP: when the user asks to fill/update a document from memory (e.g. "帮我填写这个 BP"), call vesti_search_files with the topic — it returns the local file paths past work touched (with the projects and sessions behind them). Read those files with your own filesystem tools; pair with vesti_memory_search for the distilled facts.',
   'MEMORY SPACE (long-term memory about the user and their work): vesti_memory_search (keywords, or no query to browse newest) → vesti_memory_get (full documents by id). Kinds: deposit = the user’s long-term deposit documents (profile, project state, writing style); dream = durable facts about the user themself (preferences, goals, emotions) extracted by the dream pass; dream-log = per-run logs of that memory-consolidation pass.',
   'vesti_project_brief(project) fuzzy-matches a project name when you do not know its path.',
 ].join('\n');
@@ -80,6 +82,12 @@ const MEMORY_SEARCH_DESCRIPTION = [
 const MEMORY_GET_DESCRIPTION = [
   'Memory-space layer 2 of 2 — full memory documents by id (ids come from vesti_memory_search).',
   'Returns complete content_markdown, parsed source_session_ids and tags, the version chain (version, prev_id) and timestamps for up to 10 ids; unknown or filtered-out ids come back in missing.',
+].join(' ');
+
+const SEARCH_FILES_DESCRIPTION = [
+  'File-level memory — which local files past work about a topic lives in ("where is the BP / 创投 material?").',
+  'Two evidence channels: the file path itself contains the keyword (matched_via "name"), or sessions recalled by the keyword touched the file (matched_via "session-content", from digest key_files + tool-call inputs).',
+  'Returns path, projects, up to 5 backing sessions, touch count and last_touched per file. Read the files with your own filesystem tools; drill into a backing session with vesti_timeline → vesti_get_turns when you need the surrounding context.',
 ].join(' ');
 
 export function createVestiMcpServer(db: VestiDatabase): Server {
@@ -232,6 +240,25 @@ export function createVestiMcpServer(db: VestiDatabase): Server {
         },
       },
       {
+        name: 'vesti_search_files',
+        description: SEARCH_FILES_DESCRIPTION,
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              description: 'Topic keywords (e.g. "BP 创投") — matched against file paths and the content of sessions that touched files.',
+            },
+            topK: {
+              type: 'integer',
+              description: 'Max file entries to return (default 10, max 25).',
+              default: 10,
+            },
+          },
+          required: ['query'],
+        },
+      },
+      {
         name: 'vesti_memory_search',
         description: MEMORY_SEARCH_DESCRIPTION,
         inputSchema: {
@@ -309,6 +336,9 @@ export function createVestiMcpServer(db: VestiDatabase): Server {
           break;
         case 'vesti_get_handoff_context':
           payload = vestiGetHandoffContext(db, (args ?? {}) as Parameters<typeof vestiGetHandoffContext>[1]);
+          break;
+        case 'vesti_search_files':
+          payload = vestiSearchFiles(db, (args ?? {}) as { query: string; topK?: number });
           break;
         case 'vesti_memory_search':
           payload = vestiMemorySearch(db, (args ?? {}) as Parameters<typeof vestiMemorySearch>[1]);

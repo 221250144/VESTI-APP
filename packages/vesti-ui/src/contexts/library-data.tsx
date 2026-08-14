@@ -87,9 +87,18 @@ export async function refreshLibraryDataState(
   setters: LibraryDataStateSetters
 ): Promise<void> {
   const coreLoad = (async () => {
+    // Topic counts derive from the same conversation list the library
+    // renders; kick the conversation load off first and hand the result to
+    // getTopics so platforms with a Dexie backing store scan the
+    // conversations table once per refresh instead of twice.
+    const conversationsPromise = storage.getConversations();
+    const topicsPromise = conversationsPromise.then(
+      (conversations) => storage.getTopics(conversations),
+      () => storage.getTopics()
+    );
     const [topicResult, conversationResult] = await Promise.allSettled([
-      storage.getTopics(),
-      storage.getConversations(),
+      topicsPromise,
+      conversationsPromise,
     ]);
 
     if (topicResult.status === "fulfilled") {

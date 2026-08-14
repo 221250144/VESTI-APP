@@ -25,6 +25,10 @@ async function maybeRunDream(): Promise<void> {
   try {
     const api = typeof window !== "undefined" ? window.vesti : null;
     if (!api) return;
+    // 做梦为会员专属: free-tier (expired) accounts never auto-dream, even if
+    // the toggle stayed on from a previous membership period.
+    const membership = await window.vestiMembership?.getStatus().catch(() => null);
+    if (membership && !membership.active) return;
     if (!(await isDreamAutoEnabled())) return;
     const settings = await api.getSettings().catch(() => null);
     const llmConfigured = settings

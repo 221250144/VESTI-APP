@@ -1,5 +1,6 @@
 import type {
   VestiCapsuleApi,
+  VestiCreditApi,
   VestiDesktopApi,
   VestiMembershipApi,
   VestiUiPrefsApi,
@@ -10,6 +11,7 @@ declare global {
   interface Window {
     vesti: VestiDesktopApi;
     vestiMembership: VestiMembershipApi;
+    vestiCredits: VestiCreditApi;
     vestiUi?: VestiUiPrefsApi;
     vestiCapsule?: VestiCapsuleApi;
     vestiWindow?: VestiWindowApi;
