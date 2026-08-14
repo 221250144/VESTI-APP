@@ -31,6 +31,7 @@ import {
   addExploreMessage,
   createExploreSession,
   getRecentExploreMessages,
+  updateExploreSession,
 } from "../db/repository";
 
 // ---- Tunables ----------------------------------------------------------------
@@ -85,6 +86,11 @@ export interface AskCompanionInput {
    * before (single non-streaming call). */
   onStream?: (accumulatedRaw: string) => void;
   onReasoning?: (accumulated: string) => void;
+  /** Proactive opening turn (新的夜话): the owl opens the conversation from
+   * long-term memories alone — no user message is persisted, recall is skipped
+   * (there is no query to recall with) and the fresh session is renamed from
+   * the opener's first words. Only meaningful with an empty question. */
+  opener?: boolean;
 }
 
 /** agentMeta payload persisted on the assistant message: the explore fields
@@ -341,6 +347,9 @@ export interface CompanionDeps {
   listMemoryEntries(options?: MemoryEntryListOptions): Promise<MemoryEntryView[]>;
   recallSessions(query: string, topK?: number): Promise<SessionRecallHit[]>;
   createSession(title: string): Promise<string>;
+  /** Optional rename so an opener turn can retitle its fresh session from the
+   * opener's first words. */
+  renameSession?(sessionId: string, title: string): Promise<void>;
   getRecentMessages(sessionId: string, limit: number): Promise<ExploreMessage[]>;
   addMessage(
     sessionId: string,
@@ -400,6 +409,8 @@ function defaultCompanionDeps(): CompanionDeps {
     listMemoryEntries: (options) => requireVestiApi().listMemoryEntries(options),
     recallSessions: (query, topK) => requireVestiApi().recallSessions(query, topK),
     createSession: (title) => createExploreSession(title),
+    renameSession: (sessionId, title) =>
+      updateExploreSession(sessionId, { title }),
     getRecentMessages: (sessionId, limit) => getRecentExploreMessages(sessionId, limit),
     addMessage: (sessionId, message) => addExploreMessage(sessionId, message),
     listConversationRecords: listDexieCompanionConversations,
@@ -418,12 +429,18 @@ export async function askCompanion(
 ): Promise<CompanionAnswer> {
   const persona: CompanionPersona = input.persona ?? "listener";
   const memoryScope: CompanionMemoryScope = input.memoryScope ?? "full";
+  // Opener turns: the owl speaks first. No user message exists to persist or
+  // to recall with — memories/deposits carry the whole context.
+  const isOpener = input.opener === true && !input.question.trim();
   const question = input.question;
   const sessionId =
-    input.sessionId ?? (await deps.createSession(`夜话 · ${question.slice(0, 18)}`));
+    input.sessionId ??
+    (await deps.createSession(
+      isOpener ? "夜话 · 新的开场" : `夜话 · ${question.slice(0, 18)}`,
+    ));
 
   const wantMemory = memoryScope !== "chat";
-  const wantRecall = memoryScope === "full";
+  const wantRecall = memoryScope === "full" && !isOpener;
   const [history, memories, depositDigests, recallHits] = await Promise.all([
     deps.getRecentMessages(sessionId, COMPANION_HISTORY_LIMIT),
     wantMemory
@@ -488,11 +505,13 @@ export async function askCompanion(
       : [];
 
   const now = deps.now();
-  await deps.addMessage(sessionId, {
-    role: "user",
-    content: question,
-    timestamp: now,
-  });
+  if (!isOpener) {
+    await deps.addMessage(sessionId, {
+      role: "user",
+      content: question,
+      timestamp: now,
+    });
+  }
   const agentMeta: CompanionAgentMeta = {
     mode: "agent",
     toolCalls: [],
@@ -508,6 +527,18 @@ export async function askCompanion(
     agentMeta,
     timestamp: now + 1,
   });
+
+  // An opener session was created with a placeholder title; retitle it from
+  // the opener's first words. Best-effort — a rename failure must not sink
+  // the turn.
+  if (isOpener && deps.renameSession) {
+    const firstWords = firstLine(body, 12);
+    if (firstWords) {
+      await deps
+        .renameSession(sessionId, `夜话 · ${firstWords}`)
+        .catch(() => undefined);
+    }
+  }
 
   return {
     sessionId,

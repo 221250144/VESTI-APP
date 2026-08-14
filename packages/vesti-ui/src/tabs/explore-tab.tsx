@@ -175,12 +175,61 @@ export function ExploreTab({
     void saveCompanionPreference(storage, COMPANION_MEMORY_SCOPE_PREF_KEY, next);
   };
 
-  const handleNewChat = useCallback(() => {
-    setCurrentSessionId(null);
-    setMessages([]);
-    setInputValue("");
-    setError(null);
-  }, []);
+  const handleNewChat = useCallback(
+    (withOpener = true) => {
+      setCurrentSessionId(null);
+      setMessages([]);
+      setInputValue("");
+      setError(null);
+      setStreaming(null);
+      // 主动开场: starting a fresh 夜话 lets the owl speak first, grounded in
+      // long-term memories. Best-effort — a failure just leaves the composer.
+      if (!withOpener || !storage.askCompanion || isSubmitting) return;
+      setIsSubmitting(true);
+      void (async () => {
+        try {
+          const answer = await storage.askCompanion!({
+            question: "",
+            opener: true,
+            persona,
+            memoryScope,
+            onStream: (raw) =>
+              setStreaming((prev) => ({ raw, reasoning: prev?.reasoning ?? "" })),
+            onReasoning: (reasoning) =>
+              setStreaming((prev) => ({ raw: prev?.raw ?? "", reasoning })),
+          });
+          setStreaming(null);
+          justCreatedSessionRef.current = answer.sessionId;
+          setCurrentSessionId(answer.sessionId);
+          // Mirror the persisted contract exactly like handleSubmit does.
+          const openerMessage: ExploreMessage = {
+            id: generateId(),
+            sessionId: answer.sessionId,
+            role: "assistant",
+            content: `${answer.mood}\n${answer.content}`,
+            sources: answer.sources,
+            agentMeta: {
+              mode: "agent",
+              toolCalls: [],
+              mood: answer.mood,
+              persona: answer.persona,
+              memoryScope,
+              ...(answer.reasoning ? { reasoning: answer.reasoning } : {}),
+            },
+            timestamp: Date.now(),
+          };
+          setMessages([openerMessage]);
+          await loadSessions();
+        } catch (err) {
+          console.error("[Companion] Opener error:", err);
+          setStreaming(null);
+        } finally {
+          setIsSubmitting(false);
+        }
+      })();
+    },
+    [storage, isSubmitting, persona, memoryScope, loadSessions],
+  );
 
   const handleRenameSession = useCallback(
     async (sessionId: string, title: string) => {
@@ -202,7 +251,10 @@ export function ExploreTab({
       try {
         await storage.deleteExploreSession(sessionId);
         if (currentSessionId === sessionId) {
-          handleNewChat();
+          // Deleting the active chat resets to the composer silently — firing
+          // an opener here would spend credits on a gesture that isn't "start
+          // a new conversation".
+          handleNewChat(false);
         }
         await loadSessions();
       } catch (err) {
@@ -316,7 +368,7 @@ export function ExploreTab({
               loading={sessionsLoading}
               currentSessionId={currentSessionId}
               onSelectSession={setCurrentSessionId}
-              onNewChat={handleNewChat}
+              onNewChat={() => handleNewChat()}
               onRenameSession={handleRenameSession}
               onDeleteSession={(sessionId) => void handleDeleteSession(sessionId)}
             />

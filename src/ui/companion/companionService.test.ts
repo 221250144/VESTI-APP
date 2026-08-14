@@ -279,6 +279,7 @@ function makeDeps(options: CompanionMockOptions = {}) {
     memoryQueries: [] as Array<Parameters<CompanionDeps["listMemoryEntries"]>[0]>,
     recallQueries: [] as Array<{ query: string; topK?: number }>,
     createdTitles: [] as string[],
+    renames: [] as Array<{ sessionId: string; title: string }>,
     addedMessages: [] as Array<{
       sessionId: string;
       message: Omit<ExploreMessage, "id" | "sessionId">;
@@ -303,6 +304,9 @@ function makeDeps(options: CompanionMockOptions = {}) {
     createSession: vi.fn(async (title: string) => {
       calls.createdTitles.push(title);
       return "sess-new";
+    }),
+    renameSession: vi.fn(async (sessionId: string, title: string) => {
+      calls.renames.push({ sessionId, title });
     }),
     getRecentMessages: vi.fn(async () => options.history ?? []),
     addMessage: vi.fn(async (sessionId, message) => {
@@ -530,5 +534,42 @@ describe("askCompanion", () => {
     expect(answer.reasoning).toBeUndefined();
     const meta = calls.addedMessages[1].message.agentMeta as CompanionAgentMeta | undefined;
     expect(meta?.reasoning).toBeUndefined();
+  });
+});
+
+describe("askCompanion opener turns", () => {
+  it("opens proactively: no user message persisted, no recall, session retitled from the opener", async () => {
+    const { deps, calls } = makeDeps({
+      memories: [makeEntry({ id: "m1", tags: ["event"], contentMarkdown: "展板昨天送印了" })],
+      runAgentContent: "warm\n展板送印顺利吗？这两天可以松半口气了。",
+    });
+    const answer = await askCompanion({ question: "", opener: true }, deps);
+    expect(calls.createdTitles).toEqual(["夜话 · 新的开场"]);
+    expect(calls.recallQueries).toEqual([]);
+    // Only the assistant opener is persisted — there is no empty user bubble.
+    expect(calls.addedMessages).toHaveLength(1);
+    expect(calls.addedMessages[0].message.role).toBe("assistant");
+    expect(calls.addedMessages[0].sessionId).toBe("sess-new");
+    expect(calls.renames).toEqual([
+      { sessionId: "sess-new", title: "夜话 · 展板送印顺利吗？这两天…" },
+    ]);
+    expect(answer.sessionId).toBe("sess-new");
+    expect(answer.mood).toBe("warm");
+    expect(answer.sources).toEqual([]);
+    // The agent request still carries the memory context.
+    expect(calls.agentRequests[0].transcriptOverride).toContain("展板昨天送印了");
+  });
+
+  it("keeps the placeholder title when the opener body is empty", async () => {
+    const { deps, calls } = makeDeps({ runAgentContent: "calm\n" });
+    await askCompanion({ question: "", opener: true }, deps);
+    expect(calls.renames).toEqual([]);
+  });
+
+  it("ignores the opener flag when a question is present", async () => {
+    const { deps, calls } = makeDeps({});
+    await askCompanion({ sessionId: "sess-1", question: "晚上好", opener: true }, deps);
+    expect(calls.addedMessages[0].message.role).toBe("user");
+    expect(calls.renames).toEqual([]);
   });
 });

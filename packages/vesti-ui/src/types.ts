@@ -96,6 +96,10 @@ export interface CompanionAskInput {
    * thinking trace. Omit both for the classic single-shot turn. */
   onStream?: (accumulatedRaw: string) => void;
   onReasoning?: (accumulated: string) => void;
+  /** Proactive opening turn (新的夜话): no user message is persisted; the owl
+   * opens the conversation from long-term memories alone. Only meaningful
+   * with an empty question. */
+  opener?: boolean;
 }
 
 export interface CompanionAnswer {

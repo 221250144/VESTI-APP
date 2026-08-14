@@ -915,13 +915,13 @@ describe('companion agent kind', () => {
     expect(messages[1].content).toBe('CONTEXT\n\n用户现在说：给我点灵感');
   });
 
-  it('falls back to the greeting line when the question is empty', () => {
+  it('falls back to the proactive opener instruction when the question is empty', () => {
     const messages = getAgentKindDefinition('companion').buildPrompt({
       transcript: '',
       question: '',
       preferences: zhPreferences,
     });
-    expect(messages[1].content).toBe('\n\n用户现在说：（用户没有说话，主动打个招呼吧）');
+    expect(messages[1].content).toContain('用户现在说：（用户还没有说话。请主动开场');
   });
 
   it('appends custom instructions after the language affix', () => {
