@@ -57,6 +57,8 @@ const api: VestiDesktopApi = {
   restartApp: () => ipcRenderer.invoke(IPC.restart),
   testLlm: () => ipcRenderer.invoke(IPC.llmTest),
   embeddingStatus: () => ipcRenderer.invoke(IPC.embeddingStatus),
+  getThinkingMapSemantics: (sessionIds, totalConversationCount) =>
+    ipcRenderer.invoke(IPC.thinkingMapSemantics, sessionIds, totalConversationCount),
   runAgent: request => ipcRenderer.invoke(IPC.agentRun, request),
   getAgentResults: () => ipcRenderer.invoke(IPC.agentResults),
   exportConversations: () => ipcRenderer.invoke(IPC.exportConversations),

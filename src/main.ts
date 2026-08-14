@@ -21,6 +21,7 @@ import { CapsuleWindowService, normalizeCapsuleBubblePayload } from './main/caps
 import { DigestService } from './main/digestService';
 import { ProjectMemoryService } from './main/projectMemoryService';
 import { EmbeddingService } from './main/embeddingService';
+import { ThinkingMapSemanticService } from './main/thinkingMapSemanticService';
 import { ExtensionBridgeService, MAX_OUTBOX_PROMPT_CHARS } from './main/extensionBridgeService';
 import { NotionService } from './main/notionService';
 import { MembershipError, MembershipService } from './main/membershipService';
@@ -84,6 +85,7 @@ let settings: SettingsService;
 let membership: MembershipService;
 let agent: AgentService;
 let embedding: EmbeddingService;
+let thinkingMapSemantics: ThinkingMapSemanticService;
 let digest: DigestService;
 let projectMemory: ProjectMemoryService;
 let notion: NotionService;
@@ -204,6 +206,7 @@ async function activateProductRuntime(): Promise<void> {
   membership.requireActive();
   productActivation = (async () => {
     productRuntimeActive = true;
+    thinkingMapSemantics.start();
     digest.start();
     projectMemory.requestScan();
     await extensionBridge.start();
@@ -230,6 +233,7 @@ async function activateProductRuntime(): Promise<void> {
 async function deactivateProductRuntime(): Promise<void> {
   if (productActivation) await productActivation.catch(() => undefined);
   productRuntimeActive = false;
+  thinkingMapSemantics.stop();
   digest.stop();
   projectMemory.stop();
   await capture.setWatching(false).catch(() => false);
@@ -849,6 +853,7 @@ function registerIpc(): void {
     embedding.invalidateStatus();
     capture.setEnabledPlatforms(result.settings.capture.enabledPlatforms);
     await applyProxySettings();
+    thinkingMapSemantics.requestScan();
     applyGeneralSettings();
     updateTrayMenu();
     return result;
@@ -923,6 +928,23 @@ function registerIpc(): void {
   });
   memberIpcHandle(IPC.llmTest, () => agent.test());
   memberIpcHandle(IPC.embeddingStatus, () => embedding.getStatus());
+  memberIpcHandle(
+    IPC.thinkingMapSemantics,
+    (_event, sessionIds: unknown, totalConversationCount: unknown) => {
+      if (
+        !Array.isArray(sessionIds)
+        || sessionIds.length > 20_000
+        || !sessionIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 2_000)
+        || typeof totalConversationCount !== 'number'
+        || !Number.isInteger(totalConversationCount)
+        || totalConversationCount < 0
+        || totalConversationCount > 1_000_000
+      ) {
+        throw new Error('Invalid thinking map semantics request');
+      }
+      return thinkingMapSemantics.getSnapshot(sessionIds, totalConversationCount);
+    },
+  );
   memberIpcHandle(IPC.agentRun, (_event, request: unknown) => {
     if (!validAgentRequest(request)) throw new Error('Agent 请求无效');
     return agent.run(request, { persist: request.persist });
@@ -1390,7 +1412,11 @@ app.whenReady().then(async () => {
   await capture.initialize(broadcastChange, settings.dataDirectory, settings.capture.enabledPlatforms);
   agent = new AgentService(capture, settings);
   embedding = new EmbeddingService(settings);
+  thinkingMapSemantics = new ThinkingMapSemanticService(capture, embedding);
   digest = new DigestService(capture, agent, embedding, () => settings.isLlmConfigured());
+  digest.setScanCompletedListener(() => {
+    if (productRuntimeActive) thinkingMapSemantics.requestScan();
+  });
   notion = new NotionService(settings);
   projectMemory = new ProjectMemoryService(capture, agent);
   agentMcp = createAgentMcpRegistry(app.getAppPath(), process.resourcesPath);

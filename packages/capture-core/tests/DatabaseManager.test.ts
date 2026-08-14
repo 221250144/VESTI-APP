@@ -3,7 +3,8 @@ import path from 'node:path';
 import fs from 'fs-extra';
 import { afterEach, describe, expect, it } from 'vitest';
 import { DatabaseManager } from '../src/storage/DatabaseManager.js';
-import type { TokenUsageEvent, WorkSession } from '../src/types/unified.js';
+import { serializeVector } from '../src/search/VectorSearch.js';
+import type { SessionDigest, TokenUsageEvent, WorkSession } from '../src/types/unified.js';
 
 const tempDirs: string[] = [];
 
@@ -432,6 +433,74 @@ describe('DatabaseManager subagent folding (A1)', () => {
       },
     ]);
 
+    await manager.close();
+  });
+});
+
+describe('DatabaseManager active embedding index', () => {
+  function semanticDigest(updatedAt: string): SessionDigest {
+    return {
+      sessionId: 'codex:active-session',
+      host: 'native',
+      platform: 'codex',
+      projectKey: 'cli_test',
+      oneLiner: 'Implement token rotation',
+      keyTopics: ['authentication'],
+      keyFiles: [],
+      decisions: [],
+      openQuestions: [],
+      embedding: null,
+      embeddingStatus: 'skipped',
+      digestVersion: 1,
+      messageCount: 20,
+      updatedAt,
+    };
+  }
+
+  it('promotes atomically and treats vectors older than the digest as missing', async () => {
+    const manager = await createManager();
+    manager.upsertWorkSession(session());
+    manager.upsertSessionDigest(semanticDigest('2026-01-01T00:00:00.000Z'));
+    manager.upsertDigestEmbedding({
+      sessionId: 'codex:active-session',
+      provider: 'provider',
+      model: 'model',
+      dimensions: 2,
+      indexVersion: 'provider:model:2',
+      embedding: serializeVector(new Float32Array([1, 0])),
+      createdAt: '2026-01-01T00:00:01.000Z',
+    });
+
+    expect(manager.getEmbeddingIndexState().activeVersion).toBeNull();
+    expect(manager.listDigestEmbeddingSessionIds('provider:model:2')).toEqual([
+      'codex:active-session',
+    ]);
+    manager.promoteEmbeddingIndex('provider:model:2', '2026-01-01T00:00:02.000Z');
+    expect(manager.getEmbeddingIndexState()).toMatchObject({
+      activeVersion: 'provider:model:2',
+      promotedAt: '2026-01-01T00:00:02.000Z',
+    });
+
+    manager.upsertSessionDigest(semanticDigest('2026-01-02T00:00:00.000Z'));
+    expect(manager.listDigestEmbeddingSessionIds('provider:model:2')).toEqual([]);
+    expect(manager.listThinkingMapEmbeddings(
+      'provider:model:2',
+      ['codex:active-session'],
+    )).toEqual([]);
+
+    manager.upsertDigestEmbedding({
+      sessionId: 'codex:active-session',
+      provider: 'provider',
+      model: 'model',
+      dimensions: 2,
+      indexVersion: 'provider:model:2',
+      embedding: serializeVector(new Float32Array([0.9, 0.1])),
+      createdAt: '2026-01-02T00:00:01.000Z',
+    });
+    expect(manager.listThinkingMapEmbeddings(
+      'provider:model:2',
+      ['codex:active-session'],
+    )).toHaveLength(1);
     await manager.close();
   });
 });

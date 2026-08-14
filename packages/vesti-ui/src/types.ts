@@ -435,6 +435,24 @@ export interface StorageUsageSnapshot {
   status: StorageUsageStatus;
 }
 
+export type ThinkingMapSemanticPhase =
+  | 'ready'
+  | 'building'
+  | 'unavailable'
+  | 'limit-exceeded';
+
+export interface ThinkingMapSemanticSnapshot {
+  phase: ThinkingMapSemanticPhase;
+  edges: Array<{ source: number; target: number; weight: number }>;
+  coverage: {
+    indexed: number;
+    supported: number;
+    total: number;
+    unsupportedBrowser: number;
+  };
+  activeIndexVersion: string | null;
+}
+
 export type ConversationFilters = {
   platform?: Platform;
   search?: string;
@@ -473,10 +491,9 @@ export type StorageApi = {
     conversationId: number,
     limit?: number
   ) => Promise<RelatedConversation[]>;
-  getAllEdges?: (options?: {
-    threshold?: number;
-    conversationIds?: number[];
-  }) => Promise<Array<{ source: number; target: number; weight: number }>>;
+  getThinkingMapSemantics?: (
+    conversationIds: number[]
+  ) => Promise<ThinkingMapSemanticSnapshot>;
   getMessages?: (conversationId: number) => Promise<Message[]>;
   getAnnotationsByConversation?: (conversationId: number) => Promise<Annotation[]>;
   saveAnnotation?: (payload: {
@@ -1973,21 +1990,12 @@ export interface DashboardLabels {
     connectedConversations: string;
     noSemanticLinksForNode: string;
     viewInLibrary: string;
-    edgeSemanticSimilarity: string;
     trendScrubberAriaLabel: string;
     conversationsVisible: string;
     appearsLaterInReplay: string;
     starred: string;
     unknownPlatform: string;
     conversationN: string;
-    thinkingMapView: string;
-    conversationMapView: string;
-    thinkingMapEmpty: string;
-    loadingThinkingMap: string;
-    gapInsightTitle: string;
-    gapInsightTemplate: string;
-    conceptMentionedIn: string;
-    relatedConversations: string;
     groupByLabel: string;
     groupByPlatform: string;
     groupByTopic: string;

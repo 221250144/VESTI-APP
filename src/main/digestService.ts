@@ -168,6 +168,7 @@ export class DigestService {
   private degradedGaveUpCount = 0;
   private pumpPromise: Promise<void> | null = null;
   private scanTimer: NodeJS.Timeout | null = null;
+  private scanCompleted?: () => void;
 
   constructor(
     private readonly store: DigestSessionStore,
@@ -176,6 +177,10 @@ export class DigestService {
     /** Degraded rows are retried only when the chat LLM is usable. */
     private readonly isLlmReady: () => boolean = () => true,
   ) {}
+
+  setScanCompletedListener(listener: () => void): void {
+    this.scanCompleted = listener;
+  }
 
   /** Initial backfill scan at startup. */
   start(): void {
@@ -213,6 +218,7 @@ export class DigestService {
     this.enqueueDegradedRetries();
     await this.pumpPromise;
     this.logDigestHealth();
+    this.scanCompleted?.();
   }
 
   /**

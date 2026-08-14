@@ -89,6 +89,8 @@ export type {
   ExportFormat,
   AsyncStatus,
   StorageUsageSnapshot,
+  ThinkingMapSemanticPhase,
+  ThinkingMapSemanticSnapshot,
   Note,
   StorageApi,
   ConversationFilters,

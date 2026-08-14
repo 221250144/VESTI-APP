@@ -70,7 +70,7 @@ registerAgentKind('summary', {
   "thinking_journey": [{"step": 1, "speaker": "User", "assertion": "每一步的关键推进", "real_world_anchor": "对应的现实依据，没有则为 null"}],
   "key_insights": [{"term": "关键概念或结论", "definition": "一句话解释"}],
   "unresolved_threads": ["尚未解决的问题"],
-  "meta_observations": {"thinking_style": "对思维风格的一句话观察", "emotional_tone": "对情绪基调的一句话观察", "depth_level": "superficial 或 moderate 或 deep"},
+  "meta_observations": {"thinking_style": "对思维风格的一句话观察", "emotional_tone": "用户（不是 AI）在这段对话中的情绪状态，一句话，如\"焦虑中寻求确定\"、\"悲伤倾诉\"、\"兴奋地探索\"；描述 AI 回应姿态（温和/耐心/支持性等）属于错误输出", "depth_level": "superficial 或 moderate 或 deep"},
   "actionable_next_steps": ["建议的下一步"]
 }
 要求：speaker 只能是 "User" 或 "AI"；depth_level 只能是 "superficial"、"moderate"、"deep" 之一；thinking_journey 最多 10 步；key_insights 最多 8 条；没有内容的字段给空数组。

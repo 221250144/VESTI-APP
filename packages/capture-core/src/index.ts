@@ -26,6 +26,13 @@ export type { SyncResult, SyncFileResult } from './sync/SyncEngine.js';
 export { SearchEngine } from './search/SearchEngine.js';
 export { serializeVector, deserializeVector, cosineSimilarity, searchByVector } from './search/VectorSearch.js';
 export type { VectorCandidate, VectorMatch } from './search/VectorSearch.js';
+export { buildSemanticEdges } from './search/SemanticEdges.js';
+export type {
+  SemanticEdgeVector,
+  SemanticEdge,
+  SemanticEdgePolicy,
+  SemanticEdgeBuildResult,
+} from './search/SemanticEdges.js';
 export {
   recallSessions,
   recallTokens,

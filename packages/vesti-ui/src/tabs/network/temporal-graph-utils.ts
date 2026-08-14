@@ -30,6 +30,8 @@ export interface GraphNode {
   createdAt: number;
   radius: number;
   color: string;
+  /** Starred conversations get a steady halo on the sphere (slice 3). */
+  starred?: boolean;
   /** Cluster only: conversation ids folded into this node. */
   memberIds?: number[];
   /** Cluster only: member count (== memberIds.length). */
@@ -144,18 +146,6 @@ export function getNodeAlpha(node: GraphNode, currentDay: number) {
   return Math.max(0.15, 0.2 + 0.8 * sigmoid(3 - age * 0.6));
 }
 
-export function getEdgeAlpha(
-  edge: GraphEdge,
-  sourceNode: GraphNode,
-  targetNode: GraphNode,
-  currentDay: number
-) {
-  const latestDay = Math.max(sourceNode.timelineDay, targetNode.timelineDay);
-  if (latestDay > currentDay) return 0;
-  const edgeAge = currentDay - latestDay;
-  return edge.weight * Math.max(0.08, 0.15 + 0.6 * sigmoid(2.5 - edgeAge * 0.55));
-}
-
 export function hexToRgba(hex: string, alpha: number) {
   const normalized = hex.replace("#", "");
   const r = Number.parseInt(normalized.slice(0, 2), 16);
@@ -171,11 +161,6 @@ export function getDisplayDay(currentDay: number, totalDays: number) {
 
 export function getVisibleConversationCount(nodes: GraphNode[], currentDay: number) {
   return nodes.reduce((count, node) => count + (node.timelineDay <= currentDay ? 1 : 0), 0);
-}
-
-export function getGraphEdgeStroke(themeMode: UiThemeMode, alpha: number) {
-  const rgb = themeMode === "dark" ? "180, 178, 168" : "100, 98, 90";
-  return `rgba(${rgb}, ${alpha})`;
 }
 
 export function getGraphLabelFill(themeMode: UiThemeMode, alpha: number) {
@@ -451,6 +436,7 @@ export function aggregateNodesIntoClusters(
       createdAt: members[0].createdAt,
       radius: getClusterRadius(memberCount),
       color: latest.color,
+      starred: members.some((member) => member.starred),
       memberIds: members.map((member) => member.id),
       memberCount,
     });
@@ -567,6 +553,7 @@ export function buildTemporalNetworkDataset(
       color:
         options.groupColorByKey?.get(groupKey) ??
         GRAPH_PLATFORM_COLORS[conversation.platform],
+      starred: conversation.is_starred,
     };
   });
 

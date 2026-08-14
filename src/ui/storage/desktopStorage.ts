@@ -6,9 +6,8 @@
 // calls the ported repository/promptRepository directly. AI-backed methods
 // reuse the existing window.vesti agent IPC instead of the extension's LLM
 // service; conversation export to Notion/Obsidian goes through the P3
-// upstream modules (src/ui/upstream/*). Capabilities with no desktop
-// equivalent (Obsidian vault connection, vector similarity) are left
-// unimplemented — the StorageApi marks them optional and the UI hides them.
+// upstream modules (src/ui/upstream/*). Obsidian vault connection remains
+// optional; Thinking Map similarity crosses the dedicated desktop IPC seam.
 
 import type {
   ChatSummaryData,
@@ -33,6 +32,7 @@ import type {
   StorageApi,
   WeeklyReport,
 } from "@vesti/ui";
+import { mapThinkingMapSemanticSnapshot } from "./thinkingMapSemantics";
 import { computeSummaryCoverage, learnRouteFingerprint, serializeRelayPackMarkdown } from "@vesti/ui";
 import { askCompanion } from "../companion/companionService";
 import type {
@@ -188,6 +188,10 @@ type RagSources = Awaited<
   ReturnType<NonNullable<StorageApi["askKnowledgeBase"]>>
 >["sources"];
 
+type ThinkingMapSemanticSnapshot = Awaited<
+  ReturnType<NonNullable<StorageApi['getThinkingMapSemantics']>>
+>;
+
 function vestiApi(): VestiDesktopApi | null {
   return typeof window !== "undefined" && window.vesti ? window.vesti : null;
 }
@@ -206,6 +210,39 @@ async function getConversationCliId(
     title: record.title,
     updatedAt: record.updated_at ?? Date.now(),
   };
+}
+
+async function getThinkingMapSemanticsImpl(
+  conversationIds: number[]
+): Promise<ThinkingMapSemanticSnapshot> {
+  const uniqueIds = [...new Set(
+    conversationIds.filter((id) => Number.isInteger(id) && id >= 0)
+  )];
+  const total = uniqueIds.length;
+  const records = total > 0
+    ? await db.conversations.where('id').anyOf(uniqueIds).toArray()
+    : [];
+  const sessionIdByConversationId = new Map<number, string>();
+  records
+    .filter((record): record is ConversationRecord & LocalTerminalFields & { id: number } =>
+      typeof record.id === 'number'
+    )
+    .sort((left, right) => left.id - right.id)
+    .forEach((record) => {
+      if (typeof record._cli_id !== 'string' || !record._cli_id.trim()) return;
+      sessionIdByConversationId.set(record.id, record._cli_id);
+    });
+
+  const api = vestiApi();
+  if (!api) return mapThinkingMapSemanticSnapshot(null, sessionIdByConversationId, total);
+
+  const result = await api
+    .getThinkingMapSemantics(
+      [...new Set(sessionIdByConversationId.values())],
+      total
+    )
+    .catch(() => null);
+  return mapThinkingMapSemanticSnapshot(result, sessionIdByConversationId, total);
 }
 
 // ---- Summary mapping -------------------------------------------------------
@@ -550,6 +587,10 @@ async function generateSummaryInner(conversationId: number): Promise<ChatSummary
     createdAt: result.createdAt || Date.now(),
     sourceUpdatedAt: info.updatedAt,
   });
+  // Summaries feed derived views that refresh on "vesti:data-updated" (AITI
+  // profile, sphere emotion colors); a manual summary write must signal too,
+  // otherwise those views stay stale until the next capture sync.
+  window.dispatchEvent(new CustomEvent("vesti:data-updated"));
   return summaryRecordToChatSummaryData(saved, result.sessionTitle || title);
 }
 
@@ -1476,6 +1517,8 @@ async function extractPromptsFromDesktop(options?: {
 export const desktopStorage: StorageApi = {
   getTopics: () => getTopics(),
   getConversations: (filters) => listConversations(filters),
+  getThinkingMapSemantics: (conversationIds) =>
+    getThinkingMapSemanticsImpl(conversationIds),
 
   getMessages: (conversationId) => listMessages(conversationId),
 

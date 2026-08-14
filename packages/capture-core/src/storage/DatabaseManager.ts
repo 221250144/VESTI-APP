@@ -1673,12 +1673,157 @@ export class DatabaseManager {
         digest.embedding,
         digest.updatedAt,
       );
+      this.getDb().prepare(
+        'UPDATE embedding_index_state SET revision = revision + 1 WHERE singleton = 1',
+      ).run();
     }
   }
 
   getSessionDigest(sessionId: string): SessionDigest | null {
     const row = this.getDb().prepare('SELECT * FROM session_digests WHERE session_id = ?').get(sessionId) as any;
     return row ? this.rowToSessionDigest(row) : null;
+  }
+
+  /**
+   * Healthy digest representations that may be embedded without another LLM
+   * summary pass. Structural fallback rows remain for DigestService recovery
+   * and are deliberately excluded from vector-only backfill.
+   */
+  listEmbeddableSessionDigests(): SessionDigest[] {
+    return (this.getDb().prepare(`
+      SELECT sd.*
+      FROM session_digests sd
+      JOIN work_sessions ws ON ws.id = sd.session_id
+      WHERE ws.session_type = 'conversation'
+        AND COALESCE(TRIM(sd.one_liner), '') != ''
+        AND sd.embedding_status NOT IN ('failed', 'degraded')
+        AND NOT (
+          sd.embedding_status = 'skipped'
+          AND COALESCE(TRIM(sd.key_topics), '[]') IN ('', '[]')
+          AND COALESCE(TRIM(sd.key_files), '[]') IN ('', '[]')
+          AND COALESCE(TRIM(sd.decisions), '[]') IN ('', '[]')
+          AND COALESCE(TRIM(sd.open_questions), '[]') IN ('', '[]')
+        )
+      ORDER BY sd.updated_at ASC, sd.session_id ASC
+    `).all() as any[]).map(row => this.rowToSessionDigest(row));
+  }
+
+  getEmbeddingIndexState(): {
+    activeVersion: string | null;
+    revision: number;
+    promotedAt: string | null;
+  } {
+    const row = this.getDb().prepare(`
+      SELECT active_index_version, revision, promoted_at
+      FROM embedding_index_state WHERE singleton = 1
+    `).get() as {
+      active_index_version: string | null;
+      revision: number;
+      promoted_at: string | null;
+    } | undefined;
+    return {
+      activeVersion: row?.active_index_version ?? null,
+      revision: row?.revision ?? 0,
+      promotedAt: row?.promoted_at ?? null,
+    };
+  }
+
+  listDigestEmbeddingSessionIds(indexVersion: string): string[] {
+    return (this.getDb().prepare(`
+      SELECT sde.session_id
+      FROM session_digest_embeddings sde
+      JOIN session_digests sd ON sd.session_id = sde.session_id
+      WHERE sde.index_version = ?
+        AND julianday(sde.created_at) >= julianday(sd.updated_at)
+      ORDER BY sde.session_id ASC
+    `).all(indexVersion) as Array<{ session_id: string }>).map(row => row.session_id);
+  }
+
+  listThinkingMapEmbeddings(
+    indexVersion: string,
+    sessionIds: string[],
+  ): Array<{ sessionId: string; dimensions: number; embedding: Buffer }> {
+    const wanted = new Set(sessionIds);
+    if (wanted.size === 0) return [];
+    return (this.getDb().prepare(`
+      SELECT sde.session_id, sde.dimensions, sde.embedding
+      FROM session_digest_embeddings sde
+      JOIN session_digests sd ON sd.session_id = sde.session_id
+      WHERE sde.index_version = ?
+        AND julianday(sde.created_at) >= julianday(sd.updated_at)
+      ORDER BY sde.session_id ASC
+    `).all(indexVersion) as Array<{
+      session_id: string;
+      dimensions: number;
+      embedding: Buffer;
+    }>).flatMap(row => wanted.has(row.session_id)
+      ? [{
+          sessionId: row.session_id,
+          dimensions: row.dimensions,
+          embedding: row.embedding,
+        }]
+      : []);
+  }
+
+  upsertDigestEmbedding(input: {
+    sessionId: string;
+    provider: string;
+    model: string;
+    dimensions: number;
+    indexVersion: string;
+    embedding: Buffer;
+    createdAt: string;
+  }): void {
+    const db = this.getDb();
+    db.transaction(() => {
+      db.prepare(`
+        INSERT INTO session_digest_embeddings (
+          session_id, provider, model, dimensions, index_version, embedding, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_id, index_version) DO UPDATE SET
+          provider = excluded.provider,
+          model = excluded.model,
+          dimensions = excluded.dimensions,
+          embedding = excluded.embedding,
+          created_at = excluded.created_at
+      `).run(
+        input.sessionId,
+        input.provider,
+        input.model,
+        input.dimensions,
+        input.indexVersion,
+        input.embedding,
+        input.createdAt,
+      );
+      db.prepare(`
+        UPDATE session_digests
+        SET embedding = ?,
+            embedding_provider = ?,
+            embedding_model = ?,
+            embedding_dimensions = ?,
+            embedding_version = ?,
+            embedding_status = 'ok'
+        WHERE session_id = ?
+      `).run(
+        input.embedding,
+        input.provider,
+        input.model,
+        input.dimensions,
+        input.indexVersion,
+        input.sessionId,
+      );
+      db.prepare(
+        'UPDATE embedding_index_state SET revision = revision + 1 WHERE singleton = 1',
+      ).run();
+    })();
+  }
+
+  promoteEmbeddingIndex(indexVersion: string, promotedAt = new Date().toISOString()): void {
+    this.getDb().prepare(`
+      UPDATE embedding_index_state
+      SET active_index_version = ?, promoted_at = ?, revision = revision + 1
+      WHERE singleton = 1
+    `).run(indexVersion, promotedAt);
   }
 
   /** All digests of one project, newest first (L2 brief input). */

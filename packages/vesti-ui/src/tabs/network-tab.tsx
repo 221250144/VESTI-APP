@@ -1,16 +1,25 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowRight, X } from "lucide-react";
-import type { ChatSummaryData, StorageApi, UiThemeMode } from "../types";
+import { ArrowRight, Maximize2, Minimize2, X } from "lucide-react";
+import type {
+  ChatSummaryData,
+  StorageApi,
+  UiThemeMode,
+} from "../types";
 import type { DashboardLabels } from "../types";
 import { useLibraryData } from "../contexts/library-data";
 import { getPlatformBadgeStyle, getPlatformLabel } from "../constants/platform";
 import { GraphLegend } from "./network/GraphLegend";
+import {
+  EMOTION_FAMILIES,
+  EMOTION_FAMILY_LABELS,
+  getEmotionColor,
+  getEmotionFamily,
+  type EmotionFamily,
+} from "./network/emotionColors";
 import { TemporalGraph } from "./network/TemporalGraph";
-import { ThinkingMap } from "./network/ThinkingMapView";
 import { TimeBar } from "./network/TimeBar";
-import { buildThinkingMap } from "./network/thinkingMap";
 import {
   GRAPH_HEIGHT,
   buildNetworkGroups,
@@ -19,21 +28,31 @@ import {
   getConversationOriginAt,
   getVisibleConversationCount,
   progressToDay,
-  type GraphEdge,
   type GraphNode,
   type NetworkGroupBy,
 } from "./network/temporal-graph-utils";
 
-type NetworkView = "conversations" | "thinking";
-
 const SUMMARY_FETCH_BATCH = 8;
-/** Bound summary loading in the thinking view: concepts come from digests
- * first; summaries are only fetched for conversations without a digest, and
- * even then only for the most recent ones. */
+/** Bound summary loading (star emotion colors): most recent first, capped. */
 const SUMMARY_FETCH_MAX = 400;
-/** Node/edge budgets for the temporal graph (see temporal-graph-utils). */
+/** Node budget for the conversation sphere (see temporal-graph-utils). */
 const MAX_GRAPH_NODES = 260;
-const MAX_GRAPH_EDGES = 900;
+/** Sphere legend footnotes (English, matching the slice-1 preset
+ * buttons -- i18n labels for these are follow-up work). */
+const EMOTION_LEGEND_NOTES = [
+  "Pale tint = last activity (blue recent → red dormant)",
+  "Steady halo = starred",
+];
+/** Full-bleed sky: the tab background itself is the sky — no panel, no
+ * edge, so the sphere floats in open space (canvas stays transparent).
+ * Theme-anchored: the far field converges exactly to --bg-tertiary. The dark
+ * theme stays hue-free black (premium feel): depth comes from value steps —
+ * slightly deeper zenith overhead, faint halo near the sphere — not blue. */
+const SKY_BACKGROUND: Record<UiThemeMode, string> = {
+  dark: "radial-gradient(ellipse 150% 110% at 50% 42%, #232323 0%, rgba(26, 26, 26, 0) 68%), linear-gradient(#141414 0%, #1a1a1a 52%)",
+  light:
+    "radial-gradient(ellipse 150% 110% at 50% 42%, rgba(228, 234, 246, 0.9) 0%, rgba(249, 250, 252, 0) 70%), linear-gradient(#eef1f7 0%, #f9fafc 58%)",
+};
 /** Cap the cluster drawer member list; the rest is summarized. */
 const CLUSTER_DRAWER_MEMBER_LIMIT = 60;
 
@@ -44,8 +63,6 @@ interface NetworkTabProps {
   onSelectConversation?: (id: number) => void;
   labels?: DashboardLabels["network"];
 }
-
-type EdgeStatus = "idle" | "loading" | "ready" | "error";
 
 const PLAYBACK_DURATION_MS = 8_000;
 
@@ -85,16 +102,16 @@ export function NetworkTab({
   const [infoText, setInfoText] = useState(labels.noConversationsYet ?? "No conversations captured yet.");
   const [graphResetToken, setGraphResetToken] = useState(0);
   const [scrubToken, setScrubToken] = useState(0);
-  const [edgeStatus, setEdgeStatus] = useState<EdgeStatus>("idle");
-  const [edgeError, setEdgeError] = useState<string | null>(null);
-  const [edges, setEdges] = useState<GraphEdge[]>([]);
+  // 星轨球不绘制语义边（design §3），也不再加载 getAllEdges——桌面宿主本就
+  // 未实现它。`dataset.data.edges` 恒为空；切片 3 起抽屉的 semantic-links
+  // 区块随之移除，"关联"改由同星座高亮表达。
   const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null);
-  const [networkView, setNetworkView] = useState<NetworkView>("conversations");
-  const [summariesById, setSummariesById] = useState<Map<number, ChatSummaryData>>(
+  // Emotional tone per conversation (summary meta_observations.emotional_tone)
+  // — the ONLY source of star colors on the conversation sphere. Digests
+  // carry no emotional_tone, so every non-trash conversation is fetched.
+  const [emotionToneById, setEmotionToneById] = useState<Map<number, string>>(
     () => new Map()
   );
-  const [summariesLoading, setSummariesLoading] = useState(false);
-  const [selectedConceptId, setSelectedConceptId] = useState<string | null>(null);
   const hasProjectData = useMemo(
     () => [...digestByConversationId.values()].some((digest) => digest.projectKey),
     [digestByConversationId]
@@ -129,11 +146,6 @@ export function NetworkTab({
     () => new Map(conversations.map((conversation) => [conversation.id, conversation])),
     [conversations]
   );
-  const presentPlatforms = useMemo(
-    () => [...new Set(conversations.map((conversation) => conversation.platform))],
-    [conversations]
-  );
-
   // Semantic grouping (platform / topic / project) → node colors, legend
   // swatches, cluster identity. Project grouping needs digest data (APP only).
   const networkGroups = useMemo(
@@ -156,41 +168,62 @@ export function NetworkTab({
 
   const dataset = useMemo(
     () =>
-      buildTemporalNetworkDataset(conversations, edges, {
+      buildTemporalNetworkDataset(conversations, [], {
         groupKeyById: networkGroups.groupKeyById,
         groupColorByKey,
         maxNodes: MAX_GRAPH_NODES,
-        maxEdges: MAX_GRAPH_EDGES,
       }),
-    [conversations, edges, networkGroups.groupKeyById, groupColorByKey]
+    [conversations, networkGroups.groupKeyById, groupColorByKey]
   );
-  // Unclustered dataset: full conversation id set (edge loading, visible
-  // count) stays truthful regardless of aggregation.
+  // Unclustered dataset: full conversation id set (visible count) stays
+  // truthful regardless of aggregation.
   const baseDataset = useMemo(
     () => buildTemporalNetworkDataset(conversations, [], { maxNodes: Infinity }),
     [conversations]
   );
   const totalDays = dataset.data.totalDays;
 
-  // Load cached summaries (bounded concurrency) only while in thinking-map
-  // view — and only for conversations that have no L1 digest yet (digest
-  // key_topics are the primary concept source), most recent first, capped.
-  useEffect(() => {
-    if (networkView !== "thinking") return;
+  // Star colors: conversation nodes bucket their own emotional tone; cluster
+  // nodes inherit the newest member's family (same "latest wins" semantics as
+  // the cluster color). Missing/unmatched tones simply stay out of the map —
+  // the renderer falls back to the neutral grey-white star.
+  const emotionById = useMemo(() => {
+    const map = new Map<number, EmotionFamily | null>();
+    for (const node of dataset.data.nodes) {
+      const toneId =
+        node.kind === "cluster" ? node.memberIds?.[node.memberIds.length - 1] : node.id;
+      const family = getEmotionFamily(
+        toneId !== undefined ? emotionToneById.get(toneId) : undefined
+      );
+      if (family) map.set(node.id, family);
+    }
+    return map;
+  }, [dataset.data.nodes, emotionToneById]);
+  // Emotion legend swatches in EMOTION_FAMILIES order; colors follow the
+  // active theme, notes explain the two non-emotion visual channels.
+  const emotionSwatches = useMemo(
+    () =>
+      EMOTION_FAMILIES.map((family) => ({
+        key: family,
+        label: EMOTION_FAMILY_LABELS[family],
+        color: getEmotionColor(family, themeMode),
+      })),
+    [themeMode]
+  );
 
+
+
+  // Load emotional tones for the conversation-sphere star colors:
+  // bounded-concurrency summary fetch, most recent first, capped.
+  useEffect(() => {
     const getSummary = storage.getSummary;
     if (!getSummary) {
-      setSummariesById(new Map());
-      setSummariesLoading(false);
+      setEmotionToneById(new Map());
       return;
     }
 
     const targetIds = conversations
       .filter((conversation) => !conversation.is_trash)
-      .filter((conversation) => {
-        const digest = digestByConversationId.get(conversation.id);
-        return !digest || digest.keyTopics.length === 0;
-      })
       .sort(
         (left, right) =>
           getConversationOriginAt(right) - getConversationOriginAt(left) ||
@@ -200,16 +233,14 @@ export function NetworkTab({
       .map((conversation) => conversation.id);
 
     if (targetIds.length === 0) {
-      setSummariesById(new Map());
-      setSummariesLoading(false);
+      setEmotionToneById(new Map());
       return;
     }
 
     let cancelled = false;
-    setSummariesLoading(true);
 
     const run = async () => {
-      const collected = new Map<number, ChatSummaryData>();
+      const collected = new Map<number, string>();
       for (let start = 0; start < targetIds.length; start += SUMMARY_FETCH_BATCH) {
         if (cancelled) return;
         const batch = targetIds.slice(start, start + SUMMARY_FETCH_BATCH);
@@ -221,13 +252,11 @@ export function NetworkTab({
           )
         );
         for (const { id, summary } of results) {
-          if (summary) collected.set(id, summary);
+          const tone = summary?.meta_observations?.emotional_tone;
+          if (typeof tone === "string" && tone.trim()) collected.set(id, tone);
         }
       }
-      if (!cancelled) {
-        setSummariesById(collected);
-        setSummariesLoading(false);
-      }
+      if (!cancelled) setEmotionToneById(collected);
     };
 
     void run();
@@ -235,42 +264,8 @@ export function NetworkTab({
     return () => {
       cancelled = true;
     };
-  }, [networkView, conversations, storage, digestByConversationId]);
+  }, [conversations, storage]);
 
-  const digestTopicsById = useMemo(() => {
-    const map = new Map<number, string[]>();
-    for (const [conversationId, digest] of digestByConversationId) {
-      if (digest.keyTopics.length > 0) map.set(conversationId, digest.keyTopics);
-    }
-    return map;
-  }, [digestByConversationId]);
-  const thinkingMap = useMemo(
-    () =>
-      buildThinkingMap(conversations, summariesById, topicMap, {
-        digestTopicsById,
-      }),
-    [conversations, summariesById, topicMap, digestTopicsById]
-  );
-  const selectedConcept = useMemo(
-    () =>
-      selectedConceptId
-        ? thinkingMap.concepts.find((concept) => concept.id === selectedConceptId) ?? null
-        : null,
-    [thinkingMap.concepts, selectedConceptId]
-  );
-
-  const handleSelectConcept = useCallback((conceptId: string | null) => {
-    setSelectedConceptId(conceptId);
-  }, []);
-
-  const handleSwitchView = useCallback((view: NetworkView) => {
-    setNetworkView(view);
-    setSelectedConceptId(null);
-  }, []);
-  const conversationIdsKey = useMemo(
-    () => baseDataset.data.nodes.map((node) => node.id).join(","),
-    [baseDataset.data.nodes]
-  );
   const visibleCount = useMemo(
     () => getVisibleConversationCount(baseDataset.data.nodes, currentDay),
     [currentDay, baseDataset.data.nodes]
@@ -299,37 +294,16 @@ export function NetworkTab({
       )
       .slice(0, CLUSTER_DRAWER_MEMBER_LIMIT);
   }, [conversationsById, selectedGraphNode]);
-  const connectedNodes = useMemo(() => {
-    if (selectedNodeId === null || selectedGraphNode?.kind !== "conversation") return [];
-
-    return dataset.data.edges
-      .filter((edge) => edge.source === selectedNodeId || edge.target === selectedNodeId)
-      .map((edge) => {
-        const neighborId = edge.source === selectedNodeId ? edge.target : edge.source;
-        const neighborNode = dataset.data.nodes.find((node) => node.id === neighborId);
-        const neighborConversation = conversationsById.get(neighborId) ?? null;
-        return {
-          id: neighborId,
-          weight: edge.weight,
-          node: neighborNode ?? null,
-          conversation: neighborConversation,
-          topicName:
-            neighborConversation?.topic_id !== null && neighborConversation?.topic_id !== undefined
-              ? topicMap.get(neighborConversation.topic_id) ?? null
-              : null,
-        };
-      })
-      .sort((left, right) => {
-        if (right.weight !== left.weight) return right.weight - left.weight;
-        const leftOriginAt = left.node?.originAt ?? Number.POSITIVE_INFINITY;
-        const rightOriginAt = right.node?.originAt ?? Number.POSITIVE_INFINITY;
-        if (leftOriginAt !== rightOriginAt) return leftOriginAt - rightOriginAt;
-        return left.id - right.id;
-      });
-  }, [conversationsById, dataset.data.edges, dataset.data.nodes, selectedGraphNode, selectedNodeId, topicMap]);
+  // 同星座高亮：选中一颗星时，同组（同星座）的其它星保持亮度、其余变暗——
+  // 语义边已移除（design §3），星座成员关系是球面上唯一的"关联"语义。
   const highlightedNodeIds = useMemo(
-    () => connectedNodes.map((entry) => entry.id),
-    [connectedNodes]
+    () =>
+      selectedGraphNode
+        ? dataset.data.nodes
+            .filter((node) => node.groupKey === selectedGraphNode.groupKey)
+            .map((node) => node.id)
+        : [],
+    [dataset.data.nodes, selectedGraphNode]
   );
 
   const handleGroupByChange = useCallback((next: NetworkGroupBy) => {
@@ -359,6 +333,24 @@ export function NetworkTab({
   useEffect(() => {
     currentDayRef.current = currentDay;
   }, [currentDay]);
+
+  // 全屏模式：画布铺满窗口，仅保留分组切换与视角预设按钮；ESC 或按钮退出。
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight);
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const handleResize = () => setViewportHeight(window.innerHeight);
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setIsFullscreen(false);
+    };
+    window.addEventListener("resize", handleResize);
+    window.addEventListener("keydown", handleKeyDown);
+    handleResize();
+    return () => {
+      window.removeEventListener("resize", handleResize);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isFullscreen]);
 
   useEffect(() => {
     if (!selectedGraphNode) return;
@@ -424,55 +416,6 @@ export function NetworkTab({
     setPlaybackToken((token) => token + 1);
     setPlaying(true);
   }, [resetTimeline, totalDays]);
-
-  useEffect(() => {
-    const conversationIds = baseDataset.data.nodes.map((node) => node.id);
-    let cancelled = false;
-
-    if (conversationIds.length < 2) {
-      setEdges([]);
-      setEdgeStatus("ready");
-      setEdgeError(null);
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    if (!storage.getAllEdges) {
-      setEdges([]);
-      setEdgeStatus("error");
-      setEdgeError(labels.edgeLoadingUnavailable ?? "Semantic edge loading is unavailable in this environment.");
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    setEdgeStatus("loading");
-    setEdgeError(null);
-
-    // Large libraries: a higher similarity threshold keeps the edge set (and
-    // the pair query) proportional to what the graph can actually show.
-    const threshold = conversationIds.length > 600 ? 0.5 : 0.4;
-
-    storage
-      .getAllEdges({ threshold, conversationIds })
-      .then((result) => {
-        if (cancelled) return;
-        setEdges((result ?? []).map((edge) => ({ ...edge })));
-        setEdgeStatus("ready");
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        console.error("[Network] getAllEdges error:", error);
-        setEdges([]);
-        setEdgeStatus("error");
-        setEdgeError(labels.edgePlaybackUnavailable ?? "Semantic edge playback is temporarily unavailable.");
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [baseDataset.data.nodes, conversationIdsKey, storage]);
 
   useEffect(() => {
     const previousTotalDays = previousTotalDaysRef.current;
@@ -631,7 +574,10 @@ export function NetworkTab({
   );
 
   const handleScrubEnd = useCallback(() => {
-    setScrubbing(true);
+    // Scrub 手势结束（TimeBar pointerup）——scrubbing 只应覆盖拖动进行中；
+    // 切片 2 的涟漪以 playing || scrubbing 为激活条件，停留为 true 会让
+    // 静止画面残留定格涟漪。
+    setScrubbing(false);
   }, []);
 
   const handleNodeFocus = useCallback(
@@ -653,40 +599,6 @@ export function NetworkTab({
       setSelectedNodeId(null);
     }
   }, [onSelectConversation, selectedNodeId]);
-
-  const edgeMessage =
-    edgeStatus === "error"
-      ? edgeError
-      : edgeStatus === "ready" && dataset.data.nodes.length > 1 && dataset.data.edges.length === 0
-        ? labels.noSemanticLinks ?? "No semantic links yet. Playback still shows how conversations accumulated over time."
-        : null;
-
-  const viewToggle = (
-    <div className="inline-flex rounded-full border border-border-subtle bg-bg-primary p-0.5">
-      {(
-        [
-          ["conversations", labels.conversationMapView ?? "Conversations"] as const,
-          ["thinking", labels.thinkingMapView ?? "Thinking map"] as const,
-        ]
-      ).map(([view, label]) => {
-        const isActive = networkView === view;
-        return (
-          <button
-            key={view}
-            type="button"
-            onClick={() => handleSwitchView(view)}
-            className={`rounded-full px-3 py-1.5 text-[12px] font-sans transition-colors ${
-              isActive
-                ? "bg-accent-primary text-text-inverse"
-                : "text-text-secondary hover:text-text-primary"
-            }`}
-          >
-            {label}
-          </button>
-        );
-      })}
-    </div>
-  );
 
   // Node semantics switcher: what a node's color/group means (source platform,
   // topic, or — when digest data exists — project). "会话" stays the node
@@ -725,142 +637,10 @@ export function NetworkTab({
     </div>
   );
 
-  if (networkView === "thinking") {
-    return (
-      <div className="h-full overflow-y-auto bg-bg-tertiary">
-        <div className="flex min-h-full w-full flex-col gap-4 px-6 py-8 md:px-8">
-          {viewToggle}
-
-          {summariesLoading ? (
-            <div className="flex min-h-[280px] items-center justify-center">
-              <p className="text-sm font-sans text-text-secondary">
-                {labels.loadingThinkingMap ?? "Building your thinking map..."}
-              </p>
-            </div>
-          ) : thinkingMap.concepts.length === 0 ? (
-            <div className="flex min-h-[280px] items-center justify-center">
-              <p className="max-w-md text-center text-sm font-sans text-text-secondary">
-                {labels.thinkingMapEmpty ??
-                  "Generate conversation summaries in the Library first — the thinking map is built from the key insights inside them."}
-              </p>
-            </div>
-          ) : (
-            <>
-              {thinkingMap.gaps.length > 0 && (
-                <div className="flex flex-col gap-2">
-                  <h3 className="text-xs font-sans font-medium uppercase tracking-[0.08em] text-text-tertiary">
-                    {labels.gapInsightTitle ?? "Threads you haven't connected"}
-                  </h3>
-                  <div className="flex flex-wrap gap-2">
-                    {thinkingMap.gaps.slice(0, 3).map((gap) => (
-                      <button
-                        key={`${gap.a.id}|${gap.b.id}`}
-                        type="button"
-                        onClick={() => handleSelectConcept(gap.a.id)}
-                        className="max-w-xs rounded-lg border border-border-subtle bg-bg-surface-card px-3 py-2 text-left text-xs font-sans text-text-secondary transition-colors hover:bg-bg-secondary"
-                      >
-                        {(labels.gapInsightTemplate ?? "You explored {a} and {b} but never linked them")
-                          .replace("{a}", gap.a.term)
-                          .replace("{b}", gap.b.term)}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div className="relative h-[420px] rounded-lg bg-bg-tertiary">
-                <ThinkingMap
-                  map={thinkingMap}
-                  themeMode={themeMode}
-                  selectedConceptId={selectedConceptId}
-                  onSelectConcept={handleSelectConcept}
-                  onSelectConversation={onSelectConversation}
-                  height={GRAPH_HEIGHT}
-                />
-              </div>
-
-              {selectedConcept && (
-                <div className="rounded-lg border border-border-subtle bg-bg-primary p-4">
-                  <div className="mb-2 flex items-start justify-between gap-3">
-                    <h2 className="text-lg font-serif font-normal text-text-primary">
-                      {selectedConcept.term}
-                    </h2>
-                    <button
-                      type="button"
-                      onClick={() => handleSelectConcept(null)}
-                      className="shrink-0 text-text-secondary transition-colors hover:text-text-primary"
-                      aria-label={labels.close ?? "Close"}
-                    >
-                      <X strokeWidth={1.5} className="h-4 w-4" />
-                    </button>
-                  </div>
-
-                  {selectedConcept.definition && (
-                    <p className="mb-3 text-sm font-sans text-text-secondary">
-                      {selectedConcept.definition}
-                    </p>
-                  )}
-
-                  <p className="mb-4 text-[11px] font-sans text-text-tertiary">
-                    {(labels.conceptMentionedIn ?? "Across {count} conversations").replace(
-                      "{count}",
-                      String(selectedConcept.count)
-                    )}
-                  </p>
-
-                  <h3 className="mb-2 text-xs font-sans font-medium uppercase tracking-[0.08em] text-text-tertiary">
-                    {labels.relatedConversations ?? "Related conversations"}
-                  </h3>
-                  <div className="space-y-2">
-                    {selectedConcept.conversationIds.map((conversationId) => {
-                      const conversation = conversationsById.get(conversationId);
-                      const title =
-                        conversation?.title?.trim() ||
-                        (labels.conversationN ?? "Conversation {id}").replace(
-                          "{id}",
-                          String(conversationId)
-                        );
-                      return (
-                        <button
-                          key={conversationId}
-                          type="button"
-                          onClick={() => onSelectConversation?.(conversationId)}
-                          className="flex w-full items-start justify-between gap-3 rounded-lg border border-border-subtle bg-bg-tertiary px-3 py-2 text-left transition-colors hover:bg-bg-secondary"
-                        >
-                          <div className="min-w-0">
-                            <div className="truncate text-sm font-sans text-text-primary">
-                              {title}
-                            </div>
-                            {conversation && (
-                              <div className="mt-1 text-[11px] font-sans text-text-tertiary">
-                                {getPlatformLabel(conversation.platform)}
-                              </div>
-                            )}
-                          </div>
-                          <ArrowRight
-                            strokeWidth={1.5}
-                            className="h-4 w-4 shrink-0 text-text-tertiary"
-                          />
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-
-          <GraphLegend edgeLabel={labels.edgeSemanticSimilarity} platforms={presentPlatforms} />
-        </div>
-      </div>
-    );
-  }
-
   if (dataset.data.nodes.length === 0) {
     return (
       <div className="h-full overflow-y-auto bg-bg-tertiary">
         <div className="flex min-h-full w-full flex-col justify-center gap-3 px-6 py-8 md:px-8">
-          {viewToggle}
           <div className="max-w-sm">
             <p className="text-sm font-medium text-text-primary">
               {labels.emptyTitle ?? "Your temporal network will appear here."}
@@ -869,80 +649,108 @@ export function NetworkTab({
               {labels.emptyDesc ?? "Capture a few conversations first, then reopen Network to watch the graph evolve over time."}
             </p>
           </div>
-          <GraphLegend edgeLabel={labels.edgeSemanticSimilarity} platforms={presentPlatforms} />
+          <GraphLegend groups={emotionSwatches} notes={EMOTION_LEGEND_NOTES} />
         </div>
       </div>
     );
   }
 
   return (
-    <div className="h-full overflow-y-auto bg-bg-tertiary">
-      <div className="flex min-h-full w-full flex-col justify-center gap-4 px-6 py-8 md:px-8">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          {viewToggle}
+    <div
+      className={
+        isFullscreen ? "fixed inset-0 z-50 bg-bg-tertiary" : "h-full overflow-y-auto bg-bg-tertiary"
+      }
+      style={{ background: SKY_BACKGROUND[themeMode] }}
+    >
+      <div
+        className={
+          isFullscreen
+            ? "relative h-full w-full"
+            : "flex min-h-full w-full flex-col justify-center gap-4 px-6 py-8 md:px-8"
+        }
+      >
+        <div
+          className={
+            isFullscreen
+              ? "absolute right-4 top-4 z-10 flex flex-wrap items-center justify-end gap-2"
+              : "flex flex-wrap items-center justify-end gap-2"
+          }
+        >
           {groupByToggle}
+          <button
+            type="button"
+            onClick={() => setIsFullscreen((value) => !value)}
+            aria-label={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
+            title={isFullscreen ? "Exit fullscreen (Esc)" : "Fullscreen"}
+            className="flex h-7 w-7 items-center justify-center rounded-full border border-border-subtle bg-bg-primary/70 text-text-secondary backdrop-blur-md transition-colors hover:text-text-primary"
+          >
+            {isFullscreen ? (
+              <Minimize2 strokeWidth={1.5} className="h-3.5 w-3.5" />
+            ) : (
+              <Maximize2 strokeWidth={1.5} className="h-3.5 w-3.5" />
+            )}
+          </button>
         </div>
-        <div className="relative h-[420px] bg-bg-tertiary">
-          {edgeStatus === "loading" && (
-            <div className="pointer-events-none absolute left-0 top-0 z-10 rounded-full bg-bg-primary/85 px-2.5 py-1 text-[11px] font-sans text-text-tertiary backdrop-blur-sm">
-              {labels.buildingGraph ?? "Building graph..."}
-            </div>
-          )}
+        <div
+          className={
+            isFullscreen ? "h-full" : "relative h-[420px] overflow-hidden rounded-2xl bg-bg-tertiary"
+          }
+        >
           <TemporalGraph
             data={dataset.data}
             currentDay={currentDay}
-            height={GRAPH_HEIGHT}
+            height={isFullscreen ? viewportHeight : GRAPH_HEIGHT}
             themeMode={themeMode}
             scrubbing={scrubbing}
+            playing={playing}
             resetToken={graphResetToken}
             selectedNodeId={selectedNodeId}
             highlightedNodeIds={highlightedNodeIds}
+            emotionById={emotionById}
+            isActive={isActive}
+            groups={networkGroups.groups}
             onNodeClick={handleNodeFocus}
             onBackgroundClick={handleCloseDrawer}
             getNodeTooltip={getNodeTooltip}
           />
         </div>
 
-        <div className="text-[11px] font-sans text-text-tertiary">
-          {labels.trendLabel ?? "Trend · daily new conversations"}
-        </div>
+        {!isFullscreen && (
+          <>
+            <div className="text-[11px] font-sans text-text-tertiary">
+              {labels.trendLabel ?? "Trend · daily new conversations"}
+            </div>
 
-        <TimeBar
-          totalDays={totalDays}
-          dayCounts={dataset.dayCounts}
-          currentDay={currentDay}
-          themeMode={themeMode}
-          onChange={handleScrubChange}
-          onScrubStart={handleScrubStart}
-          onScrubEnd={handleScrubEnd}
-          ariaLabel={labels.trendScrubberAriaLabel}
-        />
+            <TimeBar
+              totalDays={totalDays}
+              dayCounts={dataset.dayCounts}
+              currentDay={currentDay}
+              themeMode={themeMode}
+              onChange={handleScrubChange}
+              onScrubStart={handleScrubStart}
+              onScrubEnd={handleScrubEnd}
+              ariaLabel={labels.trendScrubberAriaLabel}
+            />
 
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <button
-            type="button"
-            onClick={handleReplay}
-            className="rounded-full border border-border-subtle bg-bg-primary px-3 py-1.5 text-[12px] font-sans text-text-primary transition-colors hover:bg-bg-secondary"
-          >
-            {labels.replay ?? "Replay"}
-          </button>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+              <button
+                type="button"
+                onClick={handleReplay}
+                className="rounded-full border border-border-subtle bg-bg-primary px-3 py-1.5 text-[12px] font-sans text-text-primary transition-colors hover:bg-bg-secondary"
+              >
+                {labels.replay ?? "Replay"}
+              </button>
 
-          <span className="text-[11px] font-sans text-text-tertiary">
-            {labels.dragHint ?? "Drag the trend line to pause on a moment."}
-          </span>
-        </div>
+              <span className="text-[11px] font-sans text-text-tertiary">
+                {labels.dragHint ?? "Drag the trend line to pause on a moment."}
+              </span>
+            </div>
 
-        {edgeMessage && (
-          <div className="text-[11px] font-sans text-text-secondary">{edgeMessage}</div>
+            <div className="min-h-[16px] text-[11px] font-sans text-text-tertiary">{infoText}</div>
+
+            <GraphLegend groups={emotionSwatches} notes={EMOTION_LEGEND_NOTES} />
+          </>
         )}
-
-        <div className="min-h-[16px] text-[11px] font-sans text-text-tertiary">{infoText}</div>
-
-        <GraphLegend
-          edgeLabel={labels.edgeSemanticSimilarity}
-          platforms={presentPlatforms}
-          groups={networkGroups.groups}
-        />
       </div>
 
       {selectedGraphNode?.kind === "cluster" && (
@@ -1061,7 +869,6 @@ export function NetworkTab({
               <div className="mb-6 rounded-lg bg-bg-surface-card p-3">
                 <div className="mb-2 flex flex-wrap items-center gap-3 text-[11px] font-sans text-text-secondary">
                   <span>{selectedConversation.message_count ?? 0} {labels.messages ?? "messages"}</span>
-                  <span>{connectedNodes.length} {labels.semanticLinks ?? "semantic links"}</span>
                 </div>
                 <p className="text-xs font-sans text-text-secondary">
                   {digestByConversationId.get(selectedConversation.id)?.oneLiner?.trim() ||
@@ -1087,46 +894,6 @@ export function NetworkTab({
                   </div>
                 </div>
               )}
-
-              <div className="mb-6">
-                <h3 className="mb-2 text-xs font-sans font-medium uppercase tracking-[0.08em] text-text-tertiary">
-                  {labels.connectedConversations ?? "Connected conversations"}
-                </h3>
-                {connectedNodes.length === 0 ? (
-                  <p className="text-xs font-sans text-text-secondary">
-                    {labels.noSemanticLinksForNode ?? "No semantic links for this node yet."}
-                  </p>
-                ) : (
-                  <div className="space-y-2">
-                    {connectedNodes.map((entry) => (
-                      <button
-                        key={entry.id}
-                        type="button"
-                        onClick={() => setSelectedNodeId(entry.id)}
-                        className="flex w-full items-start justify-between gap-3 rounded-lg border border-border-subtle bg-bg-tertiary px-3 py-2 text-left transition-colors hover:bg-bg-secondary"
-                      >
-                        <div className="min-w-0">
-                          <div className="truncate text-sm font-sans text-text-primary">
-                            {entry.conversation?.title || entry.node?.label || (labels.conversationN ?? "Conversation {id}").replace("{id}", String(entry.id))}
-                          </div>
-                          <div className="mt-1 text-[11px] font-sans text-text-tertiary">
-                            {entry.conversation
-                              ? getPlatformLabel(entry.conversation.platform)
-                              : labels.unknownPlatform ?? "Unknown platform"}
-                            {entry.topicName ? ` · ${entry.topicName}` : ""}
-                            {entry.node && entry.node.timelineDay > currentDay
-                              ? ` · ${labels.appearsLaterInReplay ?? "appears later in replay"}`
-                              : ""}
-                          </div>
-                        </div>
-                        <div className="shrink-0 text-[11px] font-sans text-text-secondary">
-                          {(entry.weight * 100).toFixed(0)}%
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
 
               {onSelectConversation && (
                 <button

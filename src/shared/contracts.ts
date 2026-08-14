@@ -309,6 +309,24 @@ export interface EmbeddingStatus {
   reason?: string;
 }
 
+export type ThinkingMapSemanticPhase =
+  | 'ready'
+  | 'building'
+  | 'unavailable'
+  | 'limit-exceeded';
+
+/** Main-process Thinking Map result; renderer numeric-id mapping happens in desktopStorage. */
+export interface ThinkingMapSemanticIpcSnapshot {
+  phase: ThinkingMapSemanticPhase;
+  edges: Array<{
+    sourceSessionId: string;
+    targetSessionId: string;
+    weight: number;
+  }>;
+  indexedSessionIds: string[];
+  activeIndexVersion: string | null;
+}
+
 // ---- Conversation tree index & session recall (P1.5) ----
 // Field-for-field mirror of capture-core's TreeIndex / SessionRecall output,
 // redeclared here so the renderer never imports the Node-only capture core.
@@ -552,6 +570,7 @@ export const IPC = {
   restart: 'vesti:restart',
   llmTest: 'vesti:llm-test',
   embeddingStatus: 'vesti:embedding-status',
+  thinkingMapSemantics: 'vesti:thinking-map-semantics',
   agentRun: 'vesti:agent-run',
   agentResults: 'vesti:agent-results',
   exportConversations: 'vesti:export-conversations',
@@ -1071,6 +1090,10 @@ export interface VestiDesktopApi {
   restartApp(): Promise<void>;
   testLlm(): Promise<LlmTestResult>;
   embeddingStatus(): Promise<EmbeddingStatus>;
+  getThinkingMapSemantics(
+    sessionIds: string[],
+    totalConversationCount: number,
+  ): Promise<ThinkingMapSemanticIpcSnapshot>;
   runAgent(request: AgentRunRequest): Promise<AgentResult>;
   getAgentResults(): Promise<AgentResult[]>;
   exportConversations(): Promise<ConversationExportBundle[]>;

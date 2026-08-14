@@ -310,6 +310,48 @@ export class CaptureService {
 
   upsertSessionDigest(digest: SessionDigest): void {
     this.db.upsertSessionDigest(digest);
+    this.dataEpoch += 1;
+  }
+
+  listEmbeddableSessionDigests(): SessionDigest[] {
+    return this.db.listEmbeddableSessionDigests();
+  }
+
+  getEmbeddingIndexState(): {
+    activeVersion: string | null;
+    revision: number;
+    promotedAt: string | null;
+  } {
+    return this.db.getEmbeddingIndexState();
+  }
+
+  listDigestEmbeddingSessionIds(indexVersion: string): string[] {
+    return this.db.listDigestEmbeddingSessionIds(indexVersion);
+  }
+
+  listThinkingMapEmbeddings(
+    indexVersion: string,
+    sessionIds: string[],
+  ): Array<{ sessionId: string; dimensions: number; embedding: Buffer }> {
+    return this.db.listThinkingMapEmbeddings(indexVersion, sessionIds);
+  }
+
+  upsertDigestEmbedding(input: {
+    sessionId: string;
+    provider: string;
+    model: string;
+    dimensions: number;
+    indexVersion: string;
+    embedding: Buffer;
+    createdAt: string;
+  }): void {
+    this.db.upsertDigestEmbedding(input);
+    this.dataEpoch += 1;
+  }
+
+  promoteEmbeddingIndex(indexVersion: string): void {
+    this.db.promoteEmbeddingIndex(indexVersion);
+    this.dataEpoch += 1;
   }
 
   getConversationTree(): ConversationTree {

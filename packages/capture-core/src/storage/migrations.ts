@@ -559,4 +559,24 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 15,
+    name: 'active_embedding_index_state',
+    up(db) {
+      // One completed embedding space is active at a time. Candidate vectors
+      // remain in session_digest_embeddings but stay invisible to graph
+      // readers until this singleton is promoted.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS embedding_index_state (
+          singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+          active_index_version TEXT,
+          revision INTEGER NOT NULL DEFAULT 0,
+          promoted_at TEXT
+        );
+        INSERT OR IGNORE INTO embedding_index_state (
+          singleton, active_index_version, revision, promoted_at
+        ) VALUES (1, NULL, 0, NULL);
+      `);
+    },
+  },
 ];

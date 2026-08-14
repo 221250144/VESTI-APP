@@ -67,6 +67,12 @@ function extract(rec: SummaryRecord): Feat | null {
   const theorist = insights.length >= 2;
   const unresolved = Array.isArray(s.unresolved_threads) ? s.unresolved_threads.length : 0;
 
+  // NOTE (2026-08, semantic change): `emotional_tone` is now defined in the
+  // summary prompt as the USER's emotional state in the conversation, not the
+  // AI's stance / conversation tone. The affect axis below therefore reads
+  // user emotion for newly generated summaries; summaries generated before
+  // the change still carry the old "conversation tone" semantics (mixed data,
+  // accepted — see docs/conversation-sphere-design.md discussion).
   const tone = meta && typeof meta.emotional_tone === "string" ? meta.emotional_tone.toLowerCase() : "";
   const sentiment = typeof s.sentiment === "string" ? s.sentiment : null;
   let affect: 1 | -1 | null = null;
