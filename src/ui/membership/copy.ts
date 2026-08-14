@@ -73,6 +73,31 @@ export interface MembershipCopy {
   creditsDocTitle: string;
   creditsDocGreeting: string;
   creditsDocSections: Array<{ heading: string; body: string }>;
+  // ---- 隐私说明与数据贡献协议 (registration consent + settings card) ----
+  /** Checkbox label prefix, followed by the clickable privacyAgreementName. */
+  consentPrefix: string;
+  privacyAgreementName: string;
+  /** Label text after the agreement name (empty for zh/en; ja/ko word order). */
+  consentSuffix: string;
+  privacyEyebrow: string;
+  privacyTitle: string;
+  /** "{version}" = PRIVACY_AGREEMENT_VERSION. */
+  privacyVersion: string;
+  privacyIntro: string;
+  privacySections: Array<{ heading: string; body: string }>;
+  /** Footer button that just closes the agreement modal. */
+  privacyReadButton: string;
+  /** Footer button that confirms consent (settings enable flow). */
+  privacyAgreeButton: string;
+  // ---- 数据贡献 card (settings) ----
+  dataContributionTitle: string;
+  dataContributionDescription: string;
+  dataContributionHint: string;
+  dataContributionViewAgreement: string;
+  /** "{date}" = YYYY-MM-DD consent date. */
+  dataContributionConsentedAt: string;
+  dataContributionEnabled: string;
+  dataContributionDisabled: string;
   errors: Record<MembershipUiError, string>;
 }
 
@@ -170,6 +195,50 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
         body: "会员到期不会锁死你的数据与工作空间——账号自动转为免费版，每日积分照常发放，所有本地数据始终属于你自己。",
       },
     ],
+    consentPrefix: "我已阅读并同意",
+    privacyAgreementName: "《隐私说明与数据贡献协议》",
+    consentSuffix: "",
+    privacyEyebrow: "PRIVACY & DATA CONTRIBUTION",
+    privacyTitle: "隐私说明与数据贡献协议",
+    privacyVersion: "版本 v{version}",
+    privacyIntro:
+      "在你注册并领取免费会员之前，请仔细阅读本协议。勾选同意即表示你已阅读并接受本协议；不同意则无法领取免费会员，但你仍可在阅读后随时改变主意。",
+    privacySections: [
+      {
+        heading: "我们收集什么",
+        body: "在你同意后，Vesti 会持续上传本地 AI 编程工具（Kimi Code、Claude Code、Codex、Cursor 等 CLI 与桌面 Agent）的对话记录：你与 AI 的消息正文、AI 的思考与回复、工具调用摘要（工具名、输入输出摘要）、涉及的文件路径、时间戳、Token 用量与模型信息。这些数据将用于改进 Vesti 产品，以及人工智能模型的训练与研究（包括强化学习训练数据）。",
+      },
+      {
+        heading: "我们不收集什么",
+        body: "浏览器端对话（Kimi、DeepSeek、ChatGPT、Claude、Gemini 等网页 AI）仅存储在你本地，永远不会被上传；内容命中手机号、电子邮箱、身份证号、银行卡号、私钥/API 密钥等个人信息或敏感凭据模式的会话，会被整条排除，不会上传；你的用户名与密码仅以加密形式存储在你自己的电脑上，永远不会离开你的设备。",
+      },
+      {
+        heading: "匿名性",
+        body: "上传数据通过随机生成的匿名贡献者 ID 标识，与你的用户名无关。服务器端不记录你的 IP 画像，仅做基本的频率限制。",
+      },
+      {
+        heading: "数据存储与安全",
+        body: "数据存储于我们自有的服务器（阿里云，中国境内），访问权限仅限于核心开发团队，不会出售或共享给任何第三方。",
+      },
+      {
+        heading: "你的权利与退出",
+        body: "你可以在「设置 → 会员与账号 → 数据贡献」中随时一键关闭：关闭后立即停止一切上传，本地待上传队列即时清空，不影响你的会员权益。如需删除已上传的数据，请联系我们并提供你的匿名贡献者 ID。本协议变更时，我们会要求你重新阅读并确认。",
+      },
+      {
+        heading: "风险提示",
+        body: "个人信息过滤基于自动模式检测，尽管我们持续改进检测能力，仍可能存在漏检。请避免在与 AI 的对话中输入你的真实姓名、住址、证件号码等敏感个人信息。",
+      },
+    ],
+    privacyReadButton: "我已阅读",
+    privacyAgreeButton: "我已阅读并同意",
+    dataContributionTitle: "数据贡献",
+    dataContributionDescription: "同意《隐私说明与数据贡献协议》后，本地 AI 编程工具的对话会匿名上传，用于模型训练与产品改进。",
+    dataContributionHint:
+      "仅上传本地 AI 编程工具的对话；浏览器对话永不上传；含个人信息的会话自动排除。",
+    dataContributionViewAgreement: "查看完整协议",
+    dataContributionConsentedAt: "同意于 {date}",
+    dataContributionEnabled: "已开启",
+    dataContributionDisabled: "已关闭",
     errors: {
       NOT_INITIALIZED: "会员服务尚未准备好，请稍后重试。",
       ALREADY_REGISTERED: "这台设备已经注册过 Vesti 账号，请直接登录。",
@@ -180,6 +249,7 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
       AUTHENTICATION_REQUIRED: "请先登录有效的 Vesti 会员账号。",
       MEMBERSHIP_EXPIRED: "该账号的 Beta 会员已经到期。",
       MEMBERSHIP_DATA_CORRUPT: "本地会员文件无法读取，请联系 Vesti 团队协助处理。",
+      CONSENT_REQUIRED: "请先阅读并勾选同意《隐私说明与数据贡献协议》。",
       STORAGE_ERROR: "无法安全保存本地账号，请检查磁盘权限后重试。",
       password_mismatch: "两次输入的密码不一致。",
       unexpected: "操作没有完成，请稍后重试。",
@@ -278,6 +348,51 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
         body: "An expired membership never locks your data or workspace — the account automatically converts to the free tier, daily credits keep flowing, and all local data remains yours.",
       },
     ],
+    consentPrefix: "I have read and agree to the ",
+    privacyAgreementName: "Privacy & Data Contribution Agreement",
+    consentSuffix: "",
+    privacyEyebrow: "PRIVACY & DATA CONTRIBUTION",
+    privacyTitle: "Privacy & Data Contribution Agreement",
+    privacyVersion: "Version v{version}",
+    privacyIntro:
+      "Please read this agreement carefully before registering and claiming your free membership. Checking the box means you have read and accepted it; without consent the free membership cannot be claimed, but you can always change your mind after reading.",
+    privacySections: [
+      {
+        heading: "What we collect",
+        body: "Once you agree, Vesti continuously uploads conversations from local AI coding tools (Kimi Code, Claude Code, Codex, Cursor and other CLIs and desktop agents): your messages and the AI's replies, the AI's thinking, tool-call summaries (tool names, input/output summaries), file paths involved, timestamps, token usage, and model information. This data is used to improve Vesti and for AI model training and research, including reinforcement-learning training data.",
+      },
+      {
+        heading: "What we never collect",
+        body: "Browser-side conversations (web AIs such as Kimi, DeepSeek, ChatGPT, Claude, Gemini) are stored only on your device and are never uploaded. Any session whose content matches personal-information or sensitive-credential patterns — phone numbers, email addresses, ID numbers, bank card numbers, private keys/API keys — is excluded as a whole and never uploaded. Your username and password are stored only in encrypted form on your own computer and never leave your device.",
+      },
+      {
+        heading: "Anonymity",
+        body: "Uploaded data is identified by a randomly generated anonymous contributor ID, unrelated to your username. The server does not profile your IP address and applies only basic rate limiting.",
+      },
+      {
+        heading: "Storage & security",
+        body: "Data is stored on our own servers (Alibaba Cloud, mainland China), accessible only to the core development team, and is never sold to or shared with any third party.",
+      },
+      {
+        heading: "Your rights & withdrawal",
+        body: "You can turn contribution off at any time under Settings → Membership & account → Data contribution: all uploading stops immediately, the local pending-upload queue is cleared at once, and your membership benefits are unaffected. To delete data already uploaded, contact us with your anonymous contributor ID. When this agreement changes, we will ask you to read and confirm it again.",
+      },
+      {
+        heading: "Risk notice",
+        body: "Personal-information filtering relies on automated pattern detection; although we keep improving it, some cases may be missed. Please avoid entering sensitive personal information such as your real name, address, or ID numbers into AI conversations.",
+      },
+    ],
+    privacyReadButton: "I have read it",
+    privacyAgreeButton: "I have read and agree",
+    dataContributionTitle: "Data contribution",
+    dataContributionDescription:
+      "With the Privacy & Data Contribution Agreement accepted, conversations from local AI coding tools are uploaded anonymously for model training and product improvement.",
+    dataContributionHint:
+      "Only conversations from local AI coding tools are uploaded; browser conversations are never uploaded; sessions containing personal information are automatically excluded.",
+    dataContributionViewAgreement: "Read the full agreement",
+    dataContributionConsentedAt: "Consented on {date}",
+    dataContributionEnabled: "On",
+    dataContributionDisabled: "Off",
     errors: {
       NOT_INITIALIZED: "The membership service is not ready yet. Please try again.",
       ALREADY_REGISTERED: "A Vesti account already exists on this device. Sign in instead.",
@@ -288,6 +403,7 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
       AUTHENTICATION_REQUIRED: "Sign in with an active Vesti membership to continue.",
       MEMBERSHIP_EXPIRED: "The Beta membership for this account has expired.",
       MEMBERSHIP_DATA_CORRUPT: "The local membership file could not be read. Contact the Vesti team for help.",
+      CONSENT_REQUIRED: "Please read and accept the Privacy & Data Contribution Agreement first.",
       STORAGE_ERROR: "Vesti could not safely save the local account. Check disk permissions and retry.",
       password_mismatch: "The passwords do not match.",
       unexpected: "The action could not be completed. Please try again.",
@@ -386,6 +502,51 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
         body: "メンバーシップが切れても、データやワークスペースがロックされることはありません。アカウントは自動的に無料版に移行し、毎日のクレジットは引き続き付与されます。すべてのローカルデータは常にあなたのものです。",
       },
     ],
+    consentPrefix: "",
+    privacyAgreementName: "「プライバシーとデータ貢献に関する同意書」",
+    consentSuffix: "に同意します",
+    privacyEyebrow: "PRIVACY & DATA CONTRIBUTION",
+    privacyTitle: "プライバシーとデータ貢献に関する同意書",
+    privacyVersion: "バージョン v{version}",
+    privacyIntro:
+      "無料メンバーシップの登録・受け取り前に、本同意書をよくお読みください。チェックを入れると内容に同意したことになります。同意しない場合は無料メンバーシップを受け取れませんが、お読みいただいた後いつでも考えを変えられます。",
+    privacySections: [
+      {
+        heading: "収集するもの",
+        body: "同意後、Vesti はローカルの AI コーディングツール（Kimi Code、Claude Code、Codex、Cursor などの CLI・デスクトップ Agent）の会話記録を継続的にアップロードします。AI とのメッセージ本文、AI の思考と返信、ツール呼び出しの要約（ツール名・入出力の要約）、関連するファイルパス、タイムスタンプ、トークン使用量、モデル情報が含まれます。これらのデータは Vesti の改善と、AI モデルのトレーニング・研究（強化学習の訓練データを含む）に使用されます。",
+      },
+      {
+        heading: "収集しないもの",
+        body: "ブラウザ側の会話（Kimi、DeepSeek、ChatGPT、Claude、Gemini などの Web AI）はローカルにのみ保存され、アップロードされることはありません。電話番号、メールアドレス、身分証番号、銀行カード番号、秘密鍵/API キーなどの個人情報・機密認証情報パターンに一致した会話は、セッション全体が除外されアップロードされません。ユーザー名とパスワードは暗号化された形でのみお使いのコンピューターに保存され、デバイスから出ることはありません。",
+      },
+      {
+        heading: "匿名性",
+        body: "アップロードされるデータはランダムに生成された匿名の貢献者 ID で識別され、ユーザー名とは無関係です。サーバー側で IP プロファイリングは行わず、基本的なレート制限のみを実施します。",
+      },
+      {
+        heading: "データの保存とセキュリティ",
+        body: "データは自社サーバー（Alibaba Cloud、中国国内）に保存され、アクセスはコア開発チームに限定されます。第三者への販売・共有は一切行いません。",
+      },
+      {
+        heading: "あなたの権利と退出",
+        body: "「設定 → メンバーシップとアカウント → データ貢献」からいつでもワンクリックで無効化できます。無効化するとすべてのアップロードが即座に停止し、ローカルの送信待ちキューは直ちにクリアされます。メンバーシップの特典への影響はありません。アップロード済みデータの削除をご希望の場合は、匿名貢献者 ID を添えてご連絡ください。本同意書に変更がある場合は、再度お読みいただき確認を求めます。",
+      },
+      {
+        heading: "リスクに関する注意",
+        body: "個人情報のフィルタリングは自動パターン検出に基づいており、改善を続けていますが、見落としの可能性があります。AI との会話に本名、住所、証明書番号などの機密性の高い個人情報を入力しないでください。",
+      },
+    ],
+    privacyReadButton: "読みました",
+    privacyAgreeButton: "読みました、同意します",
+    dataContributionTitle: "データ貢献",
+    dataContributionDescription:
+      "「プライバシーとデータ貢献に関する同意書」に同意すると、ローカル AI コーディングツールの会話が匿名でアップロードされ、モデルのトレーニングと製品改善に使われます。",
+    dataContributionHint:
+      "アップロードされるのはローカル AI コーディングツールの会話のみです。ブラウザの会話は永遠にアップロードされず、個人情報を含むセッションは自動的に除外されます。",
+    dataContributionViewAgreement: "同意書全文を見る",
+    dataContributionConsentedAt: "同意日 {date}",
+    dataContributionEnabled: "オン",
+    dataContributionDisabled: "オフ",
     errors: {
       NOT_INITIALIZED: "メンバーシップサービスの準備が完了していません。もう一度お試しください。",
       ALREADY_REGISTERED: "この端末にはすでに Vesti アカウントがあります。ログインしてください。",
@@ -396,6 +557,7 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
       AUTHENTICATION_REQUIRED: "有効な Vesti メンバーアカウントでログインしてください。",
       MEMBERSHIP_EXPIRED: "このアカウントの Beta メンバーシップは期限切れです。",
       MEMBERSHIP_DATA_CORRUPT: "ローカルのメンバーシップファイルを読み取れません。Vesti チームにお問い合わせください。",
+      CONSENT_REQUIRED: "先に「プライバシーとデータ貢献に関する同意書」をお読みいただき、同意にチェックを入れてください。",
       STORAGE_ERROR: "ローカルアカウントを保存できません。ディスクの権限を確認してください。",
       password_mismatch: "パスワードが一致しません。",
       unexpected: "操作を完了できませんでした。もう一度お試しください。",
@@ -494,6 +656,51 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
         body: "멤버십이 만료되어도 데이터와 작업 공간은 잠기지 않습니다. 계정이 자동으로 무료 버전으로 전환되고 매일 크레딧이 계속 지급되며, 모든 로컬 데이터는 항상 사용자의 것입니다.",
       },
     ],
+    consentPrefix: "",
+    privacyAgreementName: "「개인정보 및 데이터 기여 동의서」",
+    consentSuffix: "를 읽고 동의합니다",
+    privacyEyebrow: "PRIVACY & DATA CONTRIBUTION",
+    privacyTitle: "개인정보 및 데이터 기여 동의서",
+    privacyVersion: "버전 v{version}",
+    privacyIntro:
+      "무료 멤버십을 등록하고 받기 전에 본 동의서를 주의 깊게 읽어 주세요. 체크박스를 선택하면 본 동의서를 읽고 동의한 것으로 간주됩니다. 동의하지 않으면 무료 멤버십을 받을 수 없지만, 읽은 후 언제든지 마음을 바꿀 수 있습니다.",
+    privacySections: [
+      {
+        heading: "수집하는 항목",
+        body: "동의 후 Vesti는 로컬 AI 코딩 도구(Kimi Code, Claude Code, Codex, Cursor 등 CLI 및 데스크톱 Agent)의 대화 기록을 지속적으로 업로드합니다. AI와 주고받은 메시지 본문, AI의 사고와 응답, 도구 호출 요약(도구 이름, 입력·출력 요약), 관련 파일 경로, 타임스탬프, 토큰 사용량 및 모델 정보가 포함됩니다. 이 데이터는 Vesti 제품 개선과 AI 모델 학습·연구(강화 학습 훈련 데이터 포함)에 사용됩니다.",
+      },
+      {
+        heading: "수집하지 않는 항목",
+        body: "브라우저 대화(Kimi, DeepSeek, ChatGPT, Claude, Gemini 등 웹 AI)는 사용자의 로컬에만 저장되며 절대 업로드되지 않습니다. 전화번호, 이메일 주소, 신분증 번호, 은행 카드 번호, 개인 키/API 키 등 개인 정보 또는 민감한 자격 증명 패턴에 해당하는 세션은 전체가 제외되어 업로드되지 않습니다. 사용자 이름과 비밀번호는 암호화된 형태로 사용자의 컴퓨터에만 저장되며 기기를 떠나지 않습니다.",
+      },
+      {
+        heading: "익명성",
+        body: "업로드된 데이터는 무작위로 생성된 익명 기여자 ID로 식별되며 사용자 이름과 무관합니다. 서버는 IP 프로파일링을 기록하지 않고 기본적인 속도 제한만 수행합니다.",
+      },
+      {
+        heading: "데이터 저장 및 보안",
+        body: "데이터는 자체 서버(Alibaba Cloud, 중국 본토)에 저장되며 핵심 개발 팀만 접근할 수 있고, 제3자에게 판매하거나 공유하지 않습니다.",
+      },
+      {
+        heading: "사용자의 권리와 철회",
+        body: "「설정 → 멤버십 및 계정 → 데이터 기여」에서 언제든 한 번의 클릭으로 끌 수 있습니다. 끄는 즉시 모든 업로드가 중단되고 로컬 업로드 대기열이 바로 비워지며, 멤버십 혜택에는 영향이 없습니다. 이미 업로드된 데이터의 삭제가 필요하면 익명 기여자 ID와 함께 문의해 주세요. 본 동의서가 변경되면 다시 읽고 확인해 주셔야 합니다.",
+      },
+      {
+        heading: "위험 고지",
+        body: "개인 정보 필터링은 자동 패턴 감지에 기반하며, 지속적으로 개선하고 있지만 누락될 가능성이 있습니다. AI와의 대화에 실명, 주소, 증명서 번호 등 민감한 개인 정보를 입력하지 마세요.",
+      },
+    ],
+    privacyReadButton: "읽었습니다",
+    privacyAgreeButton: "읽었으며 동의합니다",
+    dataContributionTitle: "데이터 기여",
+    dataContributionDescription:
+      "「개인정보 및 데이터 기여 동의서」에 동의하면 로컬 AI 코딩 도구의 대화가 익명으로 업로드되어 모델 학습과 제품 개선에 사용됩니다.",
+    dataContributionHint:
+      "로컬 AI 코딩 도구의 대화만 업로드됩니다. 브라우저 대화는 절대 업로드되지 않으며, 개인 정보가 포함된 세션은 자동으로 제외됩니다.",
+    dataContributionViewAgreement: "전체 동의서 보기",
+    dataContributionConsentedAt: "동의일 {date}",
+    dataContributionEnabled: "켜짐",
+    dataContributionDisabled: "꺼짐",
     errors: {
       NOT_INITIALIZED: "멤버십 서비스가 아직 준비되지 않았습니다. 다시 시도해 주세요.",
       ALREADY_REGISTERED: "이 기기에 Vesti 계정이 이미 있습니다. 로그인해 주세요.",
@@ -504,6 +711,7 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
       AUTHENTICATION_REQUIRED: "유효한 Vesti 멤버 계정으로 로그인해 주세요.",
       MEMBERSHIP_EXPIRED: "이 계정의 Beta 멤버십이 만료되었습니다.",
       MEMBERSHIP_DATA_CORRUPT: "로컬 멤버십 파일을 읽을 수 없습니다. Vesti 팀에 문의해 주세요.",
+      CONSENT_REQUIRED: "먼저 「개인정보 및 데이터 기여 동의서」를 읽고 동의에 체크해 주세요.",
       STORAGE_ERROR: "로컬 계정을 저장할 수 없습니다. 디스크 권한을 확인해 주세요.",
       password_mismatch: "비밀번호가 일치하지 않습니다.",
       unexpected: "작업을 완료하지 못했습니다. 다시 시도해 주세요.",

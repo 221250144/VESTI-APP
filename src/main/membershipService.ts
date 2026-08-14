@@ -1,7 +1,8 @@
-import { randomBytes, scrypt as nodeScrypt, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, scrypt as nodeScrypt, timingSafeEqual } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { PRIVACY_AGREEMENT_VERSION, type DataContributionState } from '../shared/contracts';
 
 const scrypt = promisify(nodeScrypt);
 
@@ -20,6 +21,7 @@ export type MembershipState = 'unregistered' | 'signed_out' | 'active' | 'expire
 export type MembershipErrorCode =
   | 'NOT_INITIALIZED'
   | 'ALREADY_REGISTERED'
+  | 'CONSENT_REQUIRED'
   | 'INVALID_USERNAME'
   | 'WEAK_PASSWORD'
   | 'NOT_REGISTERED'
@@ -47,7 +49,16 @@ export interface MembershipStatus {
   expiresAt: number | null;
   grantedMonths: typeof BETA_MEMBERSHIP_MONTHS | null;
   daysRemaining: number;
+  /** Effective data-contribution consent; null when no account exists. */
+  dataContribution: DataContributionState | null;
 }
+
+/** Opted-out baseline: pre-contribution accounts and signed-out state. */
+const DATA_CONTRIBUTION_DISABLED: DataContributionState = {
+  enabled: false,
+  consentedAt: null,
+  version: null,
+};
 
 export interface MembershipServiceOptions {
   /** Injectable clock keeps expiry behavior deterministic in tests. */
@@ -80,6 +91,11 @@ interface StoredAccount {
   createdAt: number;
   membership: StoredMembership;
   session: StoredSession | null;
+  /** Anonymous RL-data contributor id. Generated at registration; accounts
+   * created before data contribution get one lazily via getContributorId(). */
+  contributorId?: string;
+  /** Absent in pre-contribution membership.json files — treated as opted out. */
+  dataContribution?: DataContributionState;
 }
 
 interface StoredMembershipFile {
@@ -120,7 +136,7 @@ export class MembershipService {
   async initialize(): Promise<MembershipStatus> {
     try {
       const raw = await fs.readFile(this.filePath, 'utf8');
-      this.account = this.parseStoredFile(raw).account;
+      this.account = migrateStoredAccount(this.parseStoredFile(raw).account);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         this.account = null;
@@ -154,6 +170,7 @@ export class MembershipService {
         expiresAt: null,
         grantedMonths: null,
         daysRemaining: 0,
+        dataContribution: null,
       };
     }
 
@@ -184,16 +201,25 @@ export class MembershipService {
       daysRemaining: active
         ? Math.max(1, Math.ceil((this.account.membership.expiresAt - this.now()) / 86_400_000))
         : 0,
+      dataContribution: this.getDataContribution(),
     };
   }
 
-  async register(credentials: MembershipCredentials): Promise<MembershipStatus> {
+  async register(credentials: MembershipCredentials, dataConsent: boolean): Promise<MembershipStatus> {
     return this.runMutation(async () => {
       this.assertInitialized();
       if (this.account) {
         throw new MembershipError(
           'ALREADY_REGISTERED',
           'A local Vesti account has already been registered.',
+        );
+      }
+      // Claiming the free beta membership requires explicit consent to the
+      // privacy & data-contribution agreement (docs/PRIVACY-DATA-CONTRIBUTION.md).
+      if (dataConsent !== true) {
+        throw new MembershipError(
+          'CONSENT_REQUIRED',
+          'Registering requires consenting to the privacy & data-contribution agreement.',
         );
       }
 
@@ -220,6 +246,12 @@ export class MembershipService {
           grantedMonths: BETA_MEMBERSHIP_MONTHS,
         },
         session: this.createSession(startedAt),
+        contributorId: randomUUID(),
+        dataContribution: {
+          enabled: true,
+          consentedAt: startedAt,
+          version: PRIVACY_AGREEMENT_VERSION,
+        },
       };
 
       try {
@@ -277,6 +309,72 @@ export class MembershipService {
         throw error;
       }
       return this.getStatus();
+    });
+  }
+
+  /**
+   * Effective data-contribution consent. Unregistered or signed-out state
+   * always reports disabled, so the contribution uploader stays silent until
+   * an authenticated account has explicitly opted in.
+   */
+  getDataContribution(): DataContributionState {
+    this.assertInitialized();
+    if (!this.account || !this.account.session) return { ...DATA_CONTRIBUTION_DISABLED };
+    return { ...(this.account.dataContribution ?? DATA_CONTRIBUTION_DISABLED) };
+  }
+
+  /**
+   * Toggle RL data contribution (requires an authenticated account). Enabling
+   * records a fresh consent timestamp and the current agreement version;
+   * disabling keeps the last consent record as an audit trail but stops all
+   * uploads.
+   */
+  async setDataContribution(enabled: boolean): Promise<DataContributionState> {
+    return this.runMutation(async () => {
+      this.requireActiveMember();
+      const account = this.account;
+      if (!account) {
+        throw new MembershipError('NOT_REGISTERED', 'No local Vesti account is registered.');
+      }
+      const previous = account.dataContribution;
+      account.dataContribution = enabled
+        ? { enabled: true, consentedAt: this.now(), version: PRIVACY_AGREEMENT_VERSION }
+        : {
+            enabled: false,
+            consentedAt: previous?.consentedAt ?? null,
+            version: previous?.version ?? null,
+          };
+      try {
+        await this.persist();
+      } catch (error) {
+        account.dataContribution = previous;
+        throw error;
+      }
+      return this.getDataContribution();
+    });
+  }
+
+  /**
+   * Anonymous contributor id for the RL-data upload. Generated at
+   * registration; pre-contribution accounts get one lazily here, persisted so
+   * the id stays stable across restarts.
+   */
+  async getContributorId(): Promise<string | null> {
+    return this.runMutation(async () => {
+      this.assertInitialized();
+      if (!this.account) return null;
+      if (typeof this.account.contributorId === 'string' && this.account.contributorId) {
+        return this.account.contributorId;
+      }
+      const generated = randomUUID();
+      this.account.contributorId = generated;
+      try {
+        await this.persist();
+      } catch (error) {
+        delete this.account.contributorId;
+        throw error;
+      }
+      return generated;
     });
   }
 
@@ -458,6 +556,28 @@ function isValidStoredMembershipFile(value: unknown): value is StoredMembershipF
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * Pre-contribution membership.json files lack contributorId/dataContribution.
+ * Consent defaults to opted out — existing users must explicitly enable it;
+ * a missing/invalid contributor id is regenerated lazily by getContributorId().
+ */
+function migrateStoredAccount(account: StoredAccount): StoredAccount {
+  if (!isValidDataContribution(account.dataContribution)) {
+    account.dataContribution = { ...DATA_CONTRIBUTION_DISABLED };
+  }
+  if (typeof account.contributorId !== 'string' || !account.contributorId) {
+    delete account.contributorId;
+  }
+  return account;
+}
+
+function isValidDataContribution(value: unknown): value is DataContributionState {
+  if (!isRecord(value)) return false;
+  return typeof value.enabled === 'boolean'
+    && (value.consentedAt === null || isFiniteTimestamp(value.consentedAt))
+    && (value.version === null || typeof value.version === 'string');
 }
 
 function isFiniteTimestamp(value: unknown): value is number {

@@ -342,32 +342,14 @@ export class CaptureService {
    * session/message IDs.
    */
   exportConversations(): ConversationExportResult {
-    const sessions = this.db.listWorkSessions({ sessionType: 'conversation', limit: 10000 });
-    // A1: stamp subagent lineage on the export so renderer-side consumers
-    // (library list, learn/explore modules, classification, coverage) can
-    // fold child runs under their parent without loading the tree.
-    const lineage = this.db.getSubagentLineageByChild();
+    const { all, sessionIds } = this.buildConversationBundles();
+    const seenIds = new Set<string>(sessionIds);
     const bundles: ConversationExportBundle[] = [];
-    const sessionIds: string[] = [];
-    const seenIds = new Set<string>();
-    for (const session of sessions) {
-      sessionIds.push(session.id);
-      seenIds.add(session.id);
-      const messages = this.db.getSessionMessages(session.id);
-      const firstUserMessage = messages.find(message => message.source === 'user_input');
-      const conversation = workSessionToVestiConversation(session, firstUserMessage?.contentText?.slice(0, 200));
-      const link = lineage.get(session.id);
-      if (link) {
-        conversation._subagent_of = link.parentSessionId;
-        if (link.agentRole) conversation._agent_role = link.agentRole;
-      }
-      const bundle: ConversationExportBundle = {
-        conversation,
-        messages: sessionMessagesToVestiMessages(messages, conversation.id),
-      };
+    for (const bundle of all) {
+      const sessionId = bundle.conversation._cli_id;
       const fingerprint = computeBundleFingerprint(bundle.conversation, bundle.messages);
-      if (this.exportFingerprints.get(session.id) !== fingerprint) {
-        this.exportFingerprints.set(session.id, fingerprint);
+      if (this.exportFingerprints.get(sessionId) !== fingerprint) {
+        this.exportFingerprints.set(sessionId, fingerprint);
         bundles.push(bundle);
       }
     }
@@ -377,6 +359,43 @@ export class CaptureService {
       if (!seenIds.has(cachedId)) this.exportFingerprints.delete(cachedId);
     }
     return { bundles, sessionIds };
+  }
+
+  /**
+   * Full bundle snapshot with no incremental filtering. The data-contribution
+   * uploader (contributionService) tracks its own persisted fingerprints, so
+   * it must neither disturb nor depend on the process-lifetime export cache
+   * that exportConversations uses to keep unchanged sessions off IPC.
+   */
+  exportAllConversationBundles(): ConversationExportBundle[] {
+    return this.buildConversationBundles().all;
+  }
+
+  /** Rebuilds every captured session as a VESTI-dashboard export bundle. */
+  private buildConversationBundles(): { all: ConversationExportBundle[]; sessionIds: string[] } {
+    const sessions = this.db.listWorkSessions({ sessionType: 'conversation', limit: 10000 });
+    // A1: stamp subagent lineage on the export so renderer-side consumers
+    // (library list, learn/explore modules, classification, coverage) can
+    // fold child runs under their parent without loading the tree.
+    const lineage = this.db.getSubagentLineageByChild();
+    const all: ConversationExportBundle[] = [];
+    const sessionIds: string[] = [];
+    for (const session of sessions) {
+      sessionIds.push(session.id);
+      const messages = this.db.getSessionMessages(session.id);
+      const firstUserMessage = messages.find(message => message.source === 'user_input');
+      const conversation = workSessionToVestiConversation(session, firstUserMessage?.contentText?.slice(0, 200));
+      const link = lineage.get(session.id);
+      if (link) {
+        conversation._subagent_of = link.parentSessionId;
+        if (link.agentRole) conversation._agent_role = link.agentRole;
+      }
+      all.push({
+        conversation,
+        messages: sessionMessagesToVestiMessages(messages, conversation.id),
+      });
+    }
+    return { all, sessionIds };
   }
 
   // ---- P1.5: digest store surface + conversation tree + session recall ----

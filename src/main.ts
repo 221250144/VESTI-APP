@@ -18,6 +18,7 @@ import { AgentService, type AgentCreditMeter } from './main/agentService';
 import { ImageService, type ImageCreditMeter } from './main/imageService';
 import { AgentMcpRegistry, createAgentMcpRegistry, resolveAgentMcpTargetId } from './main/agentMcpRegistry';
 import { CaptureService } from './main/captureService';
+import { ContributionService } from './main/contributionService';
 import { CapsuleWindowService, normalizeCapsuleBubblePayload } from './main/capsuleWindowService';
 import { CreditError, CreditService } from './main/creditService';
 import { DigestService } from './main/digestService';
@@ -91,6 +92,7 @@ let agent: AgentService;
 let image: ImageService;
 let embedding: EmbeddingService;
 let digest: DigestService;
+let contribution: ContributionService;
 let projectMemory: ProjectMemoryService;
 let notion: NotionService;
 const uiPrefs = new UiPrefsService();
@@ -127,6 +129,7 @@ function publicMembershipStatus(): MembershipStatus {
     memberSince: status.memberSince,
     expiresAt: status.expiresAt,
     daysRemaining: status.daysRemaining,
+    dataContribution: status.dataContribution,
   };
 }
 
@@ -298,6 +301,7 @@ async function activateProductRuntime(): Promise<void> {
   productActivation = (async () => {
     productRuntimeActive = true;
     digest.start();
+    contribution.start();
     projectMemory.requestScan();
     await extensionBridge.start();
     if (!membership.isActive()) {
@@ -324,6 +328,7 @@ async function deactivateProductRuntime(): Promise<void> {
   if (productActivation) await productActivation.catch(() => undefined);
   productRuntimeActive = false;
   digest.stop();
+  contribution.stop();
   projectMemory.stop();
   await capture.setWatching(false).catch(() => false);
   await extensionBridge.stop().catch(() => undefined);
@@ -912,8 +917,8 @@ function registerIpc(): void {
     }
     return status;
   });
-  ipcMain.handle(IPC.membershipRegister, (_event, value: unknown) =>
-    finishMembershipAction(() => membership.register(normalizeMembershipCredentials(value))));
+  ipcMain.handle(IPC.membershipRegister, (_event, value: unknown, dataConsent: unknown) =>
+    finishMembershipAction(() => membership.register(normalizeMembershipCredentials(value), dataConsent === true)));
   ipcMain.handle(IPC.membershipLogin, (_event, value: unknown) =>
     finishMembershipAction(() => membership.login(normalizeMembershipCredentials(value))));
   ipcMain.handle(IPC.membershipLogout, async () => {
@@ -922,6 +927,14 @@ function registerIpc(): void {
     const status = broadcastMembershipChange();
     reloadRendererAfterMembershipLock();
     return status;
+  });
+  memberIpcHandle(IPC.membershipDataContributionGet, () => membership.getDataContribution());
+  memberIpcHandle(IPC.membershipDataContributionSet, async (_event, enabled: unknown) => {
+    const state = await membership.setDataContribution(enabled === true);
+    // Consent changes take effect immediately: a withdrawn consent drops the
+    // pending upload queue inside runOnce instead of waiting for the timer.
+    void contribution.runOnce();
+    return state;
   });
   memberIpcHandle(IPC.creditBalance, () => currentCreditBalance());
   memberIpcHandle(IPC.overview, () => capture.getOverview());
@@ -1512,6 +1525,13 @@ app.whenReady().then(async () => {
   image = new ImageService(capture, settings, imageCreditMeter);
   embedding = new EmbeddingService(settings, embeddingCreditMeter);
   digest = new DigestService(capture, agent, embedding, () => settings.isLlmConfigured());
+  // RL data contribution: consent-gated uploader with its own persisted
+  // incremental state, living next to the capture store.
+  contribution = new ContributionService({
+    captureService: capture,
+    membershipService: membership,
+    stateFilePath: path.join(settings.dataDirectory, 'contribution-state.json'),
+  });
   notion = new NotionService(settings);
   projectMemory = new ProjectMemoryService(capture, agent);
   agentMcp = createAgentMcpRegistry(app.getAppPath(), process.resourcesPath);
@@ -1519,6 +1539,9 @@ app.whenReady().then(async () => {
     if (!productRuntimeActive) return;
     digest.requestScan();
     projectMemory.requestScan();
+    // Freshly stored captures also feed the consent-gated contribution
+    // uploader (debounced inside requestRun).
+    contribution.requestRun();
   });
   capture.setAgentActivityListener(payload => {
     if (!productRuntimeActive) return;
@@ -1571,6 +1594,7 @@ app.on('before-quit', () => {
   tray = null;
   if (extensionBridge) void extensionBridge.stop().catch(console.error);
   digest?.stop();
+  contribution?.stop();
   projectMemory?.stop();
   if (agent) void capture.close().catch(console.error);
 });

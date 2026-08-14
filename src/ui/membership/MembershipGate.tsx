@@ -19,11 +19,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import type {
-  MembershipActionResult,
-  MembershipErrorCode,
-  MembershipStatus,
-} from "../../shared/contracts";
+import type { MembershipStatus } from "../../shared/contracts";
 import { useI18n } from "../i18n";
 import {
   LOCALE_META,
@@ -38,6 +34,8 @@ import {
   MEMBERSHIP_COPY,
   type MembershipUiError,
 } from "./copy";
+import { PrivacyAgreementModal } from "./PrivacyAgreementModal";
+import { errorCodeFromUnknown, submitMembershipAuth } from "./submitMembershipAuth";
 
 export interface MembershipGateContext {
   status: MembershipStatus;
@@ -56,24 +54,6 @@ const inputClass =
 const secondaryButtonClass =
   "inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-border-default bg-bg-primary px-4 py-2.5 text-[13px] font-sans font-semibold text-text-primary transition-colors hover:bg-bg-surface-card-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus disabled:cursor-not-allowed disabled:opacity-55";
 
-function errorCodeFromUnknown(error: unknown): MembershipUiError {
-  const text = error instanceof Error ? error.message : String(error);
-  const normalized = text.toLowerCase();
-  const known: MembershipErrorCode[] = [
-    "NOT_INITIALIZED",
-    "ALREADY_REGISTERED",
-    "INVALID_USERNAME",
-    "WEAK_PASSWORD",
-    "NOT_REGISTERED",
-    "INVALID_CREDENTIALS",
-    "AUTHENTICATION_REQUIRED",
-    "MEMBERSHIP_EXPIRED",
-    "MEMBERSHIP_DATA_CORRUPT",
-    "STORAGE_ERROR",
-  ];
-  return known.find((code) => normalized.includes(code.toLowerCase())) ?? "unexpected";
-}
-
 export function MembershipGate({ children }: MembershipGateProps) {
   const { locale, setLocale } = useI18n();
   const copy = MEMBERSHIP_COPY[locale] ?? MEMBERSHIP_COPY.en;
@@ -86,6 +66,8 @@ export function MembershipGate({ children }: MembershipGateProps) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [consentChecked, setConsentChecked] = useState(false);
+  const [agreementOpen, setAgreementOpen] = useState(false);
   const [errorCode, setErrorCode] = useState<MembershipUiError | null>(null);
 
   const refreshStatus = useCallback(async () => {
@@ -139,6 +121,7 @@ export function MembershipGate({ children }: MembershipGateProps) {
       setStatus(next);
       setPassword("");
       setConfirmPassword("");
+      setConsentChecked(false);
     } catch (error) {
       setErrorCode(errorCodeFromUnknown(error));
     } finally {
@@ -158,27 +141,26 @@ export function MembershipGate({ children }: MembershipGateProps) {
     if (!status || submitting) return;
     setErrorCode(null);
 
-    if (status.state === "unregistered" && password !== confirmPassword) {
-      setErrorCode("password_mismatch");
-      return;
-    }
-
     setSubmitting(true);
     try {
-      const credentials = { username: username.trim(), password };
-      const result: MembershipActionResult =
-        status.state === "unregistered"
-          ? await window.vestiMembership.register(credentials)
-          : await window.vestiMembership.login(credentials);
-      setStatus(result.status);
-      if (!result.ok) {
-        setErrorCode(result.error);
+      const outcome = await submitMembershipAuth(
+        {
+          state: status.state,
+          username,
+          password,
+          confirmPassword,
+          consentChecked,
+        },
+        window.vestiMembership,
+      );
+      if (outcome.status) setStatus(outcome.status);
+      if (outcome.error) {
+        setErrorCode(outcome.error);
         return;
       }
       setPassword("");
       setConfirmPassword("");
-    } catch (error) {
-      setErrorCode(errorCodeFromUnknown(error));
+      setConsentChecked(false);
     } finally {
       setSubmitting(false);
     }
@@ -392,6 +374,36 @@ export function MembershipGate({ children }: MembershipGateProps) {
                     </label>
                   ) : null}
 
+                  {status.state === "unregistered" ? (
+                    <div className="rounded-xl border border-border-subtle bg-bg-primary px-3.5 py-3">
+                      <label className="flex cursor-pointer items-start gap-2.5" htmlFor="membership-data-consent">
+                        <input
+                          id="membership-data-consent"
+                          name="dataConsent"
+                          type="checkbox"
+                          disabled={submitting}
+                          checked={consentChecked}
+                          onChange={(event) => {
+                            setConsentChecked(event.target.checked);
+                            setErrorCode(null);
+                          }}
+                          className="mt-0.5 h-4 w-4 shrink-0 accent-[hsl(var(--accent-primary))]"
+                        />
+                        <span className="text-[12px] font-sans leading-5 text-text-secondary">
+                          {copy.consentPrefix}
+                          <button
+                            type="button"
+                            onClick={() => setAgreementOpen(true)}
+                            className="rounded font-semibold text-accent-primary underline decoration-accent-primary/40 underline-offset-2 transition-colors hover:text-accent-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus"
+                          >
+                            {copy.privacyAgreementName}
+                          </button>
+                          {copy.consentSuffix}
+                        </span>
+                      </label>
+                    </div>
+                  ) : null}
+
                   <div className="min-h-6" aria-live="polite">
                     {errorCode ? (
                       <p role="alert" className="text-[12px] font-sans leading-5 text-danger">
@@ -402,7 +414,9 @@ export function MembershipGate({ children }: MembershipGateProps) {
 
                   <button
                     type="submit"
-                    disabled={submitting}
+                    disabled={
+                      submitting || (status.state === "unregistered" && !consentChecked)
+                    }
                     className="inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-accent-primary px-4 py-3 text-[13px] font-sans font-semibold text-text-inverse transition-colors hover:bg-accent-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus focus-visible:ring-offset-2 focus-visible:ring-offset-bg-surface-card disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {submitting ? (
@@ -428,6 +442,11 @@ export function MembershipGate({ children }: MembershipGateProps) {
           )}
         </div>
       </main>
+      <PrivacyAgreementModal
+        open={agreementOpen}
+        onClose={() => setAgreementOpen(false)}
+        locale={locale}
+      />
     </div>
   );
 }

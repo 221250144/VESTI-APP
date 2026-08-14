@@ -31,9 +31,13 @@ contextBridge.exposeInMainWorld('vestiWindow', windowControls);
 
 const membership: VestiMembershipApi = {
   getStatus: () => ipcRenderer.invoke(IPC.membershipStatus),
-  register: credentials => ipcRenderer.invoke(IPC.membershipRegister, credentials),
+  register: (credentials, dataConsent) =>
+    ipcRenderer.invoke(IPC.membershipRegister, credentials, dataConsent),
   login: credentials => ipcRenderer.invoke(IPC.membershipLogin, credentials),
   logout: () => ipcRenderer.invoke(IPC.membershipLogout),
+  getDataContribution: () => ipcRenderer.invoke(IPC.membershipDataContributionGet),
+  setDataContribution: enabled =>
+    ipcRenderer.invoke(IPC.membershipDataContributionSet, enabled),
   onStatusChanged: listener => {
     const wrapped = (_event: unknown, status: Parameters<typeof listener>[0]) => listener(status);
     ipcRenderer.on(IPC.membershipChanged, wrapped);

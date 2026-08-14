@@ -184,6 +184,27 @@ describe("exportConversations (incremental)", () => {
   });
 });
 
+describe("exportAllConversationBundles (contribution source)", () => {
+  it("always returns every bundle, ignoring and not feeding the incremental cache", () => {
+    const sessions = [makeSession("s1"), makeSession("s2")];
+    const messages = new Map([
+      ["s1", [makeMessage("1", "s1", "hello")]],
+      ["s2", [makeMessage("1", "s2", "world")]],
+    ]);
+    const service = makeExportService(sessions, messages);
+    // Prime the process-lifetime export cache.
+    service.exportConversations();
+
+    // The contribution uploader does its own persisted diffing, so it must
+    // see the full snapshot even though nothing changed for IPC consumers.
+    const all = service.exportAllConversationBundles();
+    expect(all.map((bundle) => bundle.conversation._cli_id).sort()).toEqual(["s1", "s2"]);
+
+    // ...and the full snapshot must not have disturbed the IPC diff either.
+    expect(service.exportConversations().bundles).toEqual([]);
+  });
+});
+
 describe("watch-tick notify gating", () => {
   async function drainFileQueue(service: CaptureService): Promise<void> {
     await Promise.allSettled([...internals(service).fileQueue.values()]);

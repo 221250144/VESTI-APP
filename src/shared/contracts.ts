@@ -522,6 +522,9 @@ export interface MembershipStatus {
   memberSince: number | null;
   expiresAt: number | null;
   daysRemaining: number;
+  /** Data-contribution consent recorded with the account (optional while the
+   * main-process side rolls out; renderers fall back to getDataContribution). */
+  dataContribution?: DataContributionState | null;
 }
 
 export interface MembershipCredentials {
@@ -539,6 +542,7 @@ export type MembershipErrorCode =
   | 'AUTHENTICATION_REQUIRED'
   | 'MEMBERSHIP_EXPIRED'
   | 'MEMBERSHIP_DATA_CORRUPT'
+  | 'CONSENT_REQUIRED'
   | 'STORAGE_ERROR';
 
 export type MembershipActionResult =
@@ -583,6 +587,8 @@ export const IPC = {
   membershipLogin: 'vesti:membership-login',
   membershipLogout: 'vesti:membership-logout',
   membershipChanged: 'vesti:membership-changed',
+  membershipDataContributionGet: 'vesti:membership-data-contribution-get',
+  membershipDataContributionSet: 'vesti:membership-data-contribution-set',
   creditBalance: 'vesti:credit-balance',
   creditChanged: 'vesti:credit-changed',
   overview: 'vesti:overview',
@@ -1205,12 +1211,31 @@ export interface VestiDesktopApi {
   onMainTabNavigate(listener: (tab: string) => void): () => void;
 }
 
+/**
+ * Data-contribution (RL training data) consent state, stored with the account.
+ * The agreement text lives in docs/PRIVACY-DATA-CONTRIBUTION.md.
+ */
+export const PRIVACY_AGREEMENT_VERSION = '1.0';
+
+export interface DataContributionState {
+  enabled: boolean;
+  consentedAt: number | null;
+  /** Agreement version the user consented to. */
+  version: string | null;
+}
+
 /** Authentication bridge available before the product shell is unlocked. */
 export interface VestiMembershipApi {
   getStatus(): Promise<MembershipStatus>;
-  register(credentials: MembershipCredentials): Promise<MembershipActionResult>;
+  /** Registering (claiming the free beta membership) requires consenting to
+   * the privacy & data-contribution agreement: `dataConsent` must be true. */
+  register(credentials: MembershipCredentials, dataConsent: boolean): Promise<MembershipActionResult>;
   login(credentials: MembershipCredentials): Promise<MembershipActionResult>;
   logout(): Promise<MembershipStatus>;
+  getDataContribution(): Promise<DataContributionState>;
+  /** Turning contribution off is always allowed; turning it back on records a
+   * fresh consent timestamp (the UI re-shows the agreement first). */
+  setDataContribution(enabled: boolean): Promise<DataContributionState>;
   onStatusChanged(listener: (status: MembershipStatus) => void): () => void;
 }
 

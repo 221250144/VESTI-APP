@@ -16,6 +16,7 @@ import type {
 import { useI18n } from "../i18n";
 import type { SupportedLocale } from "../i18n/locales";
 import { MembershipAccountCard } from "../membership/MembershipAccountCard";
+import { DataContributionCard } from "../membership/DataContributionCard";
 import { CreditCard } from "../membership/CreditCard";
 import { useUiPreference } from "./useUiPreference";
 import { AGENT_NOTIFY_PREF_KEY, AMBIENT_BUBBLE_PREF_KEY } from "../companion/ambientBubble";
@@ -1528,6 +1529,7 @@ export function SettingsPage({
     <div className="h-full overflow-y-auto overflow-x-hidden bg-bg-app px-8 py-8">
       <div className="mx-auto flex max-w-[880px] flex-col gap-6 pb-8">
         <MembershipAccountCard status={membership} onLogout={onLogout} locale={locale} />
+        <DataContributionCard locale={locale} />
         <CreditCard membership={membership} llmMode={settings.llm.mode} locale={locale} />
 
         <Card eyebrow="GENERAL" title={copy.generalTitle} description={copy.generalDesc}>
