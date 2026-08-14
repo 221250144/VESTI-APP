@@ -43,6 +43,7 @@ describe('MCP handshake', () => {
     expect(instructions).toBeDefined();
     expect(instructions).toContain('vesti_get_project_context');
     expect(instructions).toContain('vesti_get_handoff_context');
+    expect(instructions).toContain('vesti_search_files');
     expect(instructions).toMatch(/vesti_search.*vesti_timeline.*vesti_get_turns/s);
     expect(instructions).toMatch(/vesti_memory_search.*vesti_memory_get/s);
   });
@@ -56,6 +57,7 @@ describe('MCP handshake', () => {
       'vesti_get_turns',
       'vesti_project_brief',
       'vesti_get_handoff_context',
+      'vesti_search_files',
       'vesti_memory_search',
       'vesti_memory_get',
     ]);
@@ -69,9 +71,11 @@ describe('MCP handshake', () => {
     expect(tools[4].inputSchema.required).toContain('project');
     // The session-start tool takes optional paths (defaults to most recent).
     expect(tools[0].inputSchema.required ?? []).not.toContain('paths');
-    // Memory space: search needs nothing (browse mode), get requires ids.
-    expect(tools[6].inputSchema.required ?? []).toHaveLength(0);
-    expect(tools[7].inputSchema.required).toContain('ids');
+    // File lookup needs a query; memory space: search needs nothing (browse
+    // mode), get requires ids.
+    expect(tools[6].inputSchema.required).toContain('query');
+    expect(tools[7].inputSchema.required ?? []).toHaveLength(0);
+    expect(tools[8].inputSchema.required).toContain('ids');
   });
 
   it('serves vesti_search → vesti_timeline → vesti_get_turns end to end', async () => {
