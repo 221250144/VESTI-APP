@@ -66,6 +66,9 @@ const CLI_TO_VESTI_PLATFORM: Record<string, string> = {
   'codex': 'Codex',
   'cursor': 'Cursor',
   'aider': 'Aider',
+  'trae': 'Trae',
+  'coder': 'Qoder',
+  'workbuddy': 'WorkBuddy',
 };
 
 const VESTI_TO_CLI_PLATFORM: Record<string, string> = {
@@ -74,6 +77,9 @@ const VESTI_TO_CLI_PLATFORM: Record<string, string> = {
   'Codex': 'codex',
   'Cursor': 'cursor',
   'Aider': 'aider',
+  'Trae': 'trae',
+  'Qoder': 'coder',
+  'WorkBuddy': 'workbuddy',
   'Claude': 'claude-code',
   'Kimi': 'kimi-code',
   'ChatGPT': 'codex',

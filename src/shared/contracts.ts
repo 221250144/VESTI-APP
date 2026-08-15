@@ -1,4 +1,4 @@
-export type CapturePlatform = 'codex' | 'cursor' | 'kimi-code' | 'claude-code';
+export type CapturePlatform = 'codex' | 'cursor' | 'kimi-code' | 'claude-code' | 'trae' | 'coder' | 'workbuddy';
 
 export interface SourceStatus {
   platform: CapturePlatform;

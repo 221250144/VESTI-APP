@@ -10,9 +10,12 @@ import type { AgentPlatform } from '../types/index.js';
 import { nativeHomeRoot, type HomeRoot } from '../platform/PathResolver.js';
 import { AiderAdapter } from './aider/adapter.js';
 import { ClaudeCodeAdapter } from './claude-code/adapter.js';
+import { CoderAdapter } from './coder/adapter.js';
 import { CodexAdapter } from './codex/adapter.js';
 import { CursorAdapter } from './cursor/adapter.js';
 import { KimiCodeAdapter } from './kimi-code/adapter.js';
+import { TraeAdapter } from './trae/adapter.js';
+import { WorkBuddyAdapter } from './workbuddy/adapter.js';
 
 interface WatchState {
   watcher: chokidar.FSWatcher;
@@ -28,9 +31,12 @@ export class AdapterManager extends EventEmitter {
     // Register built-in adapters
     this.register(new AiderAdapter());
     this.register(new ClaudeCodeAdapter());
+    this.register(new CoderAdapter());
     this.register(new CodexAdapter());
     this.register(new CursorAdapter());
     this.register(new KimiCodeAdapter());
+    this.register(new TraeAdapter());
+    this.register(new WorkBuddyAdapter());
   }
 
   register(adapter: AgentAdapter): void {

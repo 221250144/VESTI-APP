@@ -157,6 +157,9 @@ export type AgentPlatform =
   | 'cursor'
   | 'kimi-code'
   | 'aider'
+  | 'trae'
+  | 'coder'
+  | 'workbuddy'
   | 'unknown';
 
 // ==================== Config ====================
