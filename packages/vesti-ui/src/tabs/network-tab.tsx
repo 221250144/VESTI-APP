@@ -658,7 +658,7 @@ export function NetworkTab({
   return (
     <div
       className={
-        isFullscreen ? "fixed inset-0 z-50 bg-bg-tertiary" : "h-full overflow-y-auto bg-bg-tertiary"
+        isFullscreen ? "fixed inset-0 z-50 bg-bg-tertiary" : "relative h-full overflow-y-auto bg-bg-tertiary"
       }
       style={{ background: SKY_BACKGROUND[themeMode] }}
     >
@@ -666,14 +666,14 @@ export function NetworkTab({
         className={
           isFullscreen
             ? "relative h-full w-full"
-            : "flex min-h-full w-full flex-col justify-center gap-4 px-6 py-8 md:px-8"
+            : "flex min-h-full w-full flex-col gap-4 px-6 pb-8 pt-3 md:px-8"
         }
       >
         <div
           className={
             isFullscreen
               ? "absolute right-4 top-4 z-10 flex flex-wrap items-center justify-end gap-2"
-              : "flex flex-wrap items-center justify-end gap-2"
+              : "absolute right-8 top-5 z-10 flex flex-wrap items-center justify-end gap-2"
           }
         >
           {groupByToggle}
@@ -693,7 +693,7 @@ export function NetworkTab({
         </div>
         <div
           className={
-            isFullscreen ? "h-full" : "relative h-[420px] overflow-hidden rounded-2xl bg-bg-tertiary"
+            isFullscreen ? "h-full" : "relative min-h-[380px] flex-1 overflow-hidden rounded-2xl bg-bg-tertiary"
           }
         >
           <TemporalGraph

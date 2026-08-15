@@ -35,6 +35,8 @@ import {
 interface TemporalGraphProps {
   data: NetworkData;
   currentDay: number;
+  /** First-frame fallback height; the real canvas height is measured by
+   * ResizeObserver (the tab layout sizes the canvas with flex-1). */
   height: number;
   themeMode?: UiThemeMode;
   scrubbing?: boolean;
@@ -343,7 +345,7 @@ function projectPoint(
 export function TemporalGraph({
   data,
   currentDay,
-  height,
+  height: heightFallback,
   themeMode = "light",
   scrubbing = false,
   playing = false,
@@ -378,6 +380,10 @@ export function TemporalGraph({
   const gestureRef = useRef<GestureState>(createGestureState());
   const hoverIdRef = useRef<number | null>(null);
   const [width, setWidth] = useState(0);
+  const [measuredHeight, setMeasuredHeight] = useState(0);
+  // The wrapper is sized by the tab layout (flex-1), so the real height comes
+  // from the ResizeObserver below; the prop only covers the first frame.
+  const height = measuredHeight > 0 ? measuredHeight : heightFallback;
   const [isDragging, setIsDragging] = useState(false);
   const [hoveredNode, setHoveredNode] = useState<RenderNode | null>(null);
 
@@ -412,10 +418,14 @@ export function TemporalGraph({
 
     const camera = cameraRef.current;
     const centerX = width / 2;
-    const centerY = height / 2;
-    // Fit: the sphere silhouette (larger than the equator under perspective)
-    // keeps ~19px of breathing room on a 420px-tall canvas.
-    const viewScale = Math.min(width, height) * 0.42;
+    // Optical center slightly above geometric center (Apple-style optical
+    // centering): the top constellation labels clear the floating group-by
+    // buttons instead of clipping against the canvas edge.
+    const centerY = height * 0.46;
+    // Fit: measure against the shorter margin around the optical center
+    // (top = 0.46h), so the sphere silhouette keeps equal breathing room
+    // above and below instead of clipping the canvas top edge.
+    const viewScale = Math.min(width, height * 0.92) * 0.42;
     const layout = layoutRef.current;
     // 全局尺寸归一化（sphere-layout）：节点总角面积超预算时全部节点按同一
     // 系数收缩，相对大小不变；绘制半径与涟漪角半径都用它缩放。
@@ -934,12 +944,15 @@ export function TemporalGraph({
     if (!wrapper) return;
 
     const observer = new ResizeObserver((entries) => {
-      const nextWidth = entries[0]?.contentRect.width ?? wrapper.clientWidth;
-      setWidth(nextWidth);
+      const rect = entries[0]?.contentRect;
+      setWidth(rect?.width ?? wrapper.clientWidth);
+      setMeasuredHeight(rect?.height ?? wrapper.clientHeight);
     });
 
     observer.observe(wrapper);
-    setWidth(wrapper.getBoundingClientRect().width);
+    const initialRect = wrapper.getBoundingClientRect();
+    setWidth(initialRect.width);
+    setMeasuredHeight(initialRect.height);
 
     return () => observer.disconnect();
   }, []);
