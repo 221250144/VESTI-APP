@@ -718,6 +718,9 @@ export function LibraryTab({
   const [openFolderMenuName, setOpenFolderMenuName] = useState<string | null>(
     null,
   );
+  // Detail-pane meta chips (tags / key files / decisions / subagent
+  // highlights) fold behind a quiet toggle to keep the reader calm.
+  const [detailMetaOpen, setDetailMetaOpen] = useState(false);
 
   const [notes, setNotes] = useState<Note[]>([]);
   const [notesLoading, setNotesLoading] = useState(false);
@@ -2396,6 +2399,11 @@ export function LibraryTab({
     if (!confirmed) return;
     try {
       await deleteConversation(conversation.id);
+      // Deleting the open conversation must close the detail pane — otherwise
+      // the reader keeps showing a record that no longer exists.
+      if (conversation.id === selectedConversationId) {
+        setSelectedConversationId(null);
+      }
       await refresh();
     } catch (error) {
       window.alert(
@@ -4588,54 +4596,93 @@ export function LibraryTab({
                         summary={summaryData}
                         labels={labels}
                       />
+                      {deleteConversation ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleConversationDelete(selectedConversation)}
+                          aria-label={labels.delete ?? "Delete"}
+                          title={labels.deleteConversation ?? "Delete conversation"}
+                          className="inline-flex h-9 shrink-0 items-center justify-center rounded-md px-1.5 text-text-tertiary transition-colors hover:text-danger"
+                        >
+                          <Trash2 strokeWidth={1.7} className="h-4 w-4" />
+                        </button>
+                      ) : null}
                     </div>
                     <div className="flex flex-wrap gap-2">
                       {activeTags.map((tag) => (
                         <MetaChip key={tag}>{tag}</MetaChip>
                       ))}
                     </div>
-                    {selectedDigest &&
+                    {((selectedDigest &&
                       (selectedDigest.keyFiles.length > 0 ||
-                        selectedDigest.decisions.length > 0) && (
-                        <div className="flex flex-wrap items-center gap-2">
-                          {selectedDigest.keyFiles.length > 0 && (
-                            <span className="text-[11px] font-sans uppercase tracking-[0.08em] text-text-tertiary">
-                              {labels.digestKeyFiles ?? "Key files"}
-                            </span>
-                          )}
-                          {selectedDigest.keyFiles.slice(0, 6).map((file) => (
-                            <button
-                              key={`digest-file:${file}`}
-                              type="button"
-                              onClick={() => openFileTimeline(file)}
-                              title={labels.fileTimelineHint ?? "View the touch timeline of this file"}
-                              className="transition-opacity hover:opacity-70"
-                            >
-                              <MetaChip>{file}</MetaChip>
-                            </button>
-                          ))}
-                          {selectedDigest.decisions.length > 0 && (
-                            <span className="text-[11px] font-sans uppercase tracking-[0.08em] text-text-tertiary">
-                              {labels.digestKeyDecisions ?? "Decisions"}
-                            </span>
-                          )}
-                          {selectedDigest.decisions.slice(0, 4).map((decision) => (
-                            <MetaChip key={`digest-decision:${decision}`}>
-                              {decision}
-                            </MetaChip>
-                          ))}
-                        </div>
-                      )}
-                    {selectedSubagentTopics.length > 0 && (
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-[11px] font-sans uppercase tracking-[0.08em] text-text-tertiary">
-                          {labels.subagentHighlights ?? "Subagent highlights"}
-                        </span>
-                        {selectedSubagentTopics.map((topic) => (
-                          <MetaChip key={`subagent-topic:${topic}`}>
-                            {topic}
-                          </MetaChip>
-                        ))}
+                        selectedDigest.decisions.length > 0)) ||
+                      selectedSubagentTopics.length > 0) && (
+                      <div>
+                        <button
+                          type="button"
+                          onClick={() => setDetailMetaOpen((prev) => !prev)}
+                          aria-expanded={detailMetaOpen}
+                          className="flex items-center gap-1.5 text-[11px] font-sans uppercase tracking-[0.08em] text-text-tertiary transition-colors hover:text-text-secondary"
+                        >
+                          <ChevronDown
+                            strokeWidth={1.75}
+                            className={`h-3.5 w-3.5 transition-transform duration-150 ${
+                              detailMetaOpen ? "" : "-rotate-90"
+                            }`}
+                          />
+                          {(labels.detailMetaToggle ?? "Engineering details")}
+                          {selectedDigest
+                            ? ` · ${selectedDigest.keyFiles.length + selectedDigest.decisions.length + selectedSubagentTopics.length}`
+                            : ` · ${selectedSubagentTopics.length}`}
+                        </button>
+                        {detailMetaOpen ? (
+                          <div className="mt-2 space-y-2">
+                            {selectedDigest &&
+                              (selectedDigest.keyFiles.length > 0 ||
+                                selectedDigest.decisions.length > 0) && (
+                                <div className="flex flex-wrap items-center gap-2">
+                                  {selectedDigest.keyFiles.length > 0 && (
+                                    <span className="text-[11px] font-sans uppercase tracking-[0.08em] text-text-tertiary">
+                                      {labels.digestKeyFiles ?? "Key files"}
+                                    </span>
+                                  )}
+                                  {selectedDigest.keyFiles.slice(0, 6).map((file) => (
+                                    <button
+                                      key={`digest-file:${file}`}
+                                      type="button"
+                                      onClick={() => openFileTimeline(file)}
+                                      title={labels.fileTimelineHint ?? "View the touch timeline of this file"}
+                                      className="transition-opacity hover:opacity-70"
+                                    >
+                                      <MetaChip>{file}</MetaChip>
+                                    </button>
+                                  ))}
+                                  {selectedDigest.decisions.length > 0 && (
+                                    <span className="text-[11px] font-sans uppercase tracking-[0.08em] text-text-tertiary">
+                                      {labels.digestKeyDecisions ?? "Decisions"}
+                                    </span>
+                                  )}
+                                  {selectedDigest.decisions.slice(0, 4).map((decision) => (
+                                    <MetaChip key={`digest-decision:${decision}`}>
+                                      {decision}
+                                    </MetaChip>
+                                  ))}
+                                </div>
+                              )}
+                            {selectedSubagentTopics.length > 0 && (
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-[11px] font-sans uppercase tracking-[0.08em] text-text-tertiary">
+                                  {labels.subagentHighlights ?? "Subagent highlights"}
+                                </span>
+                                {selectedSubagentTopics.map((topic) => (
+                                  <MetaChip key={`subagent-topic:${topic}`}>
+                                    {topic}
+                                  </MetaChip>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ) : null}
                       </div>
                     )}
                   </div>

@@ -1,16 +1,19 @@
 "use client";
 
-// 记忆空间 (memory space, formerly the P4b deposits area): three sections —
-// dream memories ('dream' entries, tag-filtered cards), dream logs
-// ('dream-log' journals) and the classic deposits workbench (template grid,
-// version chains, one-click sweep). The header carries the dream pipeline
-// controls (manual run, auto toggle, full rebuild). Deposits persistence now
-// rides on the same memory_entries store via the storage layer, transparently.
+// 记忆空间 (memory space, formerly the P4b deposits area): the default view is
+// a one-page overview of summary cards — memories ('dream' entries), dreams
+// ('dream-log' journals incl. the owl diary), the daily log (read-only list +
+// content) and the classic deposits workbench. Each card shows a count plus a
+// short preview; clicking a card drills into the full section (back bar
+// returns to the overview). The header carries the dream pipeline controls
+// (manual run, auto toggle, full rebuild). Deposits persistence now rides on
+// the same memory_entries store via the storage layer, transparently.
 //
 // Deposits workbench layout: left = template cards + history (version heads),
 // right = the generation composer or the selected deposit (Markdown body,
 // version chain, rename/delete, export). Dream sections live in
-// ./deposits/memorySections.
+// ./deposits/memorySections, the daily-log section in ./deposits/dailyLogSection,
+// and the card copy dictionary in ./deposits/memorySpaceCopy.
 
 import { useEffect, useMemo, useState } from "react";
 import { marked } from "marked";
@@ -19,6 +22,7 @@ import {
   Archive,
   Check,
   ChevronDown,
+  ChevronLeft,
   CloudMoon,
   Download,
   FolderGit2,
@@ -35,9 +39,17 @@ import {
 import { SendToMenu } from "../components/SendToMenu";
 import { sanitizeFileBaseName } from "../lib/extractMarkdown";
 import {
+  DreamLogCard,
   DreamLogSection,
+  DreamMemoryCard,
   DreamMemorySection,
+  MemoryOverviewCard,
 } from "./deposits/memorySections";
+import { DailyLogCard, DailyLogSection } from "./deposits/dailyLogSection";
+import {
+  MEMORY_SPACE_COPY,
+  detectMemorySpaceLocale,
+} from "./deposits/memorySpaceCopy";
 import {
   planDepositSweep,
   runDepositSweep,
@@ -69,6 +81,8 @@ type DepositsTabProps = {
 
 type DistillTemplateKey = Exclude<DepositTemplate, "extract">;
 type ScopeKind = DepositScope["kind"];
+/** Top-level memory-space views: the card overview (default) or one drilled-in section. */
+type MemorySection = "overview" | "memories" | "dreamLogs" | "daily" | "deposits";
 
 const TEMPLATE_ORDER: DistillTemplateKey[] = [
   "background_knowledge",
@@ -180,6 +194,9 @@ function topicPathLabel(topic: Topic, byId: Map<number, Topic>): string {
 
 export function DepositsTab({ storage, labels, sendToLabels, dreamLocked = false }: DepositsTabProps) {
   const l = (key: string, fallback: string) => labels?.[key] ?? fallback;
+  // Card chrome copy: component-local 4-locale dictionary (see
+  // ./deposits/memorySpaceCopy); existing strings keep flowing through l().
+  const copy = MEMORY_SPACE_COPY[detectMemorySpaceLocale(labels, sendToLabels)] ?? MEMORY_SPACE_COPY.en;
 
   const [deposits, setDeposits] = useState<Deposit[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -216,8 +233,9 @@ export function DepositsTab({ storage, labels, sendToLabels, dreamLocked = false
   const [sweepProgress, setSweepProgress] = useState<DepositSweepProgress | null>(null);
   const [sweepSummary, setSweepSummary] = useState<DepositSweepSummary | null>(null);
 
-  // Memory-space sections + dream pipeline controls (header).
-  const [section, setSection] = useState<"memories" | "dreamLogs" | "deposits">("memories");
+  // Memory-space sections + dream pipeline controls (header). The default
+  // "overview" view is the summary-card grid; the rest are drilled-in sections.
+  const [section, setSection] = useState<MemorySection>("overview");
   const [dreaming, setDreaming] = useState(false);
   const [dreamProgress, setDreamProgress] = useState<string | null>(null);
   const [dreamNotice, setDreamNotice] = useState<string | null>(null);
@@ -707,20 +725,12 @@ export function DepositsTab({ storage, labels, sendToLabels, dreamLocked = false
     );
   }
 
-  const sectionButton = (id: "memories" | "dreamLogs" | "deposits", label: string) => (
-    <button
-      key={id}
-      type="button"
-      onClick={() => setSection(id)}
-      className={`rounded-full px-3 py-1 text-vesti-sm font-sans transition-colors ${
-        section === id
-          ? "bg-accent-primary-light text-accent-primary"
-          : "text-text-tertiary hover:text-text-secondary"
-      }`}
-    >
-      {label}
-    </button>
-  );
+  const sectionTitle: Record<Exclude<MemorySection, "overview">, string> = {
+    memories: copy.memories.title,
+    dreamLogs: copy.dreams.title,
+    daily: copy.daily.title,
+    deposits: copy.deposits.title,
+  };
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-bg-app">
@@ -843,18 +853,73 @@ export function DepositsTab({ storage, labels, sendToLabels, dreamLocked = false
         ) : null}
       </header>
 
-      {/* Section switch: memories (default) / dream logs / deposits */}
-      <nav className="flex shrink-0 items-center gap-1 border-b border-border-subtle bg-bg-tertiary px-4 py-2">
-        {sectionButton("memories", l("sectionMemories", "Memories"))}
-        {sectionButton("dreamLogs", l("sectionDreamLogs", "Dream logs"))}
-        {sectionButton("deposits", l("sectionDeposits", "Deposits"))}
-      </nav>
+      {/* Drill-in bar: back to the overview + the current section's title */}
+      {section !== "overview" ? (
+        <nav className="flex shrink-0 items-center gap-2 border-b border-border-subtle bg-bg-tertiary px-4 py-2">
+          <button
+            type="button"
+            onClick={() => setSection("overview")}
+            className="inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-vesti-sm font-sans text-text-tertiary transition-colors hover:text-text-secondary"
+          >
+            <ChevronLeft strokeWidth={1.75} className="h-3.5 w-3.5" />
+            {copy.backToOverview}
+          </button>
+          <span className="text-vesti-sm font-sans font-medium text-text-secondary">
+            {sectionTitle[section]}
+          </span>
+        </nav>
+      ) : null}
 
       <div className="min-h-0 flex-1">
-        {section === "memories" ? (
+        {section === "overview" ? (
+          <div className="h-full overflow-y-auto">
+            <div className="mx-auto grid max-w-5xl grid-cols-1 gap-3 px-6 py-5 md:grid-cols-2">
+              <DreamMemoryCard
+                storage={storage}
+                l={l}
+                refreshKey={memoryRefreshKey}
+                copy={copy}
+                onOpen={() => setSection("memories")}
+              />
+              <DreamLogCard
+                storage={storage}
+                l={l}
+                refreshKey={memoryRefreshKey}
+                copy={copy}
+                onOpen={() => setSection("dreamLogs")}
+              />
+              {storage.listDailyLogs ? (
+                <DailyLogCard
+                  storage={storage}
+                  copy={copy}
+                  onOpen={() => setSection("daily")}
+                />
+              ) : null}
+              <MemoryOverviewCard
+                icon={<Archive strokeWidth={1.75} className="h-4 w-4" />}
+                title={copy.deposits.title}
+                count={deposits === null ? null : heads.length}
+                description={copy.deposits.desc}
+                previews={heads
+                  .slice(0, 2)
+                  .map(
+                    (head) =>
+                      `${head.title} · ${l("versionLabel", "v{version}").replace("{version}", String(head.version))}`,
+                  )}
+                emptyText={copy.deposits.empty}
+                entryCountLabel={(count) =>
+                  copy.entryCount.replace("{count}", String(count))
+                }
+                onOpen={() => setSection("deposits")}
+              />
+            </div>
+          </div>
+        ) : section === "memories" ? (
           <DreamMemorySection storage={storage} l={l} refreshKey={memoryRefreshKey} />
         ) : section === "dreamLogs" ? (
           <DreamLogSection storage={storage} l={l} refreshKey={memoryRefreshKey} />
+        ) : section === "daily" ? (
+          <DailyLogSection storage={storage} copy={copy} />
         ) : (
     <div className="flex h-full overflow-hidden bg-bg-app">
       {/* Left column: templates + history */}

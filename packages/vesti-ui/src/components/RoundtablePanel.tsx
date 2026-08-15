@@ -94,6 +94,42 @@ const PERSONA_META: Record<SelectablePersonaId, { Icon: LucideIcon; color: strin
   devils_advocate: { Icon: Flame, color: "#dc2626" },
 };
 
+// 猫头鹰席位名 (Owl seat names), kept next to the component in the DOCK_COPY
+// pattern: the shared i18n files still carry the pre-rename labels and stay
+// untouched, so the picker/progress/result names resolve from this local
+// dictionary instead. The `lang` prop only distinguishes zh/en today; the
+// ja/ko entries ride along for when the host starts passing them through.
+const PERSONA_NAME_COPY: Record<"zh" | "en" | "ja" | "ko", Record<SelectablePersonaId, string>> = {
+  zh: {
+    skeptic: "怀疑猫头鹰",
+    optimist: "乐观猫头鹰",
+    pragmatist: "务实猫头鹰",
+    domain_expert: "专家猫头鹰",
+    devils_advocate: "抬杠猫头鹰",
+  },
+  en: {
+    skeptic: "Skeptic Owl",
+    optimist: "Optimist Owl",
+    pragmatist: "Pragmatist Owl",
+    domain_expert: "Expert Owl",
+    devils_advocate: "Contrarian Owl",
+  },
+  ja: {
+    skeptic: "懐疑フクロウ",
+    optimist: "楽観フクロウ",
+    pragmatist: "実務フクロウ",
+    domain_expert: "専門家フクロウ",
+    devils_advocate: "反論フクロウ",
+  },
+  ko: {
+    skeptic: "회의파 올빼미",
+    optimist: "낙관파 올빼미",
+    pragmatist: "실무파 올빼미",
+    domain_expert: "전문가 올빼미",
+    devils_advocate: "반대파 올빼미",
+  },
+};
+
 /** Excerpt length of a seat's viewpoint folded into the "继续深入" Ask seed. */
 const DEEPEN_EXCERPT_MAX = 80;
 
@@ -171,15 +207,12 @@ export function RoundtablePanel({
     };
   }, [storage]);
 
+  // Seat names come from the local owl dictionary (see PERSONA_NAME_COPY);
+  // the i18n-provided persona labels predate the rename.
   const nameOf = (id: RoundtablePersonaId): string =>
-    ({
-      skeptic: labels.personaSkeptic,
-      optimist: labels.personaOptimist,
-      pragmatist: labels.personaPragmatist,
-      domain_expert: labels.personaDomainExpert,
-      devils_advocate: labels.personaDevilsAdvocate,
-      moderator: "Moderator",
-    })[id];
+    id === "moderator"
+      ? "Moderator"
+      : (PERSONA_NAME_COPY[lang] ?? PERSONA_NAME_COPY.en)[id as SelectablePersonaId];
 
   const togglePersona = (id: SelectablePersonaId) => {
     setSelected((prev) => {

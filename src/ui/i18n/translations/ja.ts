@@ -1442,11 +1442,11 @@ export const jaTranslations = {
       seatFailed: "発言に失敗しました",
       savedHint: "この議論は「夜話」履歴に保存されました。いつでも見返せます。",
       groundedHint: "過去の会話 {n} 件を背景にしています",
-      personaSkeptic: "懐疑派",
-      personaOptimist: "楽観派",
-      personaPragmatist: "現実派",
-      personaDomainExpert: "分野の専門家",
-      personaDevilsAdvocate: "あえての反対役",
+      personaSkeptic: "懐疑フクロウ",
+      personaOptimist: "楽観フクロウ",
+      personaPragmatist: "現実派フクロウ",
+      personaDomainExpert: "専門フクロウ",
+      personaDevilsAdvocate: "反対フクロウ",
       deepen: "さらに深める",
       deepenPrompt: "「{question}」の円卓会議で、{persona}は次のように主張しました：「{excerpt}」。過去の会話を踏まえてこの視点を深く分析してください — どこで成り立ち、どこで成り立たないか。"
     }

@@ -5,11 +5,31 @@
 // key_insights, unresolved_threads, actionable_next_steps, tech_stack, sentiment)
 // into four evidence-linked axes + the user's top recurring "obsessions".
 //
+// Two data paths, one output:
+// 1. FULL — enough structured summaries (≥ MIN_AITI_SAMPLE): unchanged summary
+//    aggregation, the accurate profile.
+// 2. PRELIMINARY (初步画像) — summaries still scarce but the caller passed
+//    local lightweight signals (localSignals.ts, computed from raw messages
+//    with no LLM): structured feats merged with local message-level feats,
+//    flagged `preliminary: true` so the UI can label it "初步画像 · 随着摘要
+//    增多会更准". The full path takes over automatically once the summary
+//    sample crosses the threshold.
+//
 // Output is locale-agnostic (scores + keys + evidence ids); the UI applies the
 // localized axis labels and assembles the type code.
 
 import type { SummaryRecord } from "../db/types";
 import type { AitiProfile, AitiAxisScore, AitiObsession } from "@vesti/ui";
+import { hasEnoughLocalSignals, type AitiLocalSignals } from "./localSignals";
+
+/** computeAiti's result: AitiProfile plus the preliminary marker. The flag
+ * lives here (not in @vesti/ui types) so hosts that only know AitiProfile keep
+ * working unchanged. */
+export interface AitiComputation extends AitiProfile {
+  /** true → 初步画像: (partly) built from local message-level signals because
+   * structured summaries are still below the full-profile threshold. */
+  preliminary?: boolean;
+}
 
 const MIN_AITI_SAMPLE = 5;
 const DEPTH_SCORE: Record<string, number> = {
@@ -97,13 +117,34 @@ function extract(rec: SummaryRecord): Feat | null {
   };
 }
 
-/** Keep the latest summary per conversation. */
+/** A row only feeds AITI when it carries a usable structured summary object. */
+function usable(rec: SummaryRecord): boolean {
+  const s = rec.structured as unknown;
+  return Boolean(s && typeof s === "object");
+}
+
+/** Keep the best summary per conversation: the latest row that carries a
+ * usable structured summary wins. A newer plain-text fallback / placeholder
+ * row (structured: null — written when the summary agent answered prose or
+ * the channel was unavailable) must NOT erase an older structured one:
+ * extract() would then drop the conversation from the sample entirely, which
+ * is how "分析的对话还是较少" happened for re-summarized conversations. */
 function dedupeLatest(records: SummaryRecord[]): SummaryRecord[] {
   const byConv = new Map<number, SummaryRecord>();
   for (const rec of records) {
     if (typeof rec.conversationId !== "number") continue;
     const prev = byConv.get(rec.conversationId);
-    if (!prev || (rec.createdAt ?? 0) > (prev.createdAt ?? 0)) byConv.set(rec.conversationId, rec);
+    if (!prev) {
+      byConv.set(rec.conversationId, rec);
+      continue;
+    }
+    const recOk = usable(rec);
+    const prevOk = usable(prev);
+    if (recOk !== prevOk) {
+      if (recOk) byConv.set(rec.conversationId, rec);
+      continue;
+    }
+    if ((rec.createdAt ?? 0) > (prev.createdAt ?? 0)) byConv.set(rec.conversationId, rec);
   }
   return Array.from(byConv.values());
 }
@@ -116,15 +157,11 @@ function evidence(feats: Feat[], rank: (f: Feat) => number, n = 3): number[] {
     .map((f) => f.conversationId);
 }
 
-export function computeAiti(records: SummaryRecord[]): AitiProfile {
-  const feats = dedupeLatest(records)
-    .map(extract)
-    .filter((f): f is Feat => f !== null);
-
+/** Aggregate a per-conversation feature set into the four axes + obsessions.
+ * Shared by the full (structured-summary) path and the preliminary
+ * (local-signal merged) path — the Feat shape is the common currency. */
+function scoreFeats(feats: Feat[]): { axes: AitiAxisScore[]; obsessions: AitiObsession[] } {
   const sampleSize = feats.length;
-  if (sampleSize < MIN_AITI_SAMPLE) {
-    return { available: false, sampleSize, axes: [], obsessions: [] };
-  }
 
   // depth
   const depthVals = feats.map((f) => f.depth).filter((d): d is number => d !== null);
@@ -212,5 +249,47 @@ export function computeAiti(records: SummaryRecord[]): AitiProfile {
     .slice(0, MAX_OBSESSIONS)
     .map((e) => ({ term: e.display, count: e.count }));
 
-  return { available: true, sampleSize, axes, obsessions };
+  return { axes, obsessions };
+}
+
+/**
+ * Compute the AITI profile. `records` are all stored summary rows; `local`
+ * (optional) is the message-level signal set from computeLocalSignals — when
+ * structured summaries are still scarce, local feats fill the gap and the
+ * result comes back `preliminary: true` (初步画像). Pure.
+ */
+export function computeAiti(
+  records: SummaryRecord[],
+  local?: AitiLocalSignals | null,
+): AitiComputation {
+  const feats = dedupeLatest(records)
+    .map(extract)
+    .filter((f): f is Feat => f !== null);
+
+  const sampleSize = feats.length;
+
+  // Full path (unchanged): enough structured summaries → the accurate profile.
+  if (sampleSize >= MIN_AITI_SAMPLE) {
+    return { available: true, sampleSize, ...scoreFeats(feats) };
+  }
+
+  // Preliminary path: summaries scarce, but local message-level signals cover
+  // the gap. Structured feats keep precedence per conversation (they carry the
+  // LLM-judged depth/tone); local feats supply the conversations that have no
+  // usable summary at all.
+  if (local && hasEnoughLocalSignals(local)) {
+    const covered = new Set(feats.map((f) => f.conversationId));
+    const merged: Feat[] = [
+      ...feats,
+      ...local.feats.filter((f) => !covered.has(f.conversationId)),
+    ];
+    return {
+      available: true,
+      preliminary: true,
+      sampleSize: merged.length,
+      ...scoreFeats(merged),
+    };
+  }
+
+  return { available: false, sampleSize, axes: [], obsessions: [] };
 }

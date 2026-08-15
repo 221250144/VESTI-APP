@@ -309,8 +309,10 @@ export function ExploreTab({
     [storage, labels.deleteConversationConfirm, currentSessionId, handleNewChat, loadSessions],
   );
 
-  const handleSubmit = useCallback(async () => {
-    const trimmed = inputValue.trim();
+  const handleSubmit = useCallback(async (textOverride?: string) => {
+    // Welcome-area chips hand their prompt in directly; the composer's own
+    // send reads the textarea state.
+    const trimmed = (textOverride ?? inputValue).trim();
     if (!trimmed || isSubmitting) return;
 
     if (!storage.askCompanion) {
@@ -480,6 +482,7 @@ export function ExploreTab({
         inputValue={inputValue}
         onInputChange={setInputValue}
         onSubmit={() => void handleSubmit()}
+        onSendText={(text) => void handleSubmit(text)}
         onOpenConversation={onOpenConversation}
         textareaRef={textareaRef}
         messagesEndRef={messagesEndRef}

@@ -5,8 +5,9 @@
 import type { LearnDomain } from "../types";
 
 /** Version tag baked into every fingerprint — bump it when the fingerprint
- * inputs change so stale cache entries simply miss. */
-const FINGERPRINT_VERSION = "v1";
+ * inputs change so stale cache entries simply miss. v2: synthesis prompt now
+ * asks for condensed parent-topic titles, so v1 caches hold stale naming. */
+const FINGERPRINT_VERSION = "v2";
 
 /**
  * Route fingerprint: a stable hash of the route's member conversation id set.

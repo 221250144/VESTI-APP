@@ -1442,11 +1442,11 @@ export const koTranslations = {
       seatFailed: "발언 실패",
       savedHint: "이 토론은 「밤의 대화」 기록에 저장되었습니다. 언제든 다시 볼 수 있습니다.",
       groundedHint: "과거 대화 {n}개를 배경으로 사용",
-      personaSkeptic: "회의론자",
-      personaOptimist: "낙관론자",
-      personaPragmatist: "실용주의자",
-      personaDomainExpert: "분야 전문가",
-      personaDevilsAdvocate: "악마의 변호인",
+      personaSkeptic: "회의 부엉이",
+      personaOptimist: "낙관 부엉이",
+      personaPragmatist: "실용 부엉이",
+      personaDomainExpert: "전문가 부엉이",
+      personaDevilsAdvocate: "반대 부엉이",
       deepen: "더 깊이 파기",
       deepenPrompt: "「{question}」 원탁 토론에서 {persona}은(는) 이렇게 주장했습니다: 「{excerpt}」. 지난 대화를 바탕으로 이 관점을 심층 분석해 주세요 — 어디서 성립하고 어디서 성립하지 않는지."
     }

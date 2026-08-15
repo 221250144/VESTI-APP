@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Download, Loader2, Quote, Sparkles, Square } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { Download, Loader2, Quote, RotateCcw, Sparkles, Square } from "lucide-react";
 import type {
   AitiAxisScore,
   AitiImagery,
@@ -10,10 +10,17 @@ import type {
   SummaryCoverage,
 } from "../types";
 import { SendToMenu } from "./SendToMenu";
+import { AitiIntro, aitiLocalCopy } from "./AitiIntro";
 import { buildAitiMarkdown } from "../lib/exploreMarkdown";
 import { renderAitiCardImage } from "../lib/aitiCardImage";
 import { renderQrDataUrl, VESTI_REPO_SHORT, VESTI_REPO_URL } from "../lib/repoQr";
 import { AITI_MIN_STRUCTURED_SUMMARIES } from "../lib/summaryCoverage";
+
+// Session-scoped: the intro auto-plays on the first open of the AITI panel per
+// app session (module load). It is only marked played when the intro finishes
+// or is skipped (StrictMode double-mounts must not consume the one shot), and
+// the 重看 button / radar click replays it on demand.
+let aitiIntroPlayedThisSession = false;
 
 // Lightweight, dependency-free SVG radar of the four AITI axes — a consistent
 // accent-styled overview to complement the per-axis sliders. Degrades to null if
@@ -115,6 +122,9 @@ interface AitiCardProps {
   onCancelSummaryBatch?: () => void;
   /** 会员门控: true → generation entry disabled with the member-only hint. */
   memberLocked?: boolean;
+  /** UI locale for the component-side intro/preliminary copy ("zh" | "en" |
+   * "ja" | "ko" or any BCP-47 tag); falls back to navigator.language. */
+  locale?: string;
 }
 
 export function AitiCard({
@@ -132,6 +142,7 @@ export function AitiCard({
   onGenerateSummaries,
   onCancelSummaryBatch,
   memberLocked,
+  locale,
 }: AitiCardProps) {
   type AxisMeta = {
     label: string;
@@ -174,6 +185,26 @@ export function AitiCard({
   const [emblemBroken, setEmblemBroken] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [repoQrUrl, setRepoQrUrl] = useState<string | null>(null);
+  const [introVisible, setIntroVisible] = useState(false);
+
+  // Component-side copy (intro overlay, replay button, preliminary badge) —
+  // labels.aiti is host-supplied and stays untouched.
+  const localCopy = aitiLocalCopy(locale);
+
+  // Auto-play the intro on the session's first open of this panel. The
+  // played flag flips only when the intro completes or is skipped, so a
+  // StrictMode remount or a quick tab switch can't burn the one shot.
+  useEffect(() => {
+    if (!aitiIntroPlayedThisSession) setIntroVisible(true);
+  }, []);
+  const closeIntro = useCallback(() => {
+    aitiIntroPlayedThisSession = true;
+    setIntroVisible(false);
+  }, []);
+  const replayIntro = useCallback(() => setIntroVisible(true), []);
+  const introOverlay = introVisible ? (
+    <AitiIntro locale={locale} emblemUrl={emblemUrl} onDone={closeIntro} />
+  ) : null;
 
   // Repo QR for the card footer — dark-on-white tile, theme-independent so it
   // stays scannable; null while generating (footer simply hides it).
@@ -286,7 +317,8 @@ export function AitiCard({
 
   if (!profile || !profile.available) {
     return (
-      <div className="flex h-full flex-col">
+      <div className="relative flex h-full flex-col">
+        {introOverlay}
         {coverageHeader}
         <div className="flex flex-1 flex-col items-center justify-center p-10 text-center">
           <div
@@ -308,6 +340,12 @@ export function AitiCard({
   }
 
   const weakAxes = new Set(imagery?.weakAxes ?? []);
+
+  // The host's computeAiti (src/ui/aiti) marks profiles built from local
+  // message-level signals with `preliminary: true` (初步画像). AitiProfile in
+  // types.ts intentionally stays unchanged, so the flag is read structurally.
+  const preliminary =
+    (profile as AitiProfile & { preliminary?: boolean }).preliminary === true;
 
   // Legacy localized pole list, kept as the fallback heading when the host
   // couldn't resolve an imagery (unexpected axis set).
@@ -362,14 +400,31 @@ export function AitiCard({
   };
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="relative flex h-full flex-col">
+      {introOverlay}
       {coverageHeader}
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
         <div className="mx-auto max-w-2xl">
         {/* Header */}
         <div className="flex items-start justify-between gap-3">
-          <h3 className="text-[15px] font-medium text-text-primary">{labels.title}</h3>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <h3 className="text-[15px] font-medium text-text-primary">{labels.title}</h3>
+            {preliminary ? (
+              <span className="rounded-full border border-border-subtle bg-accent-primary-light px-2.5 py-0.5 text-[11px] text-accent-primary">
+                {localCopy.preliminaryBadge}
+              </span>
+            ) : null}
+          </div>
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={replayIntro}
+              title={localCopy.introReplay}
+              className="inline-flex items-center gap-1.5 rounded-full border border-border-subtle px-3 py-1 text-[12px] text-text-secondary transition-colors hover:text-text-primary"
+            >
+              <RotateCcw strokeWidth={1.75} className="h-3.5 w-3.5" />
+              {localCopy.introReplay}
+            </button>
             {imagery ? (
               <button
                 type="button"
@@ -465,8 +520,18 @@ export function AitiCard({
           </figure>
         ) : null}
 
-        {/* 思维图: radar overview of the four axes */}
-        <div className="mt-5 rounded-2xl border border-border-subtle bg-bg-surface-card px-6 py-5">
+        {/* 思维图: radar overview of the four axes — clicking the panel
+            replays the 开场动画 on demand */}
+        <div
+          className="mt-5 cursor-pointer rounded-2xl border border-border-subtle bg-bg-surface-card px-6 py-5"
+          onClick={replayIntro}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") replayIntro();
+          }}
+          title={localCopy.introReplay}
+        >
           <div className="text-[11px] uppercase tracking-[0.16em] text-text-tertiary">
             {labels.mindMapTitle}
           </div>

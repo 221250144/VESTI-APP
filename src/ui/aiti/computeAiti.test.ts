@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { computeAiti } from "./computeAiti";
+import type { AitiLocalFeat, AitiLocalSignals } from "./localSignals";
 import type { ConversationSummaryV2, SummaryRecord } from "../db/types";
 
 function v2(overrides: {
@@ -149,5 +150,89 @@ describe("computeAiti", () => {
     const profile = computeAiti(records);
     expect(profile.available).toBe(false);
     expect(profile.sampleSize).toBe(3);
+  });
+
+  it("keeps an older structured summary when the newest row is a fallback", () => {
+    const records = [1, 2, 3, 4, 5].map((id) => record(id, v2({ depthLevel: "deep" }), id));
+    // Conversation 1 was re-summarized and the agent answered prose: the newest
+    // row is a plain-text fallback (structured: null). The older structured row
+    // must still count — otherwise the conversation silently leaves the sample.
+    records.push(record(1, null, 100));
+
+    const profile = computeAiti(records);
+    expect(profile.available).toBe(true);
+    expect(profile.sampleSize).toBe(5);
+    const depth = profile.axes.find((axis) => axis.key === "depth");
+    expect(depth?.score).toBe(90);
+  });
+});
+
+describe("computeAiti preliminary (local signals)", () => {
+  function localFeat(
+    conversationId: number,
+    overrides: Partial<AitiLocalFeat> = {},
+  ): AitiLocalFeat {
+    return {
+      conversationId,
+      createdAt: conversationId,
+      depth: 80,
+      maker: true,
+      theorist: false,
+      unresolved: 0,
+      affect: -1,
+      terms: ["sqlite"],
+      ...overrides,
+    };
+  }
+
+  function signals(feats: AitiLocalFeat[]): AitiLocalSignals {
+    return {
+      conversationCount: feats.length,
+      userMessageCount: feats.length * 4,
+      questionRatio: 0.5,
+      avgUserChars: 120,
+      avgUserTurns: 4,
+      activeHours: new Array<number>(24).fill(0),
+      topTerms: [],
+      feats,
+    };
+  }
+
+  it("returns a preliminary profile when summaries are scarce but local signals suffice", () => {
+    const records = [1, 2].map((id) => record(id, v2({ depthLevel: "deep" })));
+    const local = signals([localFeat(3), localFeat(4), localFeat(5), localFeat(1, { depth: 10 })]);
+
+    const profile = computeAiti(records, local);
+    expect(profile.available).toBe(true);
+    expect(profile.preliminary).toBe(true);
+    // 2 structured + 3 local-only (conversation 1's structured feat wins over
+    // its local twin, so the merged sample stays deduplicated)
+    expect(profile.sampleSize).toBe(5);
+    const depth = profile.axes.find((axis) => axis.key === "depth");
+    // mean of 90, 90 (structured) + 80, 80, 80 (local) — conv 1's local
+    // depth=10 must NOT leak in
+    expect(depth?.score).toBe(84);
+    // obsessions merge across both sources: sqlite appears in convs 3, 4, 5
+    expect(profile.obsessions).toEqual([{ term: "sqlite", count: 3 }]);
+  });
+
+  it("stays gated when neither summaries nor local signals are enough", () => {
+    const records = [1, 2].map((id) => record(id, v2({ depthLevel: "deep" })));
+    const thin = signals([localFeat(3), localFeat(4)]); // < 3 local conversations
+
+    const profile = computeAiti(records, thin);
+    expect(profile.available).toBe(false);
+    expect(profile.preliminary).toBeUndefined();
+    expect(profile.sampleSize).toBe(2);
+  });
+
+  it("ignores local signals once the full summary path is available", () => {
+    const records = [1, 2, 3, 4, 5].map((id) => record(id, v2({ depthLevel: "deep" })));
+    const local = signals([localFeat(6), localFeat(7), localFeat(8)]);
+
+    const profile = computeAiti(records, local);
+    expect(profile.available).toBe(true);
+    expect(profile.preliminary).toBeUndefined();
+    expect(profile.sampleSize).toBe(5);
   });
 });

@@ -346,7 +346,7 @@ describe("computeLearn V3 route aggregation", () => {
     expect(misc.topicId).toBe(null);
     expect(misc.count * 3).toBeLessThanOrEqual(24);
     expect(misc.count).toBe(8);
-    expect(misc.name).toContain("零散探索");
+    expect(misc.name).toContain("随手探索");
   });
 
   it("gives the fallback route a descriptive name and sorts it last", () => {
@@ -362,7 +362,7 @@ describe("computeLearn V3 route aggregation", () => {
     const misc = profile.domains[profile.domains.length - 1];
     expect(misc.topicId).toBe(null);
     expect(misc.count).toBe(4);
-    expect(misc.name.startsWith("零散探索：")).toBe(true);
+    expect(misc.name.startsWith("随手探索：")).toBe(true);
     expect(misc.name).toContain("话题");
     expect(misc.representatives.length).toBeGreaterThan(0);
   });
@@ -377,8 +377,66 @@ describe("computeLearn V3 route aggregation", () => {
     conversations.push(conv(100, null, 500), conv(101, null, 600));
     const profile = computeLearn([], topics, conversations, undefined, undefined, "en");
     const misc = profile.domains[profile.domains.length - 1];
-    expect(misc.name.startsWith("Assorted: ")).toBe(true);
+    expect(misc.name.startsWith("Side explorations: ")).toBe(true);
     const platform = profile.domains.find((d) => d.name === "ChatGPT · General exploration");
     expect(platform).toBeDefined();
+  });
+});
+
+// ---- V5: Topic-family consolidation + heat ordering -------------------------
+
+describe("computeLearn V5 topic families", () => {
+  it("folds over-specific root topics into one parent-theme route", () => {
+    const conversations = [
+      conv(1, 1, 100),
+      conv(2, 1, 200),
+      conv(3, 2, 300),
+      conv(4, 2, 400),
+    ];
+    const profile = computeLearn(
+      [],
+      [topic(1, "nohup 学习"), topic(2, "systemctl 运维")],
+      conversations,
+    );
+    expect(profile.domains.length).toBe(1);
+    const domain = profile.domains[0];
+    expect(domain.name).toBe("Linux 系统");
+    expect(domain.count).toBe(4);
+    expect(domain.representatives.length).toBeGreaterThan(0);
+  });
+
+  it("matches ASCII keywords on token boundaries only (digital ≠ git)", () => {
+    const conversations = [conv(1, 1, 100), conv(2, 1, 200), conv(3, 1, 300)];
+    const profile = computeLearn([], [topic(1, "digital 花园")], conversations);
+    expect(profile.domains[0].name).toBe("digital 花园");
+  });
+
+  it("localizes the parent theme and keeps unmatched names untouched", () => {
+    const conversations = [conv(1, 1, 100), conv(2, 2, 200), conv(3, 2, 300)];
+    const profile = computeLearn(
+      [],
+      [topic(1, "useEffect 闭包"), topic(2, "明清史")],
+      conversations,
+      undefined,
+      undefined,
+      "en",
+    );
+    const react = profile.domains.find((d) => d.name === "React")!;
+    expect(react.count).toBe(1);
+    expect(profile.domains.some((d) => d.name === "明清史")).toBe(true);
+  });
+
+  it("orders named routes by conversation count (heat), fallback last", () => {
+    const conversations = [
+      conv(1, 1, 100),
+      conv(2, 2, 200),
+      conv(3, 2, 300),
+      conv(4, 2, 400),
+    ];
+    const summaries = [summary(1, "deep", 100), summary(2, "deep", 200)];
+    // Topic 1 has the deeper summaries (higher importance) but fewer
+    // conversations — heat ordering still puts topic 2 first.
+    const profile = computeLearn(summaries, [topic(1, "小众话题"), topic(2, "热门话题")], conversations);
+    expect(profile.domains.map((d) => d.name)).toEqual(["热门话题", "小众话题"]);
   });
 });

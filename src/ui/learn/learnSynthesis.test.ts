@@ -55,7 +55,7 @@ describe("learnRouteFingerprint", () => {
     const a = learnRouteFingerprint(domain());
     const b = learnRouteFingerprint(domain({ memberIds: [13, 12, 11] }));
     expect(a).toBe(b);
-    expect(a).toMatch(/^v1:/);
+    expect(a).toMatch(/^v2:/);
   });
 
   it("changes when membership changes", () => {
@@ -86,6 +86,8 @@ describe("buildLearnSynthesisTranscript", () => {
     expect(transcript).toContain('"title"');
     expect(transcript).toContain('"summary"');
     expect(transcript).toContain('"next_steps"');
+    // Titles are parent themes, not narrow topics or full sentences.
+    expect(transcript).toContain("不超过 6 个字");
   });
 
   it("has an en variant and omits absent context lines", () => {

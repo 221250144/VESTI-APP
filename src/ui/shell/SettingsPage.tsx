@@ -100,6 +100,8 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     closeToTrayDesc: "点击窗口关闭按钮后继续在后台捕获;可从托盘菜单彻底退出。",
     showCapsule: "显示桌面悬浮球",
     showCapsuleDesc: "小猫头鹰常驻屏幕边缘,随时同步或打开主界面。",
+    capsuleTitle: "悬浮球",
+    capsuleDesc: "桌面悬浮球的显示、搭话与完工提醒,以及小猫头鹰皮肤。",
     ambientBubble: "猫头鹰环境气泡",
     ambientBubbleDesc: "空闲时小猫头鹰会偶尔冒泡,聊聊你的梦境整理与最新对话。",
     agentNotify: "Agent 完工提醒",
@@ -309,6 +311,8 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     closeToTrayDesc: "Closing the window keeps capturing in the background; quit from the tray menu.",
     showCapsule: "Show desktop floating ball",
     showCapsuleDesc: "The little owl stays at the screen edge for quick sync and access.",
+    capsuleTitle: "Floating Ball",
+    capsuleDesc: "Show or hide the desktop floating ball, control its bubbles, and pick the owl skin.",
     ambientBubble: "Owl ambient bubbles",
     ambientBubbleDesc: "When idle, the owl occasionally surfaces a gentle line about your dreams and latest conversations.",
     agentNotify: "Agent completion alerts",
@@ -518,6 +522,8 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     closeToTrayDesc: "ウィンドウを閉じてもバックグラウンド収集を続けます。終了はトレイメニューから行えます。",
     showCapsule: "デスクトップのフローティングボールを表示",
     showCapsuleDesc: "小さなフクロウを画面端に常駐させ、同期やメイン画面をすぐ開けます。",
+    capsuleTitle: "フローティングボール",
+    capsuleDesc: "デスクトップのフローティングボールの表示、話しかけ・完了通知、フクロウのスキンを設定します。",
     ambientBubble: "フクロウの環境バブル",
     ambientBubbleDesc: "アイドル時にフクロウが夢の整理や最新の会話についてそっと話しかけます。",
     agentNotify: "エージェント完了通知",
@@ -709,6 +715,8 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     closeToTrayDesc: "창을 닫은 뒤에도 백그라운드 수집을 계속합니다. 트레이 메뉴에서 완전히 종료할 수 있습니다.",
     showCapsule: "데스크톱 플로팅 볼 표시",
     showCapsuleDesc: "작은 부엉이를 화면 가장자리에 두고 동기화하거나 메인 화면을 빠르게 엽니다.",
+    capsuleTitle: "플로팅 볼",
+    capsuleDesc: "바탕 화면 플로팅 볼의 표시, 말걸기·완료 알림과 부엉이 스킨을 설정합니다.",
     ambientBubble: "부엉이 앰비언트 버블",
     ambientBubbleDesc: "한가할 때 부엉이가 꿈 정리와 최근 대화에 대해 가볍게 말을 겁니다.",
     agentNotify: "에이전트 완료 알림",
@@ -954,21 +962,43 @@ function Card({
   aside?: ReactNode;
   children: ReactNode;
 }) {
+  // Sections default to collapsed to keep the page light; the open state is
+  // session-local (not persisted).
+  const [open, setOpen] = useState(false);
   return (
     <section className="rounded-card border border-border-subtle bg-bg-surface-card p-6">
-      <div className="mb-4 flex items-start justify-between gap-4">
-        <div>
-          <span className="text-[11px] font-sans font-medium uppercase tracking-[0.16em] text-text-tertiary">
-            {eyebrow}
+      <div className={`flex items-start justify-between gap-4 ${open ? "mb-4" : ""}`}>
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpen(current => !current)}
+          className="flex min-w-0 flex-1 items-start justify-between gap-3 rounded-lg text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus"
+        >
+          <span className="min-w-0">
+            <span className="block text-[11px] font-sans font-medium uppercase tracking-[0.16em] text-text-tertiary">
+              {eyebrow}
+            </span>
+            <span className="mt-1 block font-serif text-[18px] font-normal text-text-primary">{title}</span>
           </span>
-          <h2 className="mt-1 font-serif text-[18px] font-normal text-text-primary">{title}</h2>
-        </div>
+          <svg
+            aria-hidden="true"
+            viewBox="0 0 16 16"
+            fill="none"
+            className={`mt-1.5 h-3.5 w-3.5 shrink-0 text-text-tertiary transition-transform [transition-duration:160ms] ${open ? "rotate-180" : ""}`}
+          >
+            <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
         {aside}
       </div>
-      {description ? (
-        <p className="mb-4 text-[13px] font-sans leading-relaxed text-text-secondary">{description}</p>
+      {open ? (
+        <>
+          {description ? (
+            <p className="mb-4 text-[13px] font-sans leading-relaxed text-text-secondary">{description}</p>
+          ) : null}
+          {children}
+        </>
       ) : null}
-      {children}
     </section>
   );
 }
@@ -1559,6 +1589,11 @@ export function SettingsPage({
                 setDraft({ ...draft, general: { ...draft.general, closeToTray: checked } })
               }
             />
+          </div>
+        </Card>
+
+        <Card eyebrow="CAPSULE" title={copy.capsuleTitle} description={copy.capsuleDesc}>
+          <div className="-mx-3 flex flex-col">
             <Toggle
               checked={capsuleEnabled}
               title={copy.showCapsule}
@@ -1577,6 +1612,91 @@ export function SettingsPage({
               description={copy.agentNotifyDesc}
               onChange={setAgentNotifyEnabled}
             />
+          </div>
+
+          {/* 皮肤选择并入本卡（原独立卡片收纳至此）。 */}
+          <div className="mt-5 border-t border-border-subtle pt-4">
+            <div className="mb-1 text-[13px] font-sans font-medium text-text-primary">{copy.owlSkinTitle}</div>
+            <p className="mb-3 text-[12px] font-sans leading-relaxed text-text-tertiary">{copy.owlSkinDesc}</p>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+              {SKINS.map((skin) => {
+                const selected = skin.id === owlSkin;
+                return (
+                  <button
+                    type="button"
+                    key={skin.id}
+                    aria-pressed={selected}
+                    onClick={() => setOwlSkin(skin.id)}
+                    className={`flex flex-col items-center gap-2 rounded-xl border p-3 transition-colors [transition-duration:140ms] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus ${
+                      selected
+                        ? "border-accent-primary/40 bg-accent-primary-light ring-2 ring-accent-primary/30"
+                        : "border-border-subtle bg-bg-primary hover:bg-bg-surface-hover"
+                    }`}
+                  >
+                    <img src={skin.collapsed} alt="" draggable={false} className="h-14 w-14" />
+                    <span className="text-[12px] font-sans font-medium text-text-primary">
+                      {skin.name[locale]}
+                    </span>
+                  </button>
+                );
+              })}
+              {/* DIY 自定义槽位：有作品显示缩略图，没有显示引导占位。 */}
+              <button
+                type="button"
+                aria-pressed={owlSkin === CUSTOM_SKIN_ID}
+                onClick={() => setOwlSkin(CUSTOM_SKIN_ID)}
+                className={`flex flex-col items-center gap-2 rounded-xl border p-3 transition-colors [transition-duration:140ms] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus ${
+                  owlSkin === CUSTOM_SKIN_ID
+                    ? "border-accent-primary/40 bg-accent-primary-light ring-2 ring-accent-primary/30"
+                    : "border-dashed border-border-default bg-bg-primary hover:bg-bg-surface-hover"
+                }`}
+              >
+                {customOwlAsset ? (
+                  <img src={customOwlAsset.dataUrl} alt="" draggable={false} className="h-14 w-14" />
+                ) : (
+                  <span className="flex h-14 w-14 items-center justify-center text-2xl" aria-hidden="true">
+                    ✨
+                  </span>
+                )}
+                <span className="text-[12px] font-sans font-medium text-text-primary">
+                  {copy.customOwlSlot}
+                </span>
+              </button>
+            </div>
+
+            {/* DIY 生成区：描述风格 → 网关绘图 → 同时应用到悬浮球与夜话头像。 */}
+            <div className="mt-3 rounded-xl border border-border-subtle bg-bg-primary p-3">
+              <p className="text-[12px] font-sans font-medium text-text-primary">{copy.customOwlDiyTitle}</p>
+              <p className="mt-1 text-[11px] font-sans leading-relaxed text-text-tertiary">
+                {copy.customOwlDiyDesc}
+              </p>
+              <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
+                <input
+                  type="text"
+                  value={customPrompt}
+                  onChange={(event) => setCustomPrompt(event.target.value)}
+                  placeholder={copy.customOwlPlaceholder}
+                  disabled={customBusy}
+                  maxLength={400}
+                  className={`${inputClass} flex-1`}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void handleGenerateCustomOwl();
+                  }}
+                />
+                <button
+                  type="button"
+                  className={buttonPrimary}
+                  disabled={customBusy}
+                  onClick={() => void handleGenerateCustomOwl()}
+                >
+                  {customBusy ? copy.customOwlGenerating : copy.customOwlGenerate}
+                </button>
+              </div>
+              {customError ? (
+                <p className="mt-2 text-[12px] font-sans text-danger">{customError}</p>
+              ) : null}
+              <p className="mt-2 text-[11px] font-sans text-text-tertiary">{copy.customOwlMemberHint}</p>
+            </div>
           </div>
         </Card>
 
@@ -2373,18 +2493,21 @@ export function SettingsPage({
               </div>
             )}
           </div>
-        </Card>
 
-        <Card eyebrow="DAILY LOG" title={copy.dailyTitle} description={copy.dailyDesc}>
-          <Field label={copy.dailyTime}>
-            <input
-              className={inputClass}
-              type="time"
-              value={dailyTime}
-              onChange={(event) => setDailyTime(event.target.value)}
-            />
-          </Field>
-          <p className="mt-2 text-[12px] font-sans text-text-tertiary">{copy.dailyTimeDesc}</p>
+          {/* 每日日志设置并入本卡（原独立小卡收纳至此）。 */}
+          <div className="mt-5 border-t border-border-subtle pt-4">
+            <div className="mb-1 text-[13px] font-sans font-medium text-text-primary">{copy.dailyTitle}</div>
+            <p className="mb-3 text-[12px] font-sans leading-relaxed text-text-tertiary">{copy.dailyDesc}</p>
+            <Field label={copy.dailyTime}>
+              <input
+                className={inputClass}
+                type="time"
+                value={dailyTime}
+                onChange={(event) => setDailyTime(event.target.value)}
+              />
+            </Field>
+            <p className="mt-2 text-[12px] font-sans text-text-tertiary">{copy.dailyTimeDesc}</p>
+          </div>
         </Card>
 
         <Card eyebrow="NETWORK" title={copy.networkTitle} description={copy.networkDesc}>
@@ -2448,88 +2571,6 @@ export function SettingsPage({
               <option value="ko">한국어</option>
             </select>
           </Field>
-        </Card>
-
-        <Card eyebrow="PERSONALIZATION" title={copy.owlSkinTitle} description={copy.owlSkinDesc}>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-            {SKINS.map((skin) => {
-              const selected = skin.id === owlSkin;
-              return (
-                <button
-                  type="button"
-                  key={skin.id}
-                  aria-pressed={selected}
-                  onClick={() => setOwlSkin(skin.id)}
-                  className={`flex flex-col items-center gap-2 rounded-xl border p-3 transition-colors [transition-duration:140ms] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus ${
-                    selected
-                      ? "border-accent-primary/40 bg-accent-primary-light ring-2 ring-accent-primary/30"
-                      : "border-border-subtle bg-bg-primary hover:bg-bg-surface-hover"
-                  }`}
-                >
-                  <img src={skin.collapsed} alt="" draggable={false} className="h-14 w-14" />
-                  <span className="text-[12px] font-sans font-medium text-text-primary">
-                    {skin.name[locale]}
-                  </span>
-                </button>
-              );
-            })}
-            {/* DIY 自定义槽位：有作品显示缩略图，没有显示引导占位。 */}
-            <button
-              type="button"
-              aria-pressed={owlSkin === CUSTOM_SKIN_ID}
-              onClick={() => setOwlSkin(CUSTOM_SKIN_ID)}
-              className={`flex flex-col items-center gap-2 rounded-xl border p-3 transition-colors [transition-duration:140ms] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus ${
-                owlSkin === CUSTOM_SKIN_ID
-                  ? "border-accent-primary/40 bg-accent-primary-light ring-2 ring-accent-primary/30"
-                  : "border-dashed border-border-default bg-bg-primary hover:bg-bg-surface-hover"
-              }`}
-            >
-              {customOwlAsset ? (
-                <img src={customOwlAsset.dataUrl} alt="" draggable={false} className="h-14 w-14" />
-              ) : (
-                <span className="flex h-14 w-14 items-center justify-center text-2xl" aria-hidden="true">
-                  ✨
-                </span>
-              )}
-              <span className="text-[12px] font-sans font-medium text-text-primary">
-                {copy.customOwlSlot}
-              </span>
-            </button>
-          </div>
-
-          {/* DIY 生成区：描述风格 → 网关绘图 → 同时应用到悬浮球与夜话头像。 */}
-          <div className="mt-3 rounded-xl border border-border-subtle bg-bg-primary p-3">
-            <p className="text-[12px] font-sans font-medium text-text-primary">{copy.customOwlDiyTitle}</p>
-            <p className="mt-1 text-[11px] font-sans leading-relaxed text-text-tertiary">
-              {copy.customOwlDiyDesc}
-            </p>
-            <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
-              <input
-                type="text"
-                value={customPrompt}
-                onChange={(event) => setCustomPrompt(event.target.value)}
-                placeholder={copy.customOwlPlaceholder}
-                disabled={customBusy}
-                maxLength={400}
-                className={`${inputClass} flex-1`}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") void handleGenerateCustomOwl();
-                }}
-              />
-              <button
-                type="button"
-                className={buttonPrimary}
-                disabled={customBusy}
-                onClick={() => void handleGenerateCustomOwl()}
-              >
-                {customBusy ? copy.customOwlGenerating : copy.customOwlGenerate}
-              </button>
-            </div>
-            {customError ? (
-              <p className="mt-2 text-[12px] font-sans text-danger">{customError}</p>
-            ) : null}
-            <p className="mt-2 text-[11px] font-sans text-text-tertiary">{copy.customOwlMemberHint}</p>
-          </div>
         </Card>
 
         <Card

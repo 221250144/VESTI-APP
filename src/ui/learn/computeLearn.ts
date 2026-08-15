@@ -23,6 +23,12 @@
 // fingerprint input) plus the members' platform / project labels — the
 // grounding context the synthesis transcript is built from. Still 100%
 // local: the LLM pass itself lives in src/ui/learn/learnSynthesis.
+//
+// V5 (2026-08): topic-family consolidation + heat ordering. Over-specific
+// root topics ("nohup 学习") fold up into a parent theme ("Linux 系统") via
+// a small deterministic keyword-family table, so the map shows a few
+// general themes instead of a pile of micro-topics. Named routes come back
+// ordered by conversation count (heat), which drives the card sizes.
 
 import type { Conversation, SummaryRecord, Topic } from "../db/types";
 import type {
@@ -355,8 +361,69 @@ function miscClusterName(clusters: LearnCluster[], lang: LearnLang): string {
   const shown = clusters.slice(0, 2).map((c) => clipName(c.name, 12));
   const more = clusters.length > 2;
   return lang === "zh"
-    ? `零散探索：${shown.join("、")}${more ? " 等" : ""}`
-    : `Assorted: ${shown.join(", ")}${more ? ", …" : ""}`;
+    ? `随手探索：${shown.join("、")}${more ? " 等" : ""}`
+    : `Side explorations: ${shown.join(", ")}${more ? ", …" : ""}`;
+}
+
+// ---- V5: Topic-family consolidation -----------------------------------------
+
+/** Fine-grained themes fold up into a general parent theme — "nohup 学习"
+ * belongs under "Linux 系统", not on its own card. Deliberately small: only
+ * unambiguous tech word families. ASCII keywords match on token boundaries
+ * (so "digital" doesn't hit "git"); CJK keywords match as substrings. */
+const TOPIC_FAMILIES: ReadonlyArray<{ keywords: readonly string[]; zh: string; en: string }> = [
+  {
+    keywords: ["linux", "nohup", "systemctl", "systemd", "chmod", "chown", "bash", "ssh", "cron", "crontab", "ubuntu", "debian", "centos", "awk", "sed", "grep"],
+    zh: "Linux 系统",
+    en: "Linux",
+  },
+  {
+    keywords: ["react", "usestate", "useeffect", "usememo", "usereducer", "jsx", "nextjs", "next.js"],
+    zh: "React",
+    en: "React",
+  },
+  { keywords: ["vue", "pinia", "nuxt"], zh: "Vue", en: "Vue" },
+  {
+    keywords: ["python", "pandas", "numpy", "django", "flask"],
+    zh: "Python",
+    en: "Python",
+  },
+  {
+    keywords: ["docker", "kubernetes", "k8s", "容器"],
+    zh: "Docker 容器",
+    en: "Containers",
+  },
+  {
+    keywords: ["mysql", "postgresql", "postgres", "sqlite", "redis", "mongodb", "sql", "数据库"],
+    zh: "数据库",
+    en: "Databases",
+  },
+  { keywords: ["git", "github", "gitlab"], zh: "Git 协作", en: "Git" },
+  {
+    keywords: ["typescript", "javascript", "nodejs", "node.js"],
+    zh: "JavaScript/TypeScript",
+    en: "JavaScript/TypeScript",
+  },
+];
+
+const ASCII_KEYWORD = /^[a-z0-9.+#]+$/;
+
+function keywordMatches(name: string, keyword: string): boolean {
+  if (!ASCII_KEYWORD.test(keyword)) return name.includes(keyword);
+  const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`).test(name);
+}
+
+/** The parent theme a raw cluster name consolidates into, or null when no
+ * family matches (the name then passes through untouched). */
+function familyNameOf(rawName: string, lang: LearnLang): string | null {
+  const name = rawName.toLowerCase();
+  for (const family of TOPIC_FAMILIES) {
+    if (family.keywords.some((keyword) => keywordMatches(name, keyword))) {
+      return lang === "zh" ? family.zh : family.en;
+    }
+  }
+  return null;
 }
 
 export function computeLearn(
@@ -410,7 +477,14 @@ export function computeLearn(
     const topicId = typeof conv.topic_id === "number" ? conv.topic_id : null;
     const root = topicId !== null ? rootTopicOf(topicId) : null;
     if (root) {
-      addToCluster(clusterFor(`topic:${root.id}`, "topic", root.id, root.name), conv, summaryByConv.get(conv.id), now);
+      // V5: an over-specific root topic ("nohup 学习") folds into its parent
+      // theme; family clusters share one key so sibling topics genuinely
+      // merge into a single route.
+      const family = familyNameOf(root.name, lang);
+      const entry = family
+        ? clusterFor(`family:${family}`, "topic", root.id, family)
+        : clusterFor(`topic:${root.id}`, "topic", root.id, root.name);
+      addToCluster(entry, conv, summaryByConv.get(conv.id), now);
     } else {
       staged.push({ conv, label: projectLabelOf(conv) });
     }
@@ -426,6 +500,8 @@ export function computeLearn(
   }
   for (const { conv, label } of staged) {
     const standalone = label !== null && (projectCounts.get(label.toLowerCase()) ?? 0) >= MIN_PROJECT_CLUSTER;
+    // V5 family folding applies to root topics only — a project label is a
+    // directory / hostname, kept literal so site clustering stays intact.
     const entry = standalone
       ? clusterFor(`project:${(label as string).toLowerCase()}`, "project", null, label as string)
       : clusterFor(`platform:${conv.platform}`, "platform", null, platformClusterName(conv.platform, lang));
@@ -478,7 +554,12 @@ export function computeLearn(
     };
   };
 
-  const domains: LearnDomain[] = named.map(toLearnDomain);
+  // V5: routes come back heat-ordered — the one with the most conversations
+  // leads (ties keep the importance order; Array.sort is stable).
+  const domains: LearnDomain[] = named
+    .slice()
+    .sort((a, b) => b.cluster.count - a.cluster.count)
+    .map(toLearnDomain);
   if (tail.length > 0) {
     const merged = mergeClusters(tail.map((c) => c.cluster));
     merged.name = miscClusterName(

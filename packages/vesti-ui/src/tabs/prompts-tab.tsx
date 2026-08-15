@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CheckSquare, Copy, Download, ExternalLink, Plus, ScanSearch, Search, Sparkles, Square, Trash2, Upload } from "lucide-react";
+import { ArrowLeft, BarChart3, Briefcase, CheckSquare, Code2, Copy, Download, ExternalLink, Feather, GraduationCap, Languages, LayoutDashboard, Megaphone, Palette, PenLine, Plus, ScanSearch, Search, Shapes, Sparkles, Square, Trash2, Upload, Wrench, Zap, type LucideIcon } from "lucide-react";
 import type {
   DashboardLabels,
   PlazaData,
@@ -49,6 +49,185 @@ const EMPTY_EDITOR: EditorState = {
   sourceConversationId: null,
 };
 
+// ---- 提示词超市 domain grid ---------------------------------------------------
+//
+// The supermarket renders as a domain-level card grid first (name + prompt
+// count + one-line description); clicking a card drills into that domain's
+// prompt list. Copy lives in this component-local dictionary (same pattern as
+// the shell's DOCK_COPY) so the shared translation files stay untouched.
+
+type PlazaLocale = "en" | "zh" | "ja" | "ko";
+
+type PlazaDomainId =
+  | "writing"
+  | "coding"
+  | "data"
+  | "learning"
+  | "productivity"
+  | "translation"
+  | "marketing"
+  | "expert"
+  | "art"
+  | "uiux"
+  | "creative"
+  | "engineering";
+
+/** Catalog category labels (en + zh spellings, lowercased) → domain id. The
+ * host resolves category names in en/zh only, so both spellings are mapped. */
+const DOMAIN_ID_BY_LABEL: Record<string, PlazaDomainId> = {
+  writing: "writing",
+  "写作": "writing",
+  coding: "coding",
+  "编程": "coding",
+  "data & analysis": "data",
+  "数据分析": "data",
+  analysis: "data",
+  "分析": "data",
+  learning: "learning",
+  "学习": "learning",
+  productivity: "productivity",
+  "效率办公": "productivity",
+  "效率": "productivity",
+  "translation & language": "translation",
+  "翻译与语言": "translation",
+  translation: "translation",
+  "翻译": "translation",
+  "marketing & growth": "marketing",
+  "营销增长": "marketing",
+  "expert roles": "expert",
+  "专家角色": "expert",
+  expert: "expert",
+  "专家": "expert",
+  "ai art & icons": "art",
+  "ai 绘画与图标": "art",
+  "ui/ux design": "uiux",
+  "ui/ux 设计": "uiux",
+  "creative writing": "creative",
+  "创作与写作": "creative",
+  engineering: "engineering",
+  "工程效率": "engineering",
+};
+
+function plazaDomainId(category: string): PlazaDomainId | null {
+  return DOMAIN_ID_BY_LABEL[category.trim().toLowerCase()] ?? null;
+}
+
+const DOMAIN_ICONS: Record<PlazaDomainId, LucideIcon> = {
+  writing: PenLine,
+  coding: Code2,
+  data: BarChart3,
+  learning: GraduationCap,
+  productivity: Zap,
+  translation: Languages,
+  marketing: Megaphone,
+  expert: Briefcase,
+  art: Palette,
+  uiux: LayoutDashboard,
+  creative: Feather,
+  engineering: Wrench,
+};
+
+function PlazaDomainIcon({ domainId, className }: { domainId: PlazaDomainId | null; className: string }) {
+  const Icon = domainId ? DOMAIN_ICONS[domainId] : Shapes;
+  return <Icon strokeWidth={1.7} className={className} />;
+}
+
+interface PromptsPlazaCopy {
+  allDomains: string;
+  /** "{count}" placeholder. */
+  promptCount: string;
+  domainFallbackDesc: string;
+  domainDesc: Record<PlazaDomainId, string>;
+}
+
+const PROMPTS_PLAZA_COPY: Record<PlazaLocale, PromptsPlazaCopy> = {
+  en: {
+    allDomains: "All domains",
+    promptCount: "{count} prompts",
+    domainFallbackDesc: "Curated prompts for this domain.",
+    domainDesc: {
+      writing: "Polish, rewrite and draft everyday text.",
+      coding: "Review, debug, refactor and explain code.",
+      data: "Analysis, SQL, spreadsheets and charts.",
+      learning: "Study plans, explanations and quizzes.",
+      productivity: "Planning, email and status updates.",
+      translation: "Translate, localize and proofread.",
+      marketing: "Launch plans, ads, SEO and growth.",
+      expert: "Expert personas for professional tasks.",
+      art: "Emblems, mascots, illustrations and app icons.",
+      uiux: "Design reviews, tokens and UI copy.",
+      creative: "Blogs, READMEs and style mimicry.",
+      engineering: "Reviews, refactors, tests and handoff docs.",
+    },
+  },
+  zh: {
+    allDomains: "全部领域",
+    promptCount: "{count} 条",
+    domainFallbackDesc: "该领域的精选提示词。",
+    domainDesc: {
+      writing: "润色、改写与日常文稿起草。",
+      coding: "代码评审、调试、重构与讲解。",
+      data: "数据分析、SQL、表格与图表。",
+      learning: "学习计划、概念讲解与主动测验。",
+      productivity: "计划安排、邮件与进度汇报。",
+      translation: "翻译、本地化与语言校对。",
+      marketing: "发布计划、广告、SEO 与增长。",
+      expert: "面向专业任务的专家角色。",
+      art: "徽章、吉祥物、插画与应用图标。",
+      uiux: "设计评审、设计令牌与界面文案。",
+      creative: "博客、README 与风格模仿。",
+      engineering: "评审、重构、测试与交接文档。",
+    },
+  },
+  ja: {
+    allDomains: "すべての領域",
+    promptCount: "{count} 件",
+    domainFallbackDesc: "この領域の厳選プロンプト。",
+    domainDesc: {
+      writing: "文章の推敲・リライト・下書き作成。",
+      coding: "コードレビュー・デバッグ・リファクタリング・解説。",
+      data: "データ分析・SQL・スプレッドシート・グラフ。",
+      learning: "学習計画・解説・クイズ。",
+      productivity: "計画・メール・進捗報告。",
+      translation: "翻訳・ローカライズ・校正。",
+      marketing: "ローンチ計画・広告・SEO・グロース。",
+      expert: "専門タスク向けのエキスパートペルソナ。",
+      art: "エンブレム・マスコット・イラスト・アプリアイコン。",
+      uiux: "デザインレビュー・デザイントークン・UI コピー。",
+      creative: "ブログ・README・スタイル模倣。",
+      engineering: "レビュー・リファクタリング・テスト・引き継ぎドキュメント。",
+    },
+  },
+  ko: {
+    allDomains: "전체 분야",
+    promptCount: "{count}개",
+    domainFallbackDesc: "이 분야의 엄선된 프롬프트.",
+    domainDesc: {
+      writing: "글 다듬기·재작성·초안 작성.",
+      coding: "코드 리뷰·디버깅·리팩터링·설명.",
+      data: "데이터 분석·SQL·스프레드시트·차트.",
+      learning: "학습 계획·설명·퀴즈.",
+      productivity: "계획·이메일·진행 상황 공유.",
+      translation: "번역·로컬라이제이션·교정.",
+      marketing: "출시 계획·광고·SEO·그로스.",
+      expert: "전문 작업용 전문가 페르소나.",
+      art: "엠블럼·마스코트·일러스트·앱 아이콘.",
+      uiux: "디자인 리뷰·디자인 토큰·UI 카피.",
+      creative: "블로그·README·스타일 모방.",
+      engineering: "리뷰·리팩터링·테스트·인수인계 문서.",
+    },
+  },
+};
+
+/** The prompts label group is translated in all four locales, so the title
+ * text is a reliable locale probe (kana before kanji for Japanese). */
+function detectPromptsLocale(title: string): PlazaLocale {
+  if (/[가-힯]/.test(title)) return "ko";
+  if (/[ぁ-ゟァ-ヿ]/.test(title)) return "ja";
+  if (/[一-鿿]/.test(title)) return "zh";
+  return "en";
+}
+
 // Lightweight prompt repository: each entry is a concise trigger (唤醒词) + the
 // original prompt body. Find / new / edit / delete only — auto-built from the
 // user's high-frequency prompts. No categories / tags / quality / LLM enrichment.
@@ -93,6 +272,9 @@ export function PromptsTab({
 
   // Multi-select for the adopted plaza shelf (我的广场) → bulk remove (un-adopt).
   const [selectedPlazaIds, setSelectedPlazaIds] = useState<Set<string>>(new Set());
+  // Supermarket drill-in: null = the domain card grid; a category label = that
+  // domain's prompt list.
+  const [plazaCategory, setPlazaCategory] = useState<string | null>(null);
   const togglePlazaSelect = useCallback((id: string) => {
     setSelectedPlazaIds((prev) => {
       const next = new Set(prev);
@@ -215,6 +397,19 @@ export function PromptsTab({
     extractStatus !== "running" &&
     search.trim() === "" &&
     (plazaDaily.length > 0 || supermarket.length > 0);
+
+  const plazaCopy =
+    PROMPTS_PLAZA_COPY[detectPromptsLocale(labels.title)] ?? PROMPTS_PLAZA_COPY.en;
+  // A stale selection (e.g. after a locale switch re-groups the catalog) falls
+  // back to the domain grid.
+  const activePlazaGroup = useMemo(
+    () => supermarket.find((group) => group.category === plazaCategory) ?? null,
+    [supermarket, plazaCategory],
+  );
+  const plazaDomainDesc = (category: string): string => {
+    const domainId = plazaDomainId(category);
+    return domainId ? plazaCopy.domainDesc[domainId] : plazaCopy.domainFallbackDesc;
+  };
 
   const openEdit = useCallback((prompt: Prompt) => {
     setEditor({
@@ -506,7 +701,7 @@ export function PromptsTab({
             onClick={handleExtract}
             disabled={extractStatus === "running"}
             title={labels.extractTooltip}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border-subtle px-3 py-1.5 text-[13px] text-text-primary transition-colors hover:bg-bg-surface-card disabled:opacity-60"
+            className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[12.5px] text-text-tertiary transition-colors hover:bg-bg-surface-card hover:text-text-secondary disabled:opacity-60"
           >
             <Sparkles strokeWidth={1.7} className="h-4 w-4" />
             {extractStatus === "running" ? labels.extracting : labels.extractFromChats}
@@ -517,7 +712,7 @@ export function PromptsTab({
               onClick={() => void handleScan()}
               disabled={scanStatus === "running"}
               title={labels.scanTooltip}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-border-subtle px-3 py-1.5 text-[13px] text-text-primary transition-colors hover:bg-bg-surface-card disabled:opacity-60"
+              className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[12.5px] text-text-tertiary transition-colors hover:bg-bg-surface-card hover:text-text-secondary disabled:opacity-60"
             >
               <ScanSearch strokeWidth={1.7} className="h-4 w-4" />
               {scanStatus === "running"
@@ -533,7 +728,7 @@ export function PromptsTab({
             type="button"
             onClick={() => void handleExport()}
             title={labels.exportLabel}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border-subtle px-3 py-1.5 text-[13px] text-text-primary transition-colors hover:bg-bg-surface-card"
+            className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[12.5px] text-text-tertiary transition-colors hover:bg-bg-surface-card hover:text-text-secondary"
           >
             <Download strokeWidth={1.7} className="h-4 w-4" />
             {labels.exportLabel}
@@ -542,7 +737,7 @@ export function PromptsTab({
             type="button"
             onClick={() => importInputRef.current?.click()}
             title={labels.importBackup}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border-subtle px-3 py-1.5 text-[13px] text-text-primary transition-colors hover:bg-bg-surface-card"
+            className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[12.5px] text-text-tertiary transition-colors hover:bg-bg-surface-card hover:text-text-secondary"
           >
             <Upload strokeWidth={1.7} className="h-4 w-4" />
             {labels.importLabel}
@@ -939,20 +1134,43 @@ export function PromptsTab({
               )}
             </div>
 
-            {/* 提示词超市: full catalog grouped by big-category */}
+            {/* 提示词超市: domain-level card grid first; clicking a card drills
+                into that domain's prompt list (existing PlazaCard actions). */}
             {supermarket.length > 0 && (
               <div className="mt-6 border-t border-border-subtle pt-5">
-                <h4 className="text-[13px] font-medium text-text-primary">
-                  {labels.supermarketTitle}
-                </h4>
-                <p className="mt-1 text-[12px] text-text-tertiary">{labels.supermarketSubtitle}</p>
-                {supermarket.map((group) => (
-                  <div key={group.category} className="mt-4">
-                    <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-text-tertiary">
-                      {group.category}
+                {activePlazaGroup ? (
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => setPlazaCategory(null)}
+                      className="inline-flex items-center gap-1 rounded-lg px-2 py-1 text-[12px] text-text-tertiary transition-colors hover:bg-bg-surface-card hover:text-text-secondary"
+                    >
+                      <ArrowLeft strokeWidth={1.7} className="h-3.5 w-3.5" />
+                      {plazaCopy.allDomains}
+                    </button>
+                    <div className="mb-3 mt-3 flex items-center gap-2.5">
+                      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent-primary-light text-accent-primary">
+                        <PlazaDomainIcon
+                          domainId={plazaDomainId(activePlazaGroup.category)}
+                          className="h-4 w-4"
+                        />
+                      </span>
+                      <div className="min-w-0">
+                        <h4 className="text-[13px] font-medium text-text-primary">
+                          {activePlazaGroup.category}
+                        </h4>
+                        <p className="mt-0.5 text-[11.5px] text-text-tertiary">
+                          {plazaDomainDesc(activePlazaGroup.category)}
+                          {" · "}
+                          {plazaCopy.promptCount.replace(
+                            "{count}",
+                            String(activePlazaGroup.prompts.length),
+                          )}
+                        </p>
+                      </div>
                     </div>
                     <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                      {group.prompts.map((p) => (
+                      {activePlazaGroup.prompts.map((p) => (
                         <PlazaCard
                           key={p.id}
                           prompt={p}
@@ -968,7 +1186,47 @@ export function PromptsTab({
                       ))}
                     </div>
                   </div>
-                ))}
+                ) : (
+                  <>
+                    <h4 className="text-[13px] font-medium text-text-primary">
+                      {labels.supermarketTitle}
+                    </h4>
+                    <p className="mt-1 text-[12px] text-text-tertiary">{labels.supermarketSubtitle}</p>
+                    <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+                      {supermarket.map((group) => (
+                        <button
+                          key={group.category}
+                          type="button"
+                          onClick={() => setPlazaCategory(group.category)}
+                          className="group flex items-start gap-3 rounded-xl border border-border-subtle bg-bg-surface-card p-4 text-left transition-all hover:-translate-y-0.5 hover:border-accent-primary/40 hover:shadow-[0_6px_20px_rgba(0,0,0,0.06)]"
+                        >
+                          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-bg-tertiary text-text-secondary transition-colors group-hover:bg-accent-primary-light group-hover:text-accent-primary">
+                            <PlazaDomainIcon
+                              domainId={plazaDomainId(group.category)}
+                              className="h-4 w-4"
+                            />
+                          </span>
+                          <span className="min-w-0 flex-1">
+                            <span className="flex items-baseline justify-between gap-2">
+                              <span className="truncate text-[13px] font-medium text-text-primary">
+                                {group.category}
+                              </span>
+                              <span className="shrink-0 text-[11px] text-text-tertiary">
+                                {plazaCopy.promptCount.replace(
+                                  "{count}",
+                                  String(group.prompts.length),
+                                )}
+                              </span>
+                            </span>
+                            <span className="mt-1 block line-clamp-2 text-[12px] leading-relaxed text-text-tertiary">
+                              {plazaDomainDesc(group.category)}
+                            </span>
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
               </div>
             )}
           </section>

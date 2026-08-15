@@ -5,11 +5,12 @@
 // StorageApi.listMemoryEntries. Both open entries in a shared Markdown reader
 // modal (marked + DOMPurify — the same rendering path as the deposit reader).
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
-import { BookOpen, CloudMoon, RefreshCw, X } from "lucide-react";
+import { BookOpen, ChevronRight, CloudMoon, RefreshCw, Sparkles, X } from "lucide-react";
 import type { MemoryEntryView, StorageApi } from "../../types";
+import type { MemorySpaceCopy } from "./memorySpaceCopy";
 
 export type MemoryLabelFn = (key: string, fallback: string) => string;
 
@@ -67,7 +68,7 @@ function tagLabel(l: MemoryLabelFn, tag: string): string {
 
 // ---- entry helpers -------------------------------------------------------------------
 
-function entryDateLabel(entry: MemoryEntryView): string {
+export function entryDateLabel(entry: MemoryEntryView): string {
   return entry.entryDate ?? new Date(entry.updatedAt).toLocaleDateString();
 }
 
@@ -325,7 +326,7 @@ export function MemoryReaderModal({
 
 // ---- shared list plumbing -----------------------------------------------------------------
 
-function useMemoryEntries(
+export function useMemoryEntries(
   storage: StorageApi,
   kind: MemoryEntryView["kind"],
   refreshKey: number,
@@ -680,5 +681,149 @@ export function DreamLogSection({ storage, l, refreshKey }: SectionProps) {
         />
       ) : null}
     </div>
+  );
+}
+
+// ---- 总览卡片 (memory-space overview) --------------------------------------------------------
+//
+// The tab's default view is a single page of summary cards — one per memory
+// kind — instead of the old always-expanded sections. Each card shows a count
+// plus a 1-2 line preview of the newest entries; clicking drills into the
+// full section.
+
+/** Presentational summary card: icon + title + count badge, one-line
+ * description, then 1-2 preview lines (or the empty hint). */
+export function MemoryOverviewCard({
+  icon,
+  title,
+  count,
+  description,
+  previews,
+  emptyText,
+  statusLine,
+  entryCountLabel,
+  onOpen,
+}: {
+  icon: ReactNode;
+  title: string;
+  /** null while the underlying list is still loading. */
+  count: number | null;
+  description: string;
+  previews: string[];
+  emptyText: string;
+  /** Optional status row above the previews (e.g. the daily card's today state). */
+  statusLine?: ReactNode;
+  entryCountLabel: (count: number) => string;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="group flex flex-col rounded-xl border border-border-subtle bg-bg-surface-card p-4 text-left transition-colors hover:border-accent-primary/40 hover:bg-bg-surface-card-hover"
+    >
+      <span className="flex items-center gap-2">
+        <span className="shrink-0 text-text-secondary transition-colors group-hover:text-accent-primary">
+          {icon}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-vesti-base font-sans font-medium text-text-primary">
+          {title}
+        </span>
+        {count !== null ? (
+          <span className="shrink-0 rounded-full bg-bg-tertiary px-2 py-0.5 text-vesti-sm font-sans text-text-tertiary">
+            {entryCountLabel(count)}
+          </span>
+        ) : (
+          <RefreshCw strokeWidth={1.75} className="h-3.5 w-3.5 shrink-0 animate-spin text-text-tertiary" />
+        )}
+        <ChevronRight
+          strokeWidth={1.75}
+          className="h-4 w-4 shrink-0 text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100"
+        />
+      </span>
+      <span className="mt-1 block text-vesti-sm font-sans text-text-tertiary">{description}</span>
+      {statusLine ? <span className="mt-2 block">{statusLine}</span> : null}
+      <span className="mt-2.5 block space-y-1 border-t border-border-subtle pt-2.5">
+        {previews.length > 0 ? (
+          previews.map((line, index) => (
+            <span key={index} className="block truncate text-vesti-sm font-sans text-text-secondary">
+              {line}
+            </span>
+          ))
+        ) : (
+          <span className="block truncate text-vesti-sm font-sans text-text-tertiary">
+            {emptyText}
+          </span>
+        )}
+      </span>
+    </button>
+  );
+}
+
+function entryPreviewLine(entry: MemoryEntryView, l: MemoryLabelFn): string {
+  return `${entry.title || l("untitled", "Untitled")} · ${entryDateLabel(entry)}`;
+}
+
+/** 记忆 (dream memories) summary card. */
+export function DreamMemoryCard({
+  storage,
+  l,
+  refreshKey,
+  copy,
+  onOpen,
+}: SectionProps & { copy: MemorySpaceCopy; onOpen: () => void }) {
+  const { entries } = useMemoryEntries(storage, "dream", refreshKey);
+  const latest = useMemo(
+    () => [...(entries ?? [])].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 2),
+    [entries],
+  );
+  return (
+    <MemoryOverviewCard
+      icon={<Sparkles strokeWidth={1.75} className="h-4 w-4" />}
+      title={copy.memories.title}
+      count={entries === null ? null : entries.length}
+      description={copy.memories.desc}
+      previews={latest.map((entry) => entryPreviewLine(entry, l))}
+      emptyText={copy.memories.empty}
+      entryCountLabel={(count) =>
+        copy.entryCount.replace("{count}", String(count))
+      }
+      onOpen={onOpen}
+    />
+  );
+}
+
+/** 梦境 (dream run logs + owl diary) summary card. */
+export function DreamLogCard({
+  storage,
+  l,
+  refreshKey,
+  copy,
+  onOpen,
+}: SectionProps & { copy: MemorySpaceCopy; onOpen: () => void }) {
+  const { entries } = useMemoryEntries(storage, "dream-log", refreshKey);
+  const latest = useMemo(
+    () =>
+      [...(entries ?? [])]
+        .sort(
+          (a, b) =>
+            (b.entryDate ?? "").localeCompare(a.entryDate ?? "") || b.updatedAt - a.updatedAt,
+        )
+        .slice(0, 2),
+    [entries],
+  );
+  return (
+    <MemoryOverviewCard
+      icon={<CloudMoon strokeWidth={1.75} className="h-4 w-4" />}
+      title={copy.dreams.title}
+      count={entries === null ? null : entries.length}
+      description={copy.dreams.desc}
+      previews={latest.map((entry) => entryPreviewLine(entry, l))}
+      emptyText={copy.dreams.empty}
+      entryCountLabel={(count) =>
+        copy.entryCount.replace("{count}", String(count))
+      }
+      onOpen={onOpen}
+    />
   );
 }

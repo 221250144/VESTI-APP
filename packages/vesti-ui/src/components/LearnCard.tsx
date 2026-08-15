@@ -29,16 +29,71 @@ import {
 //
 // 路线级 LLM 合成 (V4): when the host implements storage.runLearnSynthesis
 // and an LLM is configured, each route gets one synthesized reading — a
-// full-sentence title + interpretation + next steps, fingerprint-cached by
+// parent-theme title + interpretation + next steps, fingerprint-cached by
 // the host. Synthesized routes render the LLM title with the deterministic
 // label as caption, plus the summary and next-step bullets; anything missing
 // (no LLM / run failed / unusable output) falls back to the deterministic
 // display with zero regression. A "重新生成" control clears the cache and
 // re-runs every route.
+//
+// 减负重构 (V5): domain cards are heat-sized (count-ordered, the hottest
+// route spans the full grid width) and default-collapsed — the folded card
+// shows only the theme, a heat indicator and a one-liner; representatives,
+// next steps and the deepen/roundtable actions unfold on click. New copy
+// lives in the component-local LEARN_CARD_COPY dictionary (the host Dock's
+// DOCK_COPY pattern) so the shared translation files stay untouched.
 
 /** Below this many analyzed summaries the map is technically available but
  * thin — say so and point at generating more (same guidance as AITI). */
 const WEAK_SAMPLE_THRESHOLD = 5;
+
+// Localized card copy (V5), kept next to the component in the host Dock's
+// DOCK_COPY pattern so the shared translation files stay untouched. `lang`
+// only distinguishes zh/en today; the ja/ko entries ride along for when the
+// host starts passing them through.
+const LEARN_CARD_COPY: Record<
+  "zh" | "en" | "ja" | "ko",
+  {
+    /** Dignified stand-in for a nameless route (never "未分类"). */
+    uncategorized: string;
+    /** Note on the compact-section toggle when it holds the fallback route. */
+    includesMisc: string;
+    /** aria-labels of the per-card fold toggle. */
+    expandDetails: string;
+    collapseDetails: string;
+    /** Title of the heat dots (driven by the route's conversation count). */
+    heat: string;
+  }
+> = {
+  zh: {
+    uncategorized: "随手探索",
+    includesMisc: "· 含随手探索",
+    expandDetails: "展开详情",
+    collapseDetails: "收起详情",
+    heat: "热度",
+  },
+  en: {
+    uncategorized: "Side explorations",
+    includesMisc: "· incl. side explorations",
+    expandDetails: "Show details",
+    collapseDetails: "Hide details",
+    heat: "Heat",
+  },
+  ja: {
+    uncategorized: "自由な探索",
+    includesMisc: "· 自由な探索を含む",
+    expandDetails: "詳細を表示",
+    collapseDetails: "詳細を隠す",
+    heat: "注目度",
+  },
+  ko: {
+    uncategorized: "자유 탐색",
+    includesMisc: "· 자유 탐색 포함",
+    expandDetails: "자세히 보기",
+    collapseDetails: "자세히 접기",
+    heat: "관심도",
+  },
+};
 
 interface LearnCardProps {
   profile?: LearnProfile;
@@ -93,6 +148,8 @@ export function LearnCard({
   const [llmConfigured, setLlmConfigured] = useState<boolean | undefined>(undefined);
   const [deepenByDomain, setDeepenByDomain] = useState<Record<string, DeepenState>>({});
   const [showCompactDomains, setShowCompactDomains] = useState(false);
+  // V5: domain cards fold by default; this map holds the manually opened ones.
+  const [openDomains, setOpenDomains] = useState<Record<string, boolean>>({});
   // V4 route synthesis: fingerprint → reading. Routes without an entry keep
   // the deterministic display; progress is null while idle.
   const [synthesisByRoute, setSynthesisByRoute] = useState<Record<string, LearnRouteSynthesis>>({});
@@ -121,6 +178,7 @@ export function LearnCard({
 
   const deepenSupported = Boolean(storage?.runLearnDeepen);
   const synthesisSupported = Boolean(storage?.runLearnSynthesis);
+  const copy = LEARN_CARD_COPY[lang] ?? LEARN_CARD_COPY.en;
 
   // V4: run the route synthesis (sequential + fingerprint-cached host-side).
   // The run key freezes the (lang, fingerprint set) pair a run covered, so
@@ -242,12 +300,19 @@ export function LearnCard({
           <ExploreGateNote text={labels.llmMissing} className="mt-2" />
         ) : null}
 
-        {/* Domains — V2: expanded (key) domains render full cards;
-             compact/dormant/uncategorized render in a single-row variant
-             inside a collapsible section below. */}
+        {/* Domains — V5: expanded (key) domains render as heat-ordered,
+             default-collapsed cards (the hottest spans the full grid width);
+             compact/dormant ones stay single-row chips in the collapsible
+             section below. */}
         {profile.domains.length > 0 && (() => {
-          const expandedDomains = profile.domains.filter((d) => !d.compact);
+          // Heat order: conversation count desc — ties keep computeLearn's
+          // importance order (Array.sort is stable).
+          const expandedDomains = profile.domains
+            .filter((d) => !d.compact)
+            .sort((a, b) => b.count - a.count);
           const compactDomains = profile.domains.filter((d) => d.compact);
+          /** Hottest route's count — the heat dots measure against this. */
+          const maxDomainCount = expandedDomains.reduce((max, d) => Math.max(max, d.count), 1);
           return (
           <div className="mt-5">
             <div className="mb-2 flex items-center justify-between gap-2">
@@ -274,45 +339,103 @@ export function LearnCard({
                 )
               ) : null}
             </div>
-            {/* Expanded (key) domains */}
+            {/* Expanded (key) domains — hottest first, hottest full-width. */}
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              {expandedDomains.map((d) => {
+              {expandedDomains.map((d, index) => {
                 const total = Math.max(1, d.deep + d.moderate + d.superficial);
                 const deepPct = Math.round((d.deep / total) * 100);
                 const modPct = Math.round((d.moderate / total) * 100);
-                const domainName = d.name || labels.uncategorized;
+                const domainName = d.name || copy.uncategorized;
                 // Synthetic clusters (project / platform / assorted) all share
                 // topicId null — the name disambiguates their keys.
                 const domainKey = d.topicId !== null ? String(d.topicId) : `synthetic:${d.name}`;
                 const deepenState = deepenByDomain[domainKey];
                 // V4: the synthesized reading for this route, if any — its
-                // full-sentence title leads, the deterministic label stays as
+                // parent-theme title leads, the deterministic label stays as
                 // a caption; absent → the deterministic display as before.
                 const synthesis = synthesisByRoute[learnRouteFingerprint(d)];
                 // The uncategorized bucket gets no AI 深化 (see header note).
                 const showDeepenAi =
                   deepenSupported && llmConfigured !== false && d.topicId !== null;
+                // V5: folded by default — theme + heat + one-liner only; the
+                // one-liner is the synthesized reading, else the open question.
+                const open = openDomains[domainKey] === true;
+                const oneLiner = synthesis?.summary ?? d.openQuestion?.text ?? null;
+                // Heat: this route's count measured against the hottest one,
+                // as 1-3 dots.
+                const heatLevel =
+                  d.count >= Math.max(1, Math.ceil(maxDomainCount * 0.66))
+                    ? 3
+                    : d.count >= Math.max(1, Math.ceil(maxDomainCount * 0.33))
+                      ? 2
+                      : 1;
                 return (
                   <div
                     key={domainKey}
-                    className="rounded-xl border border-border-subtle bg-bg-surface-card p-3"
+                    className={`rounded-xl border border-border-subtle bg-bg-surface-card p-3${
+                      index === 0 ? " sm:col-span-2" : ""
+                    }`}
                   >
-                    <div className="flex items-baseline justify-between gap-2">
-                      <span
-                        className="truncate text-[13px] font-medium text-text-primary"
-                        title={synthesis ? synthesis.title : undefined}
-                      >
-                        {synthesis?.title ?? domainName}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setOpenDomains((prev) => ({ ...prev, [domainKey]: !open }))
+                      }
+                      aria-expanded={open}
+                      aria-label={`${open ? copy.collapseDetails : copy.expandDetails}: ${domainName}`}
+                      className="flex w-full items-start gap-2 text-left"
+                    >
+                      {open ? (
+                        <ChevronDown
+                          className="mt-0.5 h-3.5 w-3.5 shrink-0 text-text-tertiary"
+                          strokeWidth={1.75}
+                        />
+                      ) : (
+                        <ChevronRight
+                          className="mt-0.5 h-3.5 w-3.5 shrink-0 text-text-tertiary"
+                          strokeWidth={1.75}
+                        />
+                      )}
+                      <span className="min-w-0 flex-1">
+                        <span
+                          className="block truncate text-[13px] font-medium text-text-primary"
+                          title={synthesis ? synthesis.title : undefined}
+                        >
+                          {synthesis?.title ?? domainName}
+                        </span>
+                        {synthesis ? (
+                          <span className="mt-0.5 block truncate text-[11px] text-text-tertiary">
+                            {domainName}
+                          </span>
+                        ) : null}
+                        {oneLiner ? (
+                          <span className="mt-0.5 line-clamp-1 block text-[11.5px] leading-relaxed text-text-secondary">
+                            {oneLiner}
+                          </span>
+                        ) : null}
                       </span>
-                      <span className="shrink-0 text-[11px] text-text-tertiary">
-                        {labels.domainConversations.replace("{n}", String(d.count))}
+                      <span className="flex shrink-0 items-center gap-1.5">
+                        <span
+                          className="inline-flex items-center gap-0.5"
+                          title={`${copy.heat}: ${d.count}`}
+                        >
+                          {[1, 2, 3].map((level) => (
+                            <span
+                              key={level}
+                              className={`h-1 w-1 rounded-full ${
+                                level <= heatLevel ? "bg-accent-primary" : "bg-bg-tertiary"
+                              }`}
+                            />
+                          ))}
+                        </span>
+                        <span className="text-[11px] text-text-tertiary">
+                          {labels.domainConversations.replace("{n}", String(d.count))}
+                        </span>
                       </span>
-                    </div>
-                    {synthesis ? (
-                      <div className="mt-0.5 truncate text-[11px] text-text-tertiary">
-                        {domainName}
-                      </div>
-                    ) : null}
+                    </button>
+
+                    {/* Details — unfolded on demand (V5). */}
+                    {open ? (<>
                     {d.deep + d.moderate + d.superficial > 0 && (
                       <div className="mt-2 flex h-1.5 overflow-hidden rounded-full bg-bg-tertiary">
                         <div className="bg-accent-primary" style={{ width: `${deepPct}%` }} />
@@ -464,6 +587,8 @@ export function LearnCard({
                         <p className="mt-2 text-[11px] text-text-tertiary">{labels.savedHint}</p>
                       </div>
                     ) : null}
+                    </>
+                    ) : null}
                   </div>
                 );
               })}
@@ -486,14 +611,14 @@ export function LearnCard({
                     `+ ${compactDomains.length} more`}
                   {compactDomains.some((d) => d.topicId === null) && (
                     <span className="text-text-tertiary/60">
-                      {labels.uncategorizedIncluded ?? "· includes uncategorized"}
+                      {copy.includesMisc}
                     </span>
                   )}
                 </button>
                 {showCompactDomains && (
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     {compactDomains.map((d) => {
-                      const domainName = d.name || labels.uncategorized;
+                      const domainName = d.name || copy.uncategorized;
                       return (
                         <div
                           key={d.topicId !== null ? `compact-${d.topicId}` : `compact-synthetic:${d.name}`}

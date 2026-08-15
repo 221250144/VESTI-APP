@@ -12,6 +12,7 @@ import type { SupportedLocale } from "./ui/i18n/locales";
 import { Dock, type ShellPage } from "./ui/shell/Dock";
 import { HomeDashboard } from "./ui/shell/HomeDashboard";
 import { SettingsPage } from "./ui/shell/SettingsPage";
+import { SplashIntro } from "./ui/shell/SplashIntro";
 import { TitleBar } from "./ui/shell/TitleBar";
 import { useUiTheme } from "./ui/shell/useUiTheme";
 import { useOnboarding } from "./ui/shell/useOnboarding";
@@ -33,8 +34,9 @@ import { startDreamScheduler } from "./ui/memory/dreamScheduler";
 import { startAgentActivityNotifier, startAmbientBubbleScheduler } from "./ui/companion/ambientBubble";
 import { migrateDepositsToMemory } from "./ui/deposits/migrateDeposits";
 import { startPromptSnapshotSync } from "./ui/sync/promptSnapshot";
-import { getAllSummaries, getTopics, listConversations } from "./ui/db/repository";
+import { getAllSummaries, getTopics, listConversations, listMessages } from "./ui/db/repository";
 import { computeAiti } from "./ui/aiti/computeAiti";
+import { computeLocalSignals, type AitiLocalConversationInput } from "./ui/aiti/localSignals";
 import { localizeImagery, resolveImagery } from "./ui/aiti/imagery";
 import { emblemUrl } from "./ui/aiti/emblems";
 import { getPersonaNote } from "./ui/aiti/personaNote";
@@ -80,6 +82,8 @@ function Shell({
 }) {
   const { t, locale } = useI18n();
   const [page, setPage] = useState<ShellPage>("home");
+  // Once-per-launch intro splash; the shell mounts underneath while it plays.
+  const [splashDone, setSplashDone] = useState(false);
   // Home → library source deep link: one-shot platform filter request, handed
   // to VestiDashboard/LibraryTab and cleared once applied.
   const [libraryPlatformFilter, setLibraryPlatformFilter] = useState<string | null>(null);
@@ -179,13 +183,39 @@ function Shell({
         window.vesti?.getSettings().catch(() => null) ?? Promise.resolve(null),
         window.vestiUi?.getUiPreference("language").catch(() => null) ?? Promise.resolve(null),
       ])
-        .then(([summaries, topics, conversations, settings, uiLanguage]) => {
+        .then(async ([summaries, topics, conversations, settings, uiLanguage]) => {
           if (cancelled) return;
           const learnLang = resolveClassifyLanguage(
             settings?.agent?.outputLanguage,
             (uiLanguage as { locale?: string } | null)?.locale,
           );
-          setAiti(computeAiti(summaries));
+          // 初步画像的本地信号: when structured summaries are scarce, stats
+          // from raw user messages (recent 100 conversations) still produce a
+          // preliminary portrait. Full-signal conversations are unaffected.
+          const recent = conversations.slice(0, 100);
+          const localInputs = await Promise.all(
+            recent.map((conv) =>
+              listMessages(conv.id)
+                .then(
+                  (msgs): AitiLocalConversationInput => ({
+                    conversationId: conv.id,
+                    updatedAt: conv.updated_at,
+                    messages: msgs.map((m) => ({
+                      role: m.role,
+                      content: m.content_text,
+                      createdAt: m.created_at,
+                    })),
+                  }),
+                )
+                .catch((): AitiLocalConversationInput => ({
+                  conversationId: conv.id,
+                  updatedAt: conv.updated_at,
+                  messages: [],
+                })),
+            ),
+          );
+          if (cancelled) return;
+          setAiti(computeAiti(summaries, computeLocalSignals(localInputs)));
           setLearn(computeLearn(summaries, topics, conversations, undefined, undefined, learnLang));
         })
         .catch(() => {
@@ -257,6 +287,7 @@ function Shell({
   const onboarding = useOnboarding(locale as SupportedLocale, syncReady);
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-bg-app text-text-primary">
+      {!splashDone && <SplashIntro onDone={() => setSplashDone(true)} />}
       {onboarding.show && (
         <OnboardingWizard
           locale={locale as SupportedLocale}

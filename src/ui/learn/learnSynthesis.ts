@@ -1,8 +1,8 @@
 // 路线级 LLM 合成 (Learn route synthesis) — one LLM pass per learning route,
 // turning the deterministic computeLearn V3 label ("Kimi · 综合探索") into a
-// real summary: a full-sentence outcome-oriented title, a short
-// interpretation and concrete next steps. Mirrors learnDeepen: everything
-// here is pure/deterministic and covered by vitest; the agent call itself
+// real summary: a concise parent-theme title, a short interpretation and
+// concrete next steps. Mirrors learnDeepen: everything here is
+// pure/deterministic and covered by vitest; the agent call itself
 // stays in the storage layer (desktopStorage.runLearnSynthesis), injected as
 // a `runner`, and persistence is injected as a `store` (ui-prefs in
 // production, in-memory in tests).
@@ -90,8 +90,8 @@ export function buildLearnSynthesisTranscript({
       ...(openQuestion ? ["", `该路线还没收尾的问题：${openQuestion}`] : []),
       "",
       "请为这条学习路线生成一段「路线解读」，输出一个 JSON 对象（不要 Markdown 代码围栏、不要任何额外文字），字段如下：",
-      '{"title": "完整句子的路线标题（动词/成果导向，概括这条路线在做什么或做成了什么，例如「用 RAG 重构了桌面端记忆召回」，不要关键词堆砌，不超过 30 字）", "summary": "2-4 句综合解读：这个领域你在做什么、进展到哪一步、知识结构是怎样的", "next_steps": ["具体的下一步建议，1-3 条"]}',
-      "要求：只依据上面给出的信息做概括，不编造资料中没有的具体事实；title 必须是一个完整的句子而不是话题名；没有合适内容时 next_steps 给空数组；只输出 JSON 本身。",
+      '{"title": "这条路线的概括性父主题名（用一个大类主题命名，例如「Linux 系统」「React」「数据库」，不要过细的具体话题名，不超过 6 个字）", "summary": "2-4 句综合解读：这个领域你在做什么、进展到哪一步、知识结构是怎样的", "next_steps": ["具体的下一步建议，1-3 条"]}',
+      "要求：只依据上面给出的信息做概括，不编造资料中没有的具体事实；title 用概括性的父主题命名（不超过 6 个字），不要关键词堆砌、不要具体工具名的罗列；没有合适内容时 next_steps 给空数组；只输出 JSON 本身。",
     ].join("\n");
   }
   return [
@@ -104,8 +104,8 @@ export function buildLearnSynthesisTranscript({
     ...(openQuestion ? ["", `The route's still-open question: ${openQuestion}`] : []),
     "",
     "Write a reading of this learning route and output one JSON object (no Markdown fences, no extra text) with these fields:",
-    '{"title": "a full-sentence, outcome-oriented route title (what the learner is doing or has achieved, e.g. "Rebuilt desktop memory recall with RAG" — not a keyword pile, <= 60 chars)", "summary": "a 2-4 sentence interpretation: what is being pursued here, how far it has progressed, how the pieces fit together", "next_steps": ["1-3 concrete next steps"]}',
-    "Rules: base everything on the information above — invent no concrete facts beyond it; the title must be a complete sentence, not a topic name; use an empty array for next_steps when nothing sensible applies; output JSON only.",
+    '{"title": "a concise parent-theme name for this route (a general category such as "Linux" or "React" — not a narrow specific topic, <= 12 chars)", "summary": "a 2-4 sentence interpretation: what is being pursued here, how far it has progressed, how the pieces fit together", "next_steps": ["1-3 concrete next steps"]}',
+    "Rules: base everything on the information above — invent no concrete facts beyond it; the title must be a general parent theme (<= 12 chars), not a narrow topic name or a keyword pile; use an empty array for next_steps when nothing sensible applies; output JSON only.",
   ].join("\n");
 }
 

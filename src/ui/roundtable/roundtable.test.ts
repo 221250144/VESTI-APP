@@ -38,8 +38,8 @@ describe("resolveRoundtablePersonas", () => {
 
 describe("roundtablePersonaName", () => {
   it("localizes preset names and falls back to the raw id", () => {
-    expect(roundtablePersonaName("skeptic", "zh")).toBe("怀疑者");
-    expect(roundtablePersonaName("skeptic", "en")).toBe("Skeptic");
+    expect(roundtablePersonaName("skeptic", "zh")).toBe("怀疑猫头鹰");
+    expect(roundtablePersonaName("skeptic", "en")).toBe("Skeptic Owl");
     expect(roundtablePersonaName("moderator", "zh")).toBe("moderator");
   });
 });
@@ -84,8 +84,8 @@ describe("buildModeratorTranscript", () => {
       "zh",
     );
     expect(transcript).toContain("圆桌话题：要不要重写前端？");
-    expect(transcript).toContain("【怀疑者】\n重写风险极大。");
-    expect(transcript).toContain("【乐观者】\n重写能带来新机会。");
+    expect(transcript).toContain("【怀疑猫头鹰】\n重写风险极大。");
+    expect(transcript).toContain("【乐观猫头鹰】\n重写能带来新机会。");
     expect(transcript).toContain('"consensus"');
     expect(transcript).toContain('"open_questions"');
   });
@@ -97,7 +97,7 @@ describe("buildModeratorTranscript", () => {
       undefined,
       "en",
     );
-    expect(transcript).toContain("【Devil's Advocate】\nNever rewrite.");
+    expect(transcript).toContain("【Contrarian Owl】\nNever rewrite.");
   });
 });
 
@@ -191,9 +191,9 @@ describe("buildRoundtableRecordMarkdown", () => {
     });
     const markdown = buildRoundtableRecordMarkdown(result);
     expect(markdown).toContain("## 圆桌发言");
-    expect(markdown).toContain("**怀疑者**\n\n我反对。");
-    expect(markdown).toContain("**乐观者**\n\n我支持。");
-    expect(markdown).toContain("**实用主义者**（发言失败）");
+    expect(markdown).toContain("**怀疑猫头鹰**\n\n我反对。");
+    expect(markdown).toContain("**乐观猫头鹰**\n\n我支持。");
+    expect(markdown).toContain("**务实猫头鹰**（发言失败）");
     expect(markdown).toContain("## 主持人汇总");
     expect(markdown).toContain("**共识**\n\n- 要试点");
     expect(markdown).toContain("**建议**\n\n先小规模试。");
@@ -223,8 +223,8 @@ describe("buildRoundtableRecordMarkdown", () => {
       totalDurationMs: 1,
     });
     const markdown = buildRoundtableRecordMarkdown(result);
-    expect(markdown).toContain("**怀疑者**\n\n我反对。");
-    expect(markdown).toContain("**乐观者**（发言失败）");
+    expect(markdown).toContain("**怀疑猫头鹰**\n\n我反对。");
+    expect(markdown).toContain("**乐观猫头鹰**（发言失败）");
   });
 
   it("falls back to the raw synthesis text when parsing failed (en)", () => {

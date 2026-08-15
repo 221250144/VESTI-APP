@@ -45,7 +45,11 @@ export function computeSummaryCoverage(
       !conversation.is_trash
   );
 
-  // Latest summary per conversation wins — mirrors computeAiti's dedupe.
+  // Latest summary per conversation wins. Note computeAiti deliberately
+  // differs here: it prefers the latest *structured* row so a newer fallback
+  // can't shrink the AITI sample. Coverage instead answers "does the latest
+  // summary need (re)doing" — a conversation whose newest row is a fallback
+  // stays in the regeneration queue even when an older structured row exists.
   const latestByConversation = new Map<number, SummaryCoverageSummary>();
   for (const summary of summaries) {
     if (typeof summary.conversationId !== "number") continue;

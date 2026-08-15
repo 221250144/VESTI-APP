@@ -1,6 +1,5 @@
 import {
   Archive,
-  BookText,
   Compass,
   LibraryBig,
   Moon,
@@ -21,9 +20,10 @@ export type ShellPage = "home" | DashboardTab | "settings";
 // Localized dock labels, kept next to the component (same pattern as the
 // capsule's embedded dictionaries) so the shared translation files stay
 // untouched.
+// 日报已并入记忆空间（deposits 总览的"日志"卡片），Dock 不再单列。
 const DOCK_COPY: Record<
   SupportedLocale,
-  Record<ShellPage | "backToLibrary" | "toggleTheme", string>
+  Record<Exclude<ShellPage, "daily"> | "backToLibrary" | "toggleTheme", string>
 > = {
   en: {
     home: "Dashboard",
@@ -32,7 +32,6 @@ const DOCK_COPY: Record<
     network: "Knowledge Graph",
     prompts: "Prompts",
     deposits: "Memory Space",
-    daily: "Daily log",
     settings: "Settings",
     backToLibrary: "Back to Library",
     toggleTheme: "Toggle theme",
@@ -44,7 +43,6 @@ const DOCK_COPY: Record<
     network: "知识图谱",
     prompts: "提示词",
     deposits: "记忆空间",
-    daily: "日志",
     settings: "设置",
     backToLibrary: "回到会话库",
     toggleTheme: "切换主题",
@@ -56,7 +54,6 @@ const DOCK_COPY: Record<
     network: "ナレッジグラフ",
     prompts: "プロンプト",
     deposits: "メモリースペース",
-    daily: "ログ",
     settings: "設定",
     backToLibrary: "ライブラリに戻る",
     toggleTheme: "テーマ切替",
@@ -68,7 +65,6 @@ const DOCK_COPY: Record<
     network: "지식 그래프",
     prompts: "프롬프트",
     deposits: "메모리 스페이스",
-    daily: "로그",
     settings: "설정",
     backToLibrary: "라이브러리로 돌아가기",
     toggleTheme: "테마 전환",
@@ -76,7 +72,7 @@ const DOCK_COPY: Record<
 };
 
 interface DockItem {
-  id: ShellPage;
+  id: Exclude<ShellPage, "daily">;
   icon: ReactNode;
 }
 
@@ -86,7 +82,6 @@ const TOP_ITEMS: DockItem[] = [
   { id: "network", icon: <Network className="h-5 w-5" strokeWidth={1.75} /> },
   { id: "prompts", icon: <ScrollText className="h-5 w-5" strokeWidth={1.75} /> },
   { id: "deposits", icon: <Archive className="h-5 w-5" strokeWidth={1.75} /> },
-  { id: "daily", icon: <BookText className="h-5 w-5" strokeWidth={1.75} /> },
 ];
 
 interface DockProps {
