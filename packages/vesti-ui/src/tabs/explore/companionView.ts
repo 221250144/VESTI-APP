@@ -10,6 +10,8 @@
 // shell). If the service's `${mood}\n${body}` contract changes, update both.
 
 import type {
+  CompanionErrorCategory,
+  CompanionErrorView,
   CompanionMemoryScope,
   CompanionMood,
   CompanionPersona,
@@ -181,4 +183,50 @@ export async function saveCompanionPreference(
 ): Promise<void> {
   if (!storage.setUiPreference) return;
   await storage.setUiPreference(key, value).catch(() => undefined);
+}
+
+// ---- failure → gentle banner view model -------------------------------------------
+
+const COMPANION_ERROR_CATEGORIES: readonly CompanionErrorCategory[] = [
+  "network",
+  "auth",
+  "model",
+  "credits",
+  "empty",
+  "unknown",
+  "session-lost",
+  "local",
+];
+
+/**
+ * Map anything StorageApi.askCompanion (or a storage call) throws onto the
+ * classified banner view model. The desktop host throws CompanionTurnError /
+ * CompanionSessionLostError (src/ui/companion/companionService), which carry a
+ * structured `category` — that always wins. For hosts that throw raw errors,
+ * the well-known message markers give a best-effort class (the canonical
+ * taxonomy lives in src/main/chatStream.ts; only the few markers that must
+ * survive the Electron IPC re-wrap are mirrored here). Never throws.
+ */
+export function companionErrorFrom(error: unknown): CompanionErrorView {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  if (error && typeof error === "object") {
+    if ((error as { name?: unknown }).name === "CompanionSessionLostError") {
+      return { category: "session-lost", message };
+    }
+    const category = (error as { category?: unknown }).category;
+    if (
+      typeof category === "string" &&
+      (COMPANION_ERROR_CATEGORIES as readonly string[]).includes(category)
+    ) {
+      return { category: category as CompanionErrorCategory, message };
+    }
+  }
+  if (message.includes("CREDITS_EXHAUSTED")) return { category: "credits", message };
+  if (/无法连接模型服务|无法通过系统网络连接模型服务|fetch failed|timed?\s*out/i.test(message)) {
+    return { category: "network", message };
+  }
+  if (/请先在设置中填写\s*API\s*Key|unauthorized|invalid\s+(api[\s_-]?key|token)/i.test(message)) {
+    return { category: "auth", message };
+  }
+  return { category: "unknown", message };
 }

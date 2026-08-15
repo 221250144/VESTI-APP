@@ -8,7 +8,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
-import { RefreshCw, X } from "lucide-react";
+import { BookOpen, CloudMoon, RefreshCw, X } from "lucide-react";
 import type { MemoryEntryView, StorageApi } from "../../types";
 
 export type MemoryLabelFn = (key: string, fallback: string) => string;
@@ -472,36 +472,56 @@ export function DreamMemorySection({ storage, l, refreshKey }: SectionProps) {
         ) : null}
 
         {showList ? (
-          <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">
-            {filtered.map((entry) => {
-              const primaryTag = entry.tags[0] ?? "";
-              const summary = entrySummaryLine(entry);
+          <div className="space-y-6">
+            {(activeTag === "all" ? presentTags : [activeTag]).map((tag) => {
+              const group =
+                tag === "all"
+                  ? filtered
+                  : filtered.filter((entry) => entry.tags.includes(tag));
+              if (group.length === 0) return null;
               return (
-                <button
-                  key={entry.id}
-                  type="button"
-                  onClick={() => setReading(entry)}
-                  className="flex items-start gap-2.5 rounded-lg border border-border-subtle bg-bg-surface-card px-3 py-2.5 text-left transition-colors hover:bg-bg-surface-card-hover"
-                >
-                  <span
-                    className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${tagDotClass(primaryTag)}`}
-                  />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-vesti-base font-sans font-medium text-text-primary">
-                      {entry.title || l("untitled", "Untitled")}
-                    </span>
-                    {summary ? (
-                      <span className="mt-0.5 block truncate text-vesti-sm font-sans text-text-tertiary">
-                        {summary}
-                      </span>
-                    ) : null}
-                    <span className="mt-1 block text-vesti-sm font-sans text-text-tertiary">
-                      {tagLabel(l, primaryTag)}
-                      {" · "}
-                      {entryDateLabel(entry)}
-                    </span>
-                  </span>
-                </button>
+                <section key={tag}>
+                  {activeTag === "all" ? (
+                    <h3 className="mb-2 flex items-center gap-1.5 text-vesti-sm font-sans font-medium uppercase tracking-wide text-text-tertiary">
+                      <span className={`h-1.5 w-1.5 rounded-full ${tagDotClass(tag)}`} />
+                      {tag === "all" ? l("tagAll", "All") : tagLabel(l, tag)}
+                      <span className="text-text-tertiary/60">({group.length})</span>
+                    </h3>
+                  ) : null}
+                  <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">
+                    {group.map((entry) => {
+                      const primaryTag = entry.tags[0] ?? "";
+                      const summary = entrySummaryLine(entry);
+                      return (
+                        <button
+                          key={entry.id}
+                          type="button"
+                          onClick={() => setReading(entry)}
+                          className="flex items-start gap-2.5 rounded-lg border border-border-subtle bg-bg-surface-card px-3 py-2.5 text-left transition-colors hover:bg-bg-surface-card-hover"
+                        >
+                          <span
+                            className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${tagDotClass(primaryTag)}`}
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-vesti-base font-sans font-medium text-text-primary">
+                              {entry.title || l("untitled", "Untitled")}
+                            </span>
+                            {summary ? (
+                              <span className="mt-0.5 block truncate text-vesti-sm font-sans text-text-tertiary">
+                                {summary}
+                              </span>
+                            ) : null}
+                            <span className="mt-1 block text-vesti-sm font-sans text-text-tertiary">
+                              {tagLabel(l, primaryTag)}
+                              {" · "}
+                              {entryDateLabel(entry)}
+                            </span>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </section>
               );
             })}
           </div>
@@ -554,35 +574,90 @@ export function DreamLogSection({ storage, l, refreshKey }: SectionProps) {
     [entries],
   );
 
+  const owlEntries = useMemo(
+    () => sorted.filter((entry) => entry.tags.includes("owl-diary")),
+    [sorted],
+  );
+  const plainLogs = useMemo(
+    () => sorted.filter((entry) => !entry.tags.includes("owl-diary")),
+    [sorted],
+  );
+
   const showList = !loadError && entries !== null && sorted.length > 0;
 
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-3xl px-6 py-5">
         {showList ? (
-          <div className="space-y-1.5">
-            {sorted.map((entry) => (
-              <button
-                key={entry.id}
-                type="button"
-                onClick={() => setReading(entry)}
-                className="flex w-full items-start gap-2.5 rounded-lg border border-border-subtle bg-bg-surface-card px-3 py-2.5 text-left transition-colors hover:bg-bg-surface-card-hover"
-              >
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-vesti-base font-sans font-medium text-text-primary">
-                    {entry.title || l("untitled", "Untitled")}
-                  </span>
-                  {entry.summary ? (
-                    <span className="mt-0.5 block truncate text-vesti-sm font-sans text-text-tertiary">
-                      {entry.summary}
-                    </span>
-                  ) : null}
-                  <span className="mt-1 block text-vesti-sm font-sans text-text-tertiary">
-                    {entryDateLabel(entry)}
-                  </span>
-                </span>
-              </button>
-            ))}
+          <div className="space-y-5">
+            {owlEntries.length > 0 ? (
+              <section>
+                <h3 className="mb-2 flex items-center gap-1.5 text-vesti-sm font-sans font-medium uppercase tracking-wide text-text-tertiary">
+                  <BookOpen strokeWidth={1.75} className="h-3.5 w-3.5" />
+                  {l("owlDiaryTitle", "Owl diary")}
+                </h3>
+                <div className="space-y-1.5">
+                  {owlEntries.map((entry) => (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      onClick={() => setReading(entry)}
+                      className="flex w-full items-start gap-2.5 rounded-lg border border-border-subtle bg-bg-surface-card px-3 py-2.5 text-left transition-colors hover:bg-bg-surface-card-hover"
+                    >
+                      <BookOpen
+                        strokeWidth={1.75}
+                        className="mt-0.5 h-4 w-4 shrink-0 text-text-tertiary"
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-vesti-base font-sans font-medium text-text-primary">
+                          {entry.title || l("untitled", "Untitled")}
+                        </span>
+                        {entry.summary ? (
+                          <span className="mt-0.5 block truncate text-vesti-sm font-sans text-text-tertiary">
+                            {entry.summary}
+                          </span>
+                        ) : null}
+                        <span className="mt-1 block text-vesti-sm font-sans text-text-tertiary">
+                          {entryDateLabel(entry)}
+                        </span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+            {plainLogs.length > 0 ? (
+              <section>
+                <h3 className="mb-2 flex items-center gap-1.5 text-vesti-sm font-sans font-medium uppercase tracking-wide text-text-tertiary">
+                  <CloudMoon strokeWidth={1.75} className="h-3.5 w-3.5" />
+                  {l("dreamLogTitle", "Dream logs")}
+                </h3>
+                <div className="space-y-1.5">
+                  {plainLogs.map((entry) => (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      onClick={() => setReading(entry)}
+                      className="flex w-full items-start gap-2.5 rounded-lg border border-border-subtle bg-bg-surface-card px-3 py-2.5 text-left transition-colors hover:bg-bg-surface-card-hover"
+                    >
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-vesti-base font-sans font-medium text-text-primary">
+                          {entry.title || l("untitled", "Untitled")}
+                        </span>
+                        {entry.summary ? (
+                          <span className="mt-0.5 block truncate text-vesti-sm font-sans text-text-tertiary">
+                            {entry.summary}
+                          </span>
+                        ) : null}
+                        <span className="mt-1 block text-vesti-sm font-sans text-text-tertiary">
+                          {entryDateLabel(entry)}
+                        </span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            ) : null}
           </div>
         ) : (
           <SectionState

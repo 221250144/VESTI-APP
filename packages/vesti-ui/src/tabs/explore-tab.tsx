@@ -14,6 +14,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ResizablePanelDivider } from "../components/ResizablePanelDivider";
 import { useResizableWidth } from "../hooks/use-resizable-width";
 import type {
+  CompanionErrorView,
   CompanionMemoryScope,
   CompanionOwlIcons,
   CompanionPersona,
@@ -24,6 +25,7 @@ import type {
   UiThemeMode,
 } from "../types";
 import {
+  companionErrorFrom,
   COMPANION_MEMORY_SCOPE_PREF_KEY,
   COMPANION_PERSONA_PREF_KEY,
   loadCompanionPreferences,
@@ -67,7 +69,12 @@ export function ExploreTab({
 
   const [inputValue, setInputValue] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // Classified failure banner + what its retry button should re-fire. Every
+  // async path below (send, opener, history load, session list, rename,
+  // delete, lost session) lands here instead of failing silently.
+  const [error, setError] = useState<CompanionErrorView | null>(null);
+  const [errorRetry, setErrorRetry] = useState<"send" | "opener" | "reload-messages" | null>(null);
+  const [sessionsLoadError, setSessionsLoadError] = useState(false);
   // Live-typing state of the in-flight streaming turn (null = not streaming).
   const [streaming, setStreaming] = useState<{ raw: string; reasoning: string } | null>(null);
 
@@ -78,6 +85,10 @@ export function ExploreTab({
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Mirror for loadSessions — depending on currentSessionId directly would
+  // re-run the mount effect (and re-fetch the whole list) on every switch.
+  const currentSessionIdRef = useRef<string | null>(null);
+  currentSessionIdRef.current = currentSessionId;
   const sidebarPane = useResizableWidth({
     storageKey: "vesti.explore.sidebar-width",
     defaultWidth: 256,
@@ -93,8 +104,22 @@ export function ExploreTab({
     try {
       const data = await storage.listExploreSessions(50);
       setSessions(data);
+      setSessionsLoadError(false);
+      // Lost-session cross-check: the open conversation fell out of the list
+      // (deleted in another window / cleanup / corruption). The 50-row cap
+      // can hide a still-existing session, so probe before declaring it lost —
+      // and never bounce the user: the gentle banner + one-tap new chat do.
+      const openId = currentSessionIdRef.current;
+      if (openId && !data.some((session) => session.id === openId)) {
+        const probe = await storage.getExploreSession?.(openId).catch(() => undefined);
+        if (probe === null) {
+          setError({ category: "session-lost", message: "" });
+          setErrorRetry(null);
+        }
+      }
     } catch (err) {
       console.error("[Companion] Failed to load sessions:", err);
+      setSessionsLoadError(true);
     } finally {
       setSessionsLoading(false);
     }
@@ -108,10 +133,20 @@ export function ExploreTab({
       setMessages([]);
       setMessagesLoading(true);
       try {
+        // Existence probe: a deleted session's messages read as an empty
+        // array, indistinguishable from a fresh chat — catch it explicitly.
+        const probe = await storage.getExploreSession?.(sessionId).catch(() => undefined);
+        if (probe === null) {
+          setError({ category: "session-lost", message: "" });
+          setErrorRetry(null);
+          return;
+        }
         const data = await storage.getExploreMessages(sessionId);
         setMessages(data || []);
       } catch (err) {
         console.error("[Companion] Failed to load messages:", err);
+        setError({ ...companionErrorFrom(err), category: "local" });
+        setErrorRetry("reload-messages");
       } finally {
         setMessagesLoading(false);
       }
@@ -181,9 +216,11 @@ export function ExploreTab({
       setMessages([]);
       setInputValue("");
       setError(null);
+      setErrorRetry(null);
       setStreaming(null);
       // 主动开场: starting a fresh 夜话 lets the owl speak first, grounded in
-      // long-term memories. Best-effort — a failure just leaves the composer.
+      // long-term memories. A failure surfaces as the gentle banner with a
+      // retry — never a silent dead composer.
       if (!withOpener || !storage.askCompanion || isSubmitting) return;
       setIsSubmitting(true);
       void (async () => {
@@ -223,6 +260,8 @@ export function ExploreTab({
         } catch (err) {
           console.error("[Companion] Opener error:", err);
           setStreaming(null);
+          setError(companionErrorFrom(err));
+          setErrorRetry("opener");
         } finally {
           setIsSubmitting(false);
         }
@@ -239,6 +278,10 @@ export function ExploreTab({
         await loadSessions();
       } catch (err) {
         console.error("[Companion] Failed to rename session:", err);
+        // Storage-layer failure: visible banner, nothing to re-fire (the
+        // rename input already closed) — the user can simply rename again.
+        setError({ ...companionErrorFrom(err), category: "local" });
+        setErrorRetry(null);
       }
     },
     [storage, loadSessions],
@@ -259,6 +302,8 @@ export function ExploreTab({
         await loadSessions();
       } catch (err) {
         console.error("[Companion] Failed to delete session:", err);
+        setError({ ...companionErrorFrom(err), category: "local" });
+        setErrorRetry(null);
       }
     },
     [storage, labels.deleteConversationConfirm, currentSessionId, handleNewChat, loadSessions],
@@ -269,12 +314,14 @@ export function ExploreTab({
     if (!trimmed || isSubmitting) return;
 
     if (!storage.askCompanion) {
-      setError(labels.exploreUnavailable);
+      setError({ category: "unknown", message: labels.exploreUnavailable });
+      setErrorRetry(null);
       return;
     }
 
     setIsSubmitting(true);
     setError(null);
+    setErrorRetry(null);
     setStreaming(null);
 
     const optimisticUserMessage: ExploreMessage = {
@@ -336,7 +383,12 @@ export function ExploreTab({
     } catch (err) {
       console.error("[Companion] Submit error:", err);
       setStreaming(null);
-      setError((err as Error)?.message ?? labels.failedToRetrieveAnswer);
+      // Classified, gentle banner: 网络连不上 vs 服务配置问题 vs 积分用尽 vs
+      // 会话丢失 — each with its own copy, and a retry for everything that
+      // re-firing could fix (session-lost offers a fresh 夜话 instead).
+      const view = companionErrorFrom(err);
+      setError(view);
+      setErrorRetry(view.category === "session-lost" ? null : "send");
       setMessages((prev) => prev.filter((message) => message.id !== optimisticUserMessage.id));
       // Restore the question so a transient failure doesn't lose the typing.
       setInputValue(trimmed);
@@ -349,12 +401,28 @@ export function ExploreTab({
     isSubmitting,
     storage,
     labels.exploreUnavailable,
-    labels.failedToRetrieveAnswer,
     currentSessionId,
     persona,
     memoryScope,
     loadSessions,
   ]);
+
+  /** The banner's retry button re-fires whatever failed: the last send (the
+   * composer kept the text), the opener, or the history reload. */
+  const handleErrorRetry = useCallback(() => {
+    if (errorRetry === "send") void handleSubmit();
+    else if (errorRetry === "opener") handleNewChat(true);
+    else if (errorRetry === "reload-messages" && currentSessionId) {
+      void loadMessages(currentSessionId);
+    }
+  }, [errorRetry, currentSessionId, handleSubmit, handleNewChat, loadMessages]);
+
+  /** Switching sessions dismisses any stale banner from the previous one. */
+  const handleSelectSession = useCallback((sessionId: string) => {
+    setError(null);
+    setErrorRetry(null);
+    setCurrentSessionId(sessionId);
+  }, []);
 
   return (
     <div className="relative flex h-full">
@@ -366,8 +434,10 @@ export function ExploreTab({
               themeMode={themeMode}
               sessions={sessions}
               loading={sessionsLoading}
+              loadError={sessionsLoadError}
+              onRetryLoad={() => void loadSessions()}
               currentSessionId={currentSessionId}
-              onSelectSession={setCurrentSessionId}
+              onSelectSession={handleSelectSession}
               onNewChat={() => handleNewChat()}
               onRenameSession={handleRenameSession}
               onDeleteSession={(sessionId) => void handleDeleteSession(sessionId)}
@@ -395,9 +465,16 @@ export function ExploreTab({
         isSubmitting={isSubmitting}
         streaming={streaming}
         error={error}
-        onDismissError={() => setError(null)}
+        onDismissError={() => {
+          setError(null);
+          setErrorRetry(null);
+        }}
+        onRetryError={errorRetry ? handleErrorRetry : null}
+        onNewChat={() => handleNewChat(true)}
         currentSessionTitle={currentSession?.title ?? null}
-        showEmptyState={messages.length === 0 && !currentSessionId && !messagesLoading}
+        // A failure banner must never hide behind the welcome screen (e.g. a
+        // failed opener leaves no messages and no session).
+        showEmptyState={messages.length === 0 && !currentSessionId && !messagesLoading && !error}
         sidebarOpen={sidebarOpen}
         onToggleSidebar={() => setSidebarOpen((open) => !open)}
         inputValue={inputValue}

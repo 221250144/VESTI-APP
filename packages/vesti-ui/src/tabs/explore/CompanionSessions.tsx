@@ -43,6 +43,10 @@ export interface CompanionSessionsProps {
   themeMode?: UiThemeMode;
   sessions: ExploreSession[];
   loading: boolean;
+  /** The session list itself failed to load (storage hiccup): show a small
+   * retryable notice instead of a misleading "no conversations yet". */
+  loadError?: boolean;
+  onRetryLoad?: () => void;
   currentSessionId: string | null;
   onSelectSession: (sessionId: string) => void;
   onNewChat: () => void;
@@ -55,6 +59,8 @@ export function CompanionSessions({
   themeMode = "light",
   sessions,
   loading,
+  loadError = false,
+  onRetryLoad,
   currentSessionId,
   onSelectSession,
   onNewChat,
@@ -184,6 +190,22 @@ export function CompanionSessions({
         {loading ? (
           <div className="py-4 text-center">
             <Loader2 className="mx-auto h-5 w-5 animate-spin text-accent-primary" />
+          </div>
+        ) : loadError ? (
+          <div className="rounded-lg border border-border-subtle bg-bg-surface-card px-3 py-2.5">
+            <p className="text-xs font-sans text-text-primary">{labels.companion.loadFailedTitle}</p>
+            <p className="mt-0.5 text-[11px] font-sans leading-relaxed text-text-tertiary">
+              {labels.companion.loadFailedHint}
+            </p>
+            {onRetryLoad ? (
+              <button
+                type="button"
+                onClick={onRetryLoad}
+                className="mt-1.5 rounded-md bg-accent-primary px-2.5 py-1 text-[11px] font-sans text-text-inverse transition-colors hover:bg-accent-primary/90"
+              >
+                {labels.companion.retry}
+              </button>
+            ) : null}
           </div>
         ) : sessions.length === 0 ? (
           <div className="py-4 text-center text-xs font-sans text-text-tertiary">

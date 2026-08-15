@@ -1349,7 +1349,7 @@ export const jaTranslations = {
       scanClose: "閉じる"
     },
     aiti: {
-      modeAsk: "質問",
+      modeAsk: "夜話",
       modeAiti: "AITI",
       modeRoundtable: "円卓",
       title: "あなたの AITI — 思考の強み",
@@ -1411,7 +1411,7 @@ export const jaTranslations = {
       deepenAiFailed: "深化分析に失敗しました",
       llmMissing: "モデルが未設定です — 先に「設定」で LLM を設定してください。AI 深化にはモデルが必要です。",
       groundedHint: "過去の会話 {n} 件を背景にしています",
-      savedHint: "この分析は「Ask」履歴に保存されました。いつでも見返せます。",
+      savedHint: "この分析は「夜話」履歴に保存されました。いつでも見返せます。",
       synthesisRunning: "学習ルートの解説を生成しています… {done}/{total}",
       synthesisRegenerate: "解説を再生成",
       synthesisNextSteps: "おすすめの次のステップ"
@@ -1440,7 +1440,7 @@ export const jaTranslations = {
       empty: "質問を入力してパネルを招集すると、各視点と総括が表示されます。",
       llmMissing: "モデルが未設定です — 先に「設定」で LLM を設定してください。議論にはモデルが必要です。",
       seatFailed: "発言に失敗しました",
-      savedHint: "この議論は「Ask」履歴に保存されました。いつでも見返せます。",
+      savedHint: "この議論は「夜話」履歴に保存されました。いつでも見返せます。",
       groundedHint: "過去の会話 {n} 件を背景にしています",
       personaSkeptic: "懐疑派",
       personaOptimist: "楽観派",

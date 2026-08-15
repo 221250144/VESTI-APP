@@ -14,6 +14,8 @@ export default defineConfig({
     include: [
       'src/**/*.test.ts',
       'src/**/*.test.tsx',
+      // 网关众筹兑换逻辑(deploy/vesti-gate)是纯 .mjs 模块,随根仓一起跑。
+      'deploy/vesti-gate/**/*.test.mjs',
       // Pure logic for the library source-tree nav / organizer (P2b) lives in
       // the UI package but is covered by the root runner (node environment,
       // no DOM needed).

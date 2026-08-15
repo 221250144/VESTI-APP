@@ -118,6 +118,28 @@ export interface CompanionAnswer {
  * same pattern as aitiEmblemUrl. Missing entries fall back to `calm`. */
 export type CompanionOwlIcons = Partial<Record<CompanionMood, string>>;
 
+/** Failure classes a companion turn can surface. Mirrors the canonical
+ * gateway taxonomy in src/main/chatStream.ts (network/auth/model/credits/
+ * empty/unknown) plus two renderer-local classes: "session-lost" (the current
+ * conversation vanished) and "local" (history/list storage failures). The UI
+ * package cannot import the app shell, so the union is duplicated here. */
+export type CompanionErrorCategory =
+  | "network"
+  | "auth"
+  | "model"
+  | "credits"
+  | "empty"
+  | "unknown"
+  | "session-lost"
+  | "local";
+
+/** A classified companion failure ready for the gentle banner. */
+export interface CompanionErrorView {
+  category: CompanionErrorCategory;
+  /** Fine-print detail (the original gateway/storage message). */
+  message: string;
+}
+
 export type ExploreSearchScopeMode = "all" | "selected";
 
 export interface ExploreSearchScope {
@@ -1209,6 +1231,14 @@ export interface DailyLogOverview {
   week: Array<{ date: string; messages: number; hasLog: boolean }>;
 }
 
+/** One cell in the GitHub-style weekly contribution grid (extension parity). */
+export interface WeeklyContributionDay {
+  date: string;
+  count: number;
+  /** 0-4 intensity bucket; computed from message volume relative to the week. */
+  intensity: number;
+}
+
 export interface WeeklyReport {
   id: number;
   rangeStart: number;
@@ -1482,6 +1512,25 @@ export interface CompanionLabels {
   thinkingProcess: string;
   /** Gentle error bubble title (the LLM failure message follows). */
   errorTitle: string;
+  /** Retry button on the error banner (re-fires the failed turn). */
+  retry: string;
+  /** Network-class failure banner (gateway unreachable / proxy / timeout). */
+  errorNetworkTitle: string;
+  errorNetworkHint: string;
+  /** Service-config-class failure banner (401 / missing key / model down). */
+  errorConfigTitle: string;
+  errorConfigHint: string;
+  /** Credit-exhaustion banner (demo gateway metering). */
+  errorCreditsTitle: string;
+  errorCreditsHint: string;
+  /** The current conversation vanished (deleted elsewhere / storage loss):
+   * gentle banner + one-tap fresh start. */
+  sessionLostTitle: string;
+  sessionLostBody: string;
+  sessionLostAction: string;
+  /** History / session-list load failure (local storage layer). */
+  loadFailedTitle: string;
+  loadFailedHint: string;
 }
 
 export interface ExploreLabels {

@@ -38,6 +38,9 @@ const PLATFORM_LABELS: Record<CapturePlatform, string> = {
   cursor: "Cursor",
   "kimi-code": "Kimi Code",
   "claude-code": "Claude Code",
+  trae: "Trae",
+  coder: "Qoder",
+  workbuddy: "WorkBuddy",
 };
 
 /** 兜底温柔短句池 (rotated randomly when no dream-log / daily content). */

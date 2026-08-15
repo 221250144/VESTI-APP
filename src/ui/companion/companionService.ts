@@ -19,6 +19,7 @@ import type {
   SessionRecallHit,
   VestiDesktopApi,
 } from "../../shared/contracts";
+import { classifyChatError, type ChatErrorCategory } from "../../main/chatStream";
 import { db } from "../db/schema";
 import type { ConversationRecord } from "../db/schema";
 import type {
@@ -30,6 +31,7 @@ import type {
 import {
   addExploreMessage,
   createExploreSession,
+  getExploreSession,
   getRecentExploreMessages,
   updateExploreSession,
 } from "../db/repository";
@@ -41,9 +43,9 @@ import {
  * leaving ample headroom for the prompt template around it. */
 export const COMPANION_CONTEXT_BUDGET_CHARS = 16_000;
 /** Deposit documents enter the context as a digest of this many chars. */
-export const COMPANION_DEPOSIT_DIGEST_CHARS = 200;
+export const COMPANION_DEPOSIT_DIGEST_CHARS = 320;
 /** Recall hit snippets are collapsed and capped at this many chars. */
-export const COMPANION_RECALL_SNIPPET_CHARS = 200;
+export const COMPANION_RECALL_SNIPPET_CHARS = 320;
 /** Recent turns of the current conversation fed back into the context. */
 export const COMPANION_HISTORY_LIMIT = 12;
 /** Long-term memories fetched per turn (trimmed to budget by tag priority). */
@@ -108,6 +110,51 @@ export type CompanionAgentMeta = ExploreAgentMeta & {
  * keep it bounded. */
 export const COMPANION_REASONING_PERSIST_CHARS = 4_000;
 
+// ---- Structured turn failures -------------------------------------------------------
+
+export type CompanionErrorCategory = ChatErrorCategory | "session-lost";
+
+/**
+ * A failed 夜话 turn, classified for the UI. The LLM/gateway stage is wrapped
+ * with classifyChatError (src/main/chatStream — the taxonomy has to survive
+ * the IPC boundary as a message-only string, so the category is re-derived
+ * renderer-side from the same canonical patterns). `category` is what the chat
+ * pane switches its gentle banner on; `message` keeps the original gateway
+ * detail (request id included) for the collapsible fine print.
+ */
+export class CompanionTurnError extends Error {
+  constructor(
+    readonly category: ChatErrorCategory,
+    message: string,
+    options?: { cause?: unknown },
+  ) {
+    super(message);
+    this.name = "CompanionTurnError";
+    if (options && "cause" in options) this.cause = options.cause;
+  }
+}
+
+/**
+ * The conversation the user is looking at no longer exists (deleted elsewhere,
+ * storage corruption, cleanup). Thrown before any LLM call so nothing is
+ * spent; the UI answers with the gentle lost-session banner and a one-tap
+ * 新的夜话 instead of bouncing or blanking.
+ */
+export class CompanionSessionLostError extends Error {
+  constructor(readonly sessionId: string) {
+    super("这场夜话已经不在了");
+    this.name = "CompanionSessionLostError";
+  }
+}
+
+/** Read the category off anything askCompanion throws (CompanionTurnError,
+ * CompanionSessionLostError or a raw persistence/IO failure). */
+export function companionErrorCategory(error: unknown): CompanionErrorCategory {
+  if (error instanceof CompanionSessionLostError) return "session-lost";
+  if (error instanceof CompanionTurnError) return error.category;
+  return classifyChatError(error);
+}
+
 // ---- Pure core (unit-tested) ----------------------------------------------------
 
 const COMPANION_MOODS: readonly CompanionMood[] = [
@@ -128,6 +175,10 @@ export interface CompanionContextInput {
   recallHits: SessionRecallHit[];
   /** Recent messages of the current conversation, chronological. */
   history: ExploreMessage[];
+  /** Renderer conversation records — matched to recall hits by cliId so each
+   * recalled fragment can carry its local updatedAt date. Optional: without
+   * them the recall lines simply omit the date. */
+  records?: CompanionConversationRecord[];
 }
 
 function truncate(value: string, maxChars: number): string {
@@ -143,11 +194,26 @@ function collapseWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
+/** Local-day YYYY-MM-DD — the granularity at which "它真的记得我" reads as
+ * memory rather than a log file. */
+function formatDay(timestamp: number): string {
+  const date = new Date(timestamp);
+  const month = `${date.getMonth() + 1}`.padStart(2, "0");
+  const day = `${date.getDate()}`.padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+/** A memory's day: entryDate (YYYY-MM-DD, the dream-write day) when present,
+ * else the last-update day. */
+function memoryDay(entry: MemoryEntryView): string {
+  return entry.entryDate?.trim() || formatDay(entry.updatedAt);
+}
+
 function renderMemorySection(memories: MemoryEntryView[]): string | null {
   if (memories.length === 0) return null;
   const lines = memories.map(
     (entry) =>
-      `- [${entry.tags[0] ?? "memory"}] ${firstLine(entry.contentMarkdown, 200)}`,
+      `- [${entry.tags[0] ?? "memory"}]（${memoryDay(entry)}）${firstLine(entry.contentMarkdown, 200)}`,
   );
   return `【关于用户的长期记忆】\n${lines.join("\n")}`;
 }
@@ -159,22 +225,35 @@ function renderDepositSection(deposits: MemoryEntryView[]): string | null {
       0,
       COMPANION_DEPOSIT_DIGEST_CHARS,
     );
-    return `- 《${entry.title}》${digest}`;
+    return `- 《${entry.title}》（${memoryDay(entry)}）${digest}`;
   });
   return `【用户的沉淀文档（摘要）】\n${lines.join("\n")}`;
 }
 
-function renderRecallSection(hits: SessionRecallHit[]): string | null {
+function renderRecallSection(
+  hits: SessionRecallHit[],
+  records: CompanionConversationRecord[] | undefined,
+): string | null {
   if (hits.length === 0) return null;
+  const recordByCliId = new Map<string, CompanionConversationRecord>();
+  for (const record of records ?? []) {
+    if (record.cliId) recordByCliId.set(record.cliId, record);
+  }
   const lines = hits.map((hit) => {
+    // 命中来源: 平台 + 本地会话的最近活跃日期，让回忆落在具体时空里。
+    const record = recordByCliId.get(hit.attributedSessionId ?? hit.sessionId);
+    const meta: string[] = [];
+    if (hit.platform.trim()) meta.push(hit.platform.trim());
+    if (record?.updatedAt) meta.push(formatDay(record.updatedAt));
     const parts: string[] = [];
     if (hit.oneLiner) parts.push(hit.oneLiner);
     if (hit.snippet) {
       parts.push(
-        truncate(collapseWhitespace(hit.snippet), COMPANION_RECALL_SNIPPET_CHARS),
+        `片段：${truncate(collapseWhitespace(hit.snippet), COMPANION_RECALL_SNIPPET_CHARS)}`,
       );
     }
-    return `- 《${hit.title}》${parts.join(" — ")}`.trimEnd();
+    const metaSuffix = meta.length > 0 ? `（${meta.join(" · ")}）` : "";
+    return `- 《${hit.title}》${metaSuffix}${parts.length > 0 ? `：${parts.join(" — ")}` : ""}`;
   });
   return `【相关历史对话片段】\n${lines.join("\n")}`;
 }
@@ -245,7 +324,7 @@ export function buildCompanionContext(input: CompanionContextInput): string {
     [
       renderMemorySection(memories),
       renderDepositSection(deposits),
-      renderRecallSection(recallHits),
+      renderRecallSection(recallHits, input.records),
       renderHistorySection(history),
     ]
       .filter((section): section is string => section !== null)
@@ -296,12 +375,15 @@ export function splitCompanionResult(content: string): {
   return { mood: "calm", body: content.trim() };
 }
 
-/** Minimal conversation-record shape the sources mapping needs. */
+/** Minimal conversation-record shape the sources mapping needs. `updatedAt`
+ * lets the recall section date each fragment ("它真的记得我" needs a when, not
+ * just a what). */
 export interface CompanionConversationRecord {
   id: number;
   cliId: string | null;
   title: string;
   platform: Platform;
+  updatedAt?: number | null;
 }
 
 /**
@@ -356,6 +438,11 @@ export interface CompanionDeps {
     message: Omit<ExploreMessage, "id" | "sessionId">,
   ): Promise<ExploreMessage>;
   listConversationRecords(): Promise<CompanionConversationRecord[]>;
+  /** Existence probe for the lost-session guard: when wired and the caller
+   * passed a sessionId, askCompanion checks the session still exists before
+   * spending an LLM call. Returns null when the session is gone; a rejected
+   * probe is treated as "unknown" and does not block the turn. */
+  getSession?(sessionId: string): Promise<{ id: string } | null>;
   now(): number;
 }
 
@@ -391,6 +478,8 @@ async function listDexieCompanionConversations(): Promise<
           : null,
       title: record.title,
       platform: record.platform,
+      updatedAt:
+        typeof record.updated_at === "number" ? record.updated_at : null,
     });
   }
   return result;
@@ -414,6 +503,7 @@ function defaultCompanionDeps(): CompanionDeps {
     getRecentMessages: (sessionId, limit) => getRecentExploreMessages(sessionId, limit),
     addMessage: (sessionId, message) => addExploreMessage(sessionId, message),
     listConversationRecords: listDexieCompanionConversations,
+    getSession: (sessionId) => getExploreSession(sessionId),
     now: () => Date.now(),
   };
 }
@@ -439,9 +529,18 @@ export async function askCompanion(
       isOpener ? "夜话 · 新的开场" : `夜话 · ${question.slice(0, 18)}`,
     ));
 
+  // Lost-session guard: a caller-supplied sessionId that no longer exists
+  // (deleted in another window, storage corruption, cleanup) must fail fast
+  // and loudly — writing the turn into an orphaned session would look exactly
+  // like a successful send while the record never appears anywhere.
+  if (input.sessionId && deps.getSession) {
+    const existing = await deps.getSession(sessionId).catch(() => undefined);
+    if (existing === null) throw new CompanionSessionLostError(sessionId);
+  }
+
   const wantMemory = memoryScope !== "chat";
   const wantRecall = memoryScope === "full" && !isOpener;
-  const [history, memories, depositDigests, recallHits] = await Promise.all([
+  const [history, memories, depositDigests, recallHits, records] = await Promise.all([
     deps.getRecentMessages(sessionId, COMPANION_HISTORY_LIMIT),
     wantMemory
       ? deps
@@ -454,9 +553,15 @@ export async function askCompanion(
     wantRecall
       ? deps.recallSessions(question, COMPANION_RECALL_TOP_K).catch(() => [] as SessionRecallHit[])
       : Promise.resolve([] as SessionRecallHit[]),
+    // Conversation records date the recall fragments in the context AND map
+    // the sources afterwards — one scan serves both. A failed scan degrades
+    // to undated fragments instead of sinking the turn.
+    wantRecall
+      ? deps.listConversationRecords().catch(() => [] as CompanionConversationRecord[])
+      : Promise.resolve([] as CompanionConversationRecord[]),
   ]);
 
-  const context = buildCompanionContext({ memories, depositDigests, recallHits, history });
+  const context = buildCompanionContext({ memories, depositDigests, recallHits, history, records });
   const request: AgentRunRequest = {
     kind: "companion",
     sessionId,
@@ -471,28 +576,41 @@ export async function askCompanion(
 
   // Streaming is opt-in per turn: the UI passes live-typing callbacks and the
   // host bridge must expose the stream pair; otherwise the plain call runs.
+  // LLM-stage failures are re-thrown as CompanionTurnError with the canonical
+  // gateway category so the chat pane can tell "网络连不上" from "服务配置问题".
   let reasoning = "";
   let result: AgentResult;
-  if (input.onStream && deps.runAgentStream && deps.onAgentStreamChunk) {
-    const runId = crypto.randomUUID();
-    let accumulated = "";
-    const off = deps.onAgentStreamChunk(runId, (chunk) => {
-      if (chunk.delta) {
-        accumulated += chunk.delta;
-        input.onStream?.(accumulated);
+  try {
+    if (input.onStream && deps.runAgentStream && deps.onAgentStreamChunk) {
+      const runId = crypto.randomUUID();
+      let accumulated = "";
+      const off = deps.onAgentStreamChunk(runId, (chunk) => {
+        if (chunk.delta) {
+          accumulated += chunk.delta;
+          input.onStream?.(accumulated);
+        }
+        if (chunk.reasoning) {
+          reasoning += chunk.reasoning;
+          input.onReasoning?.(reasoning);
+        }
+      });
+      try {
+        result = await deps.runAgentStream(request, runId);
+      } finally {
+        off();
       }
-      if (chunk.reasoning) {
-        reasoning += chunk.reasoning;
-        input.onReasoning?.(reasoning);
-      }
-    });
-    try {
-      result = await deps.runAgentStream(request, runId);
-    } finally {
-      off();
+    } else {
+      result = await deps.runAgent(request);
     }
-  } else {
-    result = await deps.runAgent(request);
+  } catch (error) {
+    if (error instanceof CompanionTurnError || error instanceof CompanionSessionLostError) {
+      throw error;
+    }
+    throw new CompanionTurnError(
+      classifyChatError(error),
+      error instanceof Error ? error.message : "夜话暂时没能回答",
+      { cause: error },
+    );
   }
   const { mood, body } = splitCompanionResult(result.content);
   const trimmedReasoning = reasoning.trim();
@@ -500,9 +618,7 @@ export async function askCompanion(
     ? trimmedReasoning.slice(0, COMPANION_REASONING_PERSIST_CHARS)
     : undefined;
   const sources =
-    recallHits.length > 0
-      ? mapCompanionRecallSources(recallHits, await deps.listConversationRecords())
-      : [];
+    recallHits.length > 0 ? mapCompanionRecallSources(recallHits, records) : [];
 
   const now = deps.now();
   if (!isOpener) {

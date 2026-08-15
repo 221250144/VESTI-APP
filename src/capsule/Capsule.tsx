@@ -6,6 +6,12 @@ import { CUSTOM_SKIN_ID, DEFAULT_SKIN_ID, resolveSkin } from './skins';
 import { QuickAsk } from './QuickAsk';
 import { RelayFlow } from './RelayFlow';
 import { PromptAssist } from './PromptAssist';
+import {
+  isAmbientBubbleEnabled,
+  isAgentNotifyEnabled,
+  setAmbientBubbleEnabled,
+  setAgentNotifyEnabled,
+} from '../ui/companion/ambientBubble';
 import owlCalm from '../ui/assets/owl/calm.png';
 import owlThinking from '../ui/assets/owl/thinking.png';
 import owlDelighted from '../ui/assets/owl/delighted.png';
@@ -52,6 +58,8 @@ export function Capsule() {
   const [dockStatus, setDockStatus] = useState<CapsuleDockStatus | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [ambientEnabled, setAmbientEnabled] = useState<boolean>(true);
+  const [agentNotifyEnabled, setAgentNotifyEnabledState] = useState<boolean>(true);
   const [dragging, setDragging] = useState(false);
   const dragFrameRef = useRef<number | null>(null);
   const pendingPointRef = useRef<{ x: number; y: number } | null>(null);
@@ -92,6 +100,12 @@ export function Capsule() {
     void bridge.getUiPreference('theme').then(value => apply('theme', value));
     void bridge.getUiPreference('owlSkin').then(value => apply('owlSkin', value));
     return bridge.onUiPreferenceChanged(apply);
+  }, []);
+
+  // Load the bubble/notify toggles.
+  useEffect(() => {
+    void isAmbientBubbleEnabled().then(setAmbientEnabled).catch(() => undefined);
+    void isAgentNotifyEnabled().then(setAgentNotifyEnabledState).catch(() => undefined);
   }, []);
 
   // Load the DIY skin artwork when the custom slot is selected.
@@ -360,6 +374,43 @@ export function Capsule() {
                   <img className="icon" src={owlCalm} alt="" draggable={false} />
                   {copy.nightChat}
                 </button>
+              </div>
+
+              <div className="capsule-toggles">
+                <label className="capsule-toggle">
+                  <span className="min-w-0">
+                    <span className="capsule-toggle-label">{copy.ambientBubble}</span>
+                    <span className="capsule-toggle-hint">{copy.ambientBubbleHint}</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    className="peer sr-only"
+                    checked={ambientEnabled}
+                    onChange={(event) => {
+                      const next = event.target.checked;
+                      setAmbientEnabled(next);
+                      void setAmbientBubbleEnabled(next);
+                    }}
+                  />
+                  <span className="capsule-toggle-switch" aria-hidden="true" />
+                </label>
+                <label className="capsule-toggle">
+                  <span className="min-w-0">
+                    <span className="capsule-toggle-label">{copy.agentNotify}</span>
+                    <span className="capsule-toggle-hint">{copy.agentNotifyHint}</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    className="peer sr-only"
+                    checked={agentNotifyEnabled}
+                    onChange={(event) => {
+                      const next = event.target.checked;
+                      setAgentNotifyEnabledState(next);
+                      void setAgentNotifyEnabled(next);
+                    }}
+                  />
+                  <span className="capsule-toggle-switch" aria-hidden="true" />
+                </label>
               </div>
             </div>
 
