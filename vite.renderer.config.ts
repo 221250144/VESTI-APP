@@ -1,6 +1,13 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+/** Resolve to a UTF-8-normalized absolute path so Vite's /@fs/ URL handler
+ *  encodes non-ASCII segments correctly on Windows. */
+function aliasPath(...segments: string[]): string {
+  return fileURLToPath(pathToFileURL(path.resolve(__dirname, ...segments)));
+}
 
 export default defineConfig({
   plugins: [react()],
@@ -16,8 +23,8 @@ export default defineConfig({
     alias: {
       // Consume workspace UI packages from source so the renderer shares
       // a single React instance and picks up Tailwind classes directly.
-      '@vesti/ui': path.resolve(__dirname, 'packages/vesti-ui/src/index.ts'),
-      '@vesti/content-package': path.resolve(__dirname, 'packages/vesti-content-package/src/index.ts'),
+      '@vesti/ui': aliasPath('packages/vesti-ui/src/index.ts'),
+      '@vesti/content-package': aliasPath('packages/vesti-content-package/src/index.ts'),
     },
   },
 });
