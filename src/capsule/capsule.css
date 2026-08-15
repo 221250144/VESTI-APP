@@ -1249,3 +1249,11 @@ body,
   outline: 2px solid var(--capsule-accent);
   outline-offset: 2px;
 }
+
+/* Home view overflow guard: with the taller default panel the sections fit,
+   but on short work areas they keep natural height and scroll instead of
+   being crushed into each other. */
+.capsule-home {
+  overflow-y: auto;
+  overflow-x: hidden;
+}

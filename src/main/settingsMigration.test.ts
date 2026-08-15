@@ -24,9 +24,11 @@ describe('capture settings migration', () => {
 });
 
 describe('LLM output limit migration', () => {
-  it('migrates only the legacy Demo default of 1600 to Auto', () => {
+  it('migrates small legacy Demo caps (1600 and earlier 128) to Auto', () => {
     expect(normalizeMaxTokens(1600, 'demo_proxy', 3)).toBe(0);
+    expect(normalizeMaxTokens(128, 'demo_proxy', 3)).toBe(0);
     expect(normalizeMaxTokens(1600, 'custom_byok', 3)).toBe(1600);
+    expect(normalizeMaxTokens(128, 'custom_byok', 3)).toBe(128);
   });
 
   it('preserves explicit positive limits without the old 16384 cap', () => {

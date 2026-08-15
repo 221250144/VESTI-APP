@@ -239,7 +239,7 @@ describe('CapsuleWindowService bubble form', () => {
     await service.showBubble({ text: 'hi', mood: null, timeoutMs: 8_000 });
     await service.setExpanded(true);
     expect(service.getState().bubble).toBeNull();
-    expect(win.bounds).toEqual({ x: 1564, y: 632, width: 340, height: 344 });
+    expect(win.bounds).toEqual({ x: 1564, y: 496, width: 340, height: 480 });
     vi.advanceTimersByTime(10_000);
     expect(service.getState().expanded).toBe(true);
   });

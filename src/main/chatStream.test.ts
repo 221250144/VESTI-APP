@@ -16,7 +16,15 @@ describe('parseChatStreamData', () => {
       parseChatStreamData(
         JSON.stringify({ choices: [{ delta: { content: '你好' } }] }),
       ),
-    ).toEqual({ content: '你好', reasoning: '', usage: null, model: null, done: false });
+    ).toEqual({ content: '你好', reasoning: '', usage: null, model: null, finishReason: null, done: false });
+  });
+
+  it('parses the terminal finish_reason', () => {
+    expect(
+      parseChatStreamData(
+        JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] }),
+      ),
+    ).toEqual({ content: '', reasoning: '', usage: null, model: null, finishReason: 'length', done: false });
   });
 
   it('parses a reasoning delta and the chunk model id', () => {
@@ -32,6 +40,7 @@ describe('parseChatStreamData', () => {
       reasoning: '用户在问…',
       usage: null,
       model: 'deepseek-v4-flash',
+      finishReason: null,
       done: false,
     });
   });
@@ -46,6 +55,7 @@ describe('parseChatStreamData', () => {
       reasoning: '',
       usage: { promptTokens: 120, completionTokens: 34 },
       model: null,
+      finishReason: null,
       done: false,
     });
   });
@@ -61,7 +71,7 @@ describe('parseChatStreamData', () => {
   it('degrades non-string delta fields to empty strings', () => {
     expect(
       parseChatStreamData(JSON.stringify({ choices: [{ delta: { content: null } }] })),
-    ).toEqual({ content: '', reasoning: '', usage: null, model: null, done: false });
+    ).toEqual({ content: '', reasoning: '', usage: null, model: null, finishReason: null, done: false });
   });
 });
 
@@ -154,6 +164,9 @@ describe('classifyChatError', () => {
   it('maps empty-answer contract failures to empty', () => {
     expect(classifyChatError(new Error('模型没有返回可显示的内容'))).toBe('empty');
     expect(classifyChatError(new Error('模型服务未返回流式响应体'))).toBe('empty');
+    expect(
+      classifyChatError(new Error('模型输出达到 Token 上限，回答被截断为空。请在设置中把「最大输出 Token」调大或设为 0（不限）')),
+    ).toBe('empty');
   });
 
   it('degrades anything else (and non-errors) to unknown without throwing', () => {

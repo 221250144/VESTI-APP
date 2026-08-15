@@ -39,6 +39,15 @@ const KIND_MIN_MAX_TOKENS: Record<string, number> = {
   // Learn route synthesis (V4): title + 2-4 sentence interpretation + next
   // steps as one JSON document per route; small caps risk mid-JSON truncation.
   'learn-synthesis': 2048,
+  // 夜话 / 圆桌 / 提示词优化: reasoning models (deepseek-v4-flash) spend
+  // completion tokens on the thinking trace first — a small user cap (the
+  // legacy 128/1600 defaults) is eaten entirely by reasoning and the visible
+  // answer comes back EMPTY, surfacing as the misleading "misconfigured
+  // service" banner. These floors keep a real answer possible.
+  companion: 2048,
+  'roundtable-turn': 2048,
+  'prompt-improve': 2048,
+  'prompt-continue': 2048,
 };
 
 function effectiveMaxTokens(kind: string, configured: number): number {
@@ -326,7 +335,7 @@ export class AgentService {
       throw await this.networkError(error, endpoint);
     }
     const payload = await response.json().catch(() => ({})) as {
-      choices?: Array<{ message?: { content?: unknown } }>;
+      choices?: Array<{ message?: { content?: unknown }; finish_reason?: unknown }>;
       error?: { code?: string; message?: string; requestId?: string } | string;
       message?: string;
       model?: unknown;
@@ -358,6 +367,12 @@ export class AgentService {
         ? value.map(part => typeof part === 'string' ? part : '').join('')
         : '';
     const cleaned = content.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+    // A length-terminated completion with no visible answer means the token
+    // cap was eaten by the reasoning trace — say so, so the user raises the
+    // max-output setting instead of blaming the gateway/proxy.
+    if (!cleaned && payload.choices?.[0]?.finish_reason === 'length') {
+      throw new Error('模型输出达到 Token 上限，回答被截断为空。请在设置中把「最大输出 Token」调大或设为 0（不限）');
+    }
     if (!cleaned) throw new Error('模型没有返回可显示的内容');
     const responseModel = typeof payload.model === 'string' ? payload.model.trim() : '';
     const modelUsed = response.headers.get('x-proxy-model-used')?.trim()
@@ -441,6 +456,7 @@ export class AgentService {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let content = '';
+    let finishReason: string | null = null;
     let modelFromChunk: string | null = null;
     let usage: AgentUsageTokens | null = null;
     const feed = createSseDataCollector((data) => {
@@ -448,6 +464,7 @@ export class AgentService {
       if (!parsed || parsed.done) return;
       if (parsed.model) modelFromChunk = parsed.model;
       if (parsed.usage) usage = parsed.usage;
+      if (parsed.finishReason) finishReason = parsed.finishReason;
       if (parsed.content || parsed.reasoning) {
         content += parsed.content;
         onDelta(parsed.content, parsed.reasoning);
@@ -465,6 +482,12 @@ export class AgentService {
     }
 
     const cleaned = content.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+    // A length-terminated stream with no visible answer means the token cap
+    // was eaten by the reasoning trace — say so, so the user raises the
+    // max-output setting instead of blaming the gateway/proxy.
+    if (!cleaned && finishReason === 'length') {
+      throw new Error('模型输出达到 Token 上限，回答被截断为空。请在设置中把「最大输出 Token」调大或设为 0（不限）');
+    }
     if (!cleaned) throw new Error('模型没有返回可显示的内容');
     const modelUsed = response.headers.get('x-proxy-model-used')?.trim()
       || modelFromChunk

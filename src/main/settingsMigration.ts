@@ -30,10 +30,12 @@ export function normalizeEnabledPlatforms(
 }
 
 /**
- * Normalize the optional chat output limit. The previous Demo configuration
- * shipped with 1600 as an implicit product limit, so migrate only that legacy
- * default to Auto. Explicit positive limits (including BYOK's legacy 1600)
- * remain intact.
+ * Normalize the optional chat output limit. Demo-proxy builds historically
+ * shipped small implicit product caps (1600, and earlier 128) that reasoning
+ * models consume entirely with the thinking trace, returning an empty visible
+ * answer — so any small legacy demo cap migrates to Auto. Explicit positive
+ * limits under BYOK (including its legacy 1600) remain intact, as do large
+ * demo values the user clearly chose.
  */
 export function normalizeMaxTokens(
   value: unknown,
@@ -43,7 +45,9 @@ export function normalizeMaxTokens(
   if (
     (typeof settingsVersion !== 'number' || settingsVersion < CURRENT_SETTINGS_VERSION)
     && mode === 'demo_proxy'
-    && value === 1600
+    && typeof value === 'number'
+    && value > 0
+    && value <= 1600
   ) {
     return 0;
   }

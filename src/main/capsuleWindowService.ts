@@ -10,7 +10,9 @@ import {
 
 const BALL_SIZE = 56;
 const PANEL_WIDTH = 340;
-const PANEL_HEIGHT = 344;
+// Home view needs ~440px (header + quick-ask + 3 actions + 2 toggles +\r
+// statusline + footer); 344 squeezed every section together on open.\r
+const PANEL_HEIGHT = 480;
 const EDGE_MARGIN = 16;
 /** Bubble form height: card zone (68px) + a small gap over the ball row. */
 const BUBBLE_HEIGHT = 130;

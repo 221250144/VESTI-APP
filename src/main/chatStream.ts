@@ -13,6 +13,8 @@ export interface ChatStreamDelta {
   usage: { promptTokens: number; completionTokens: number } | null;
   /** Upstream model id when the chunk carries one. */
   model: string | null;
+  /** choices[0].finish_reason on the terminal content chunk ("stop"/"length"). */
+  finishReason: string | null;
   /** True on the terminal `data: [DONE]` frame. */
   done: boolean;
 }
@@ -26,7 +28,7 @@ export function parseChatStreamData(data: string): ChatStreamDelta | null {
   const trimmed = data.trim();
   if (!trimmed) return null;
   if (trimmed === '[DONE]') {
-    return { content: '', reasoning: '', usage: null, model: null, done: true };
+    return { content: '', reasoning: '', usage: null, model: null, finishReason: null, done: true };
   }
   let payload: unknown;
   try {
@@ -36,13 +38,14 @@ export function parseChatStreamData(data: string): ChatStreamDelta | null {
   }
   if (!payload || typeof payload !== 'object') return null;
   const record = payload as {
-    choices?: Array<{ delta?: { content?: unknown; reasoning_content?: unknown } }>;
+    choices?: Array<{ delta?: { content?: unknown; reasoning_content?: unknown }; finish_reason?: unknown }>;
     usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
     model?: unknown;
   };
   const delta = record.choices?.[0]?.delta;
   const contentValue = delta?.content;
   const reasoningValue = delta?.reasoning_content;
+  const finishValue = record.choices?.[0]?.finish_reason;
   const promptTokens = typeof record.usage?.prompt_tokens === 'number' ? record.usage.prompt_tokens : null;
   const completionTokens =
     typeof record.usage?.completion_tokens === 'number' ? record.usage.completion_tokens : null;
@@ -51,6 +54,7 @@ export function parseChatStreamData(data: string): ChatStreamDelta | null {
     reasoning: typeof reasoningValue === 'string' ? reasoningValue : '',
     usage: promptTokens !== null && completionTokens !== null ? { promptTokens, completionTokens } : null,
     model: typeof record.model === 'string' && record.model.trim() ? record.model.trim() : null,
+    finishReason: typeof finishValue === 'string' && finishValue.trim() ? finishValue.trim() : null,
     done: false,
   };
 }
@@ -150,7 +154,7 @@ const AUTH_ERROR_PATTERN =
   /请先在设置中填写\s*API\s*Key|invalid\s+(api[\s_-]?key|token|key)|unauthorized|forbidden|authentication|认证|鉴权|密钥|令牌|api[\s_-]?key/i;
 const MODEL_ERROR_PATTERN =
   /model[^\n]{0,80}(not found|does not exist|unavailable|not supported)|no such model|模型[^\n]{0,20}(不存在|不可用|未找到|不支持)/i;
-const EMPTY_RESULT_PATTERN = /模型没有返回可显示的内容|模型服务未返回流式响应体/;
+const EMPTY_RESULT_PATTERN = /模型没有返回可显示的内容|模型服务未返回流式响应体|输出达到\s*Token\s*上限/;
 
 /** Read an HTTP status off an LlmGatewayError-shaped object (`details.status`)
  * or a bare `status` field; undefined when nothing structured survived. */
