@@ -16,6 +16,9 @@ import type { ExploreMessage } from "../db/types";
 import {
   askCompanion,
   buildCompanionContext,
+  companionErrorCategory,
+  CompanionSessionLostError,
+  CompanionTurnError,
   COMPANION_CONTEXT_BUDGET_CHARS,
   COMPANION_DEPOSIT_DIGEST_CHARS,
   COMPANION_MEMORY_LIMIT,
@@ -97,14 +100,14 @@ describe("buildCompanionContext", () => {
     expect(text).toBe(
       [
         "【关于用户的长期记忆】",
-        "- [preference] 偏好简洁的中文回复",
-        "- [goal] 正在推进记忆空间",
+        "- [preference]（2026-01-01）偏好简洁的中文回复",
+        "- [goal]（2026-01-01）正在推进记忆空间",
         "",
         "【用户的沉淀文档（摘要）】",
-        "- 《写作风格》用户写作 偏口语化",
+        "- 《写作风格》（2026-01-01）用户写作 偏口语化",
         "",
         "【相关历史对话片段】",
-        "- 《上次复盘》聊了发布计划 — 下周冻结需求",
+        "- 《上次复盘》（Kimi Code）：聊了发布计划 — 片段：下周冻结需求",
         "",
         "【你们最近的交谈】",
         "用户：今天有点累",
@@ -135,7 +138,38 @@ describe("buildCompanionContext", () => {
       recallHits: [],
       history: [],
     });
-    expect(text).toBe(`【用户的沉淀文档（摘要）】\n- 《长文档》${"x".repeat(COMPANION_DEPOSIT_DIGEST_CHARS)}`);
+    expect(text).toBe(`【用户的沉淀文档（摘要）】\n- 《长文档》（2026-01-01）${"x".repeat(COMPANION_DEPOSIT_DIGEST_CHARS)}`);
+  });
+
+  it("dates recall fragments from the matched conversation record", () => {
+    const text = buildCompanionContext({
+      memories: [],
+      depositDigests: [],
+      recallHits: [
+        makeHit({
+          sessionId: "cli-1",
+          title: "发布复盘",
+          platform: "Claude Code",
+          oneLiner: "聊了发布计划",
+          snippet: "下周冻结需求",
+        }),
+      ],
+      history: [],
+      records: [
+        { id: 7, cliId: "cli-1", title: "发布复盘", platform: "Claude Code", updatedAt: new Date(2026, 7, 9).getTime() },
+      ],
+    });
+    expect(text).toContain("- 《发布复盘》（Claude Code · 2026-08-09）：聊了发布计划 — 片段：下周冻结需求");
+  });
+
+  it("keeps recall lines informative when no local record matches (platform only)", () => {
+    const text = buildCompanionContext({
+      memories: [],
+      depositDigests: [],
+      recallHits: [makeHit({ title: "旧会话", platform: "Kimi Code", oneLiner: null, snippet: "只有片段" })],
+      history: [],
+    });
+    expect(text).toContain("- 《旧会话》（Kimi Code）：片段：只有片段");
   });
 
   it("drops recall hits before trimming history when over budget", () => {
@@ -371,7 +405,7 @@ describe("askCompanion", () => {
     expect(request.template).toBe("listener");
     expect(request.persist).toBe(false);
     expect(request.transcriptOverride).toContain("【关于用户的长期记忆】");
-    expect(request.transcriptOverride).toContain("- [emotion] 最近在赶发布");
+    expect(request.transcriptOverride).toContain("- [emotion]（2026-01-01）最近在赶发布");
     expect(request.transcriptOverride).toContain("【用户的沉淀文档（摘要）】");
     expect(request.transcriptOverride).toContain("【相关历史对话片段】");
     expect(request.transcriptOverride).toContain("发布片段");
@@ -447,7 +481,7 @@ describe("askCompanion", () => {
       { kind: "deposit", status: "active", limit: 5 },
     ]);
     expect(calls.recallQueries).toEqual([]);
-    expect(calls.agentRequests[0].transcriptOverride).toContain("- [profile] 偏好中文");
+    expect(calls.agentRequests[0].transcriptOverride).toContain("- [profile]（2026-01-01）偏好中文");
     expect(calls.agentRequests[0].transcriptOverride).not.toContain("【相关历史对话片段】");
   });
 
@@ -470,14 +504,74 @@ describe("askCompanion", () => {
     expect(answer.content).toBe("没有情绪标签的回答");
   });
 
-  it("propagates runAgent failures to the caller", async () => {
+  it("propagates runAgent failures to the caller as a classified CompanionTurnError", async () => {
     const { deps } = makeDeps();
     deps.runAgent = vi.fn(async () => {
-      throw new Error("LLM offline");
+      throw new Error("无法连接模型服务：fetch failed。当前为直连网络。");
     });
-    await expect(
-      askCompanion({ sessionId: "sess-1", question: "hi" }, deps),
-    ).rejects.toThrow("LLM offline");
+    const failure = await askCompanion({ sessionId: "sess-1", question: "hi" }, deps).catch(
+      (error) => error,
+    );
+    expect(failure).toBeInstanceOf(CompanionTurnError);
+    expect((failure as CompanionTurnError).category).toBe("network");
+    expect((failure as Error).message).toContain("无法连接模型服务");
+  });
+
+  it("classifies credit exhaustion as credits", async () => {
+    const { deps } = makeDeps();
+    deps.runAgent = vi.fn(async () => {
+      throw new Error("[CREDITS_EXHAUSTED] 今日免费积分已用完，零点自动重置");
+    });
+    const failure = await askCompanion({ sessionId: "sess-1", question: "hi" }, deps).catch(
+      (error) => error,
+    );
+    expect(failure).toBeInstanceOf(CompanionTurnError);
+    expect((failure as CompanionTurnError).category).toBe("credits");
+  });
+
+  it("classifies a mid-stream transport failure too (partial output is not persisted)", async () => {
+    const { deps, calls } = makeDeps({ streaming: true });
+    deps.runAgentStream = vi.fn(async () => {
+      throw new Error("无法连接模型服务：socket hang up");
+    });
+    const failure = await askCompanion(
+      { sessionId: "sess-1", question: "hi", onStream: () => undefined },
+      deps,
+    ).catch((error) => error);
+    expect(failure).toBeInstanceOf(CompanionTurnError);
+    expect((failure as CompanionTurnError).category).toBe("network");
+    expect(calls.addedMessages).toHaveLength(0);
+  });
+
+  it("fails fast with CompanionSessionLostError when the target session is gone", async () => {
+    const { deps, calls } = makeDeps({});
+    deps.getSession = vi.fn(async () => null);
+    const failure = await askCompanion({ sessionId: "sess-gone", question: "还在吗" }, deps).catch(
+      (error) => error,
+    );
+    expect(failure).toBeInstanceOf(CompanionSessionLostError);
+    expect((failure as CompanionSessionLostError).sessionId).toBe("sess-gone");
+    // Nothing spent, nothing persisted into an orphaned session.
+    expect(calls.agentRequests).toHaveLength(0);
+    expect(calls.addedMessages).toHaveLength(0);
+  });
+
+  it("treats a failed existence probe as unknown and lets the turn proceed", async () => {
+    const { deps, calls } = makeDeps({});
+    deps.getSession = vi.fn(async () => {
+      throw new Error("dexie closed");
+    });
+    const answer = await askCompanion({ sessionId: "sess-1", question: "hi" }, deps);
+    expect(answer.sessionId).toBe("sess-1");
+    expect(calls.agentRequests).toHaveLength(1);
+  });
+
+  it("confirms an existing session via the probe before the LLM call", async () => {
+    const { deps } = makeDeps({});
+    deps.getSession = vi.fn(async (sessionId: string) => ({ id: sessionId }));
+    const answer = await askCompanion({ sessionId: "sess-1", question: "hi" }, deps);
+    expect(answer.sessionId).toBe("sess-1");
+    expect(deps.getSession).toHaveBeenCalledWith("sess-1");
   });
 
   it("streams deltas and reasoning to the callbacks and persists the reasoning", async () => {
@@ -571,5 +665,17 @@ describe("askCompanion opener turns", () => {
     await askCompanion({ sessionId: "sess-1", question: "晚上好", opener: true }, deps);
     expect(calls.addedMessages[0].message.role).toBe("user");
     expect(calls.renames).toEqual([]);
+  });
+});
+
+describe("companionErrorCategory", () => {
+  it("reads the category off structured turn errors", () => {
+    expect(companionErrorCategory(new CompanionSessionLostError("sess-1"))).toBe("session-lost");
+    expect(companionErrorCategory(new CompanionTurnError("auth", "HTTP 401"))).toBe("auth");
+  });
+
+  it("classifies raw failures (persistence/IO) through the same taxonomy", () => {
+    expect(companionErrorCategory(new Error("[CREDITS_EXHAUSTED] 积分用完"))).toBe("credits");
+    expect(companionErrorCategory(new Error("dexie exploded"))).toBe("unknown");
   });
 });

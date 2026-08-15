@@ -2,16 +2,18 @@
 
 // 夜话 chat panel: the header (title + persona / memory-scope switchers), the
 // bubble stream (user right, 夜话 left with the mood-resolved owl avatar,
-// Markdown bodies, recall-source chips), the thinking indicator, the gentle
-// error bubble, the empty state and the composer. State and IO live in the
-// coordinator (../explore-tab.tsx); view-model mapping lives in
-// ./companionView.ts.
+// Markdown bodies, recall-source chips), the thinking indicator, the
+// classified gentle error banner (network vs config vs credits vs
+// session-lost, with retry / new-chat recovery), the empty state and the
+// composer. State and IO live in the coordinator (../explore-tab.tsx);
+// view-model mapping lives in ./companionView.ts.
 
 import { useMemo, type RefObject } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { Loader2, PanelLeftClose, PanelLeftOpen, Send } from "lucide-react";
 import type {
+  CompanionErrorView,
   CompanionMemoryScope,
   CompanionMood,
   CompanionOwlIcons,
@@ -246,33 +248,114 @@ function ThinkingRow({
   );
 }
 
+// ---- gentle error banner --------------------------------------------------------------
+
+/** Per-category copy resolution: the banner title/hint the failure maps to.
+ * unknown failures keep the classic generic title without a hint; local
+ * (storage) failures get the load-failed pair. */
+function errorCopy(
+  category: CompanionErrorView["category"],
+  labels: ExploreLabels["companion"],
+): { title: string; hint: string | null } {
+  switch (category) {
+    case "network":
+      return { title: labels.errorNetworkTitle, hint: labels.errorNetworkHint };
+    case "credits":
+      return { title: labels.errorCreditsTitle, hint: labels.errorCreditsHint };
+    case "auth":
+    case "model":
+    case "empty":
+      return { title: labels.errorConfigTitle, hint: labels.errorConfigHint };
+    case "local":
+      return { title: labels.loadFailedTitle, hint: labels.loadFailedHint };
+    case "session-lost":
+      return { title: labels.sessionLostTitle, hint: labels.sessionLostBody };
+    default:
+      return { title: labels.errorTitle, hint: null };
+  }
+}
+
+/**
+ * The gentle failure row: a categorized, warm banner instead of a bare error
+ * string. Network vs service-config get different guidance (check the network
+ * vs open Settings), credit exhaustion explains the reset, a vanished
+ * conversation offers a one-tap 新的夜话, and retryable failures carry a
+ * retry button. The raw detail stays as fine print for the curious.
+ */
 function ErrorRow({
   error,
   labels,
   owlIcons,
   onDismiss,
+  onRetry,
+  onNewChat,
 }: {
-  error: string;
+  error: CompanionErrorView;
   labels: ExploreLabels;
   owlIcons: CompanionOwlIcons | undefined;
   onDismiss: () => void;
+  /** Present when the failed action can be re-fired (send / opener / reload). */
+  onRetry?: (() => void) | null;
+  /** Session-lost banner's primary action. */
+  onNewChat?: () => void;
 }) {
+  const copy = errorCopy(error.category, labels.companion);
+  const isSessionLost = error.category === "session-lost";
   return (
     <div className="py-3">
       <div className="mx-auto flex max-w-3xl gap-3 px-4">
-        <OwlAvatar icons={owlIcons} mood="sleepy" className="h-9 w-9 shrink-0 rounded-full" />
+        <OwlAvatar
+          icons={owlIcons}
+          mood={isSessionLost ? "warm" : "sleepy"}
+          className="h-9 w-9 shrink-0 rounded-full"
+        />
         <div className="min-w-0 flex-1">
           <p className="mb-1 text-xs font-sans text-text-tertiary">{labels.companion.title}</p>
-          <div className="rounded-2xl rounded-tl-sm border border-danger/30 bg-danger/5 px-4 py-3">
-            <p className="text-sm font-sans text-text-primary">{labels.companion.errorTitle}</p>
-            <p className="mt-1 text-xs font-sans leading-relaxed text-text-secondary">{error}</p>
-            <button
-              type="button"
-              onClick={onDismiss}
-              className="mt-2 text-xs font-sans text-text-tertiary transition-colors hover:text-text-primary"
-            >
-              {labels.dismiss}
-            </button>
+          <div
+            role="alert"
+            className={`rounded-2xl rounded-tl-sm border px-4 py-3 ${
+              isSessionLost
+                ? "border-border-subtle bg-bg-surface-card"
+                : "border-danger/30 bg-danger/5"
+            }`}
+          >
+            <p className="text-sm font-sans text-text-primary">{copy.title}</p>
+            {copy.hint ? (
+              <p className="mt-1 text-xs font-sans leading-relaxed text-text-secondary">
+                {copy.hint}
+              </p>
+            ) : null}
+            {error.message && error.message !== copy.title ? (
+              <p className="mt-1.5 break-words text-[11px] font-sans leading-relaxed text-text-tertiary">
+                {error.message}
+              </p>
+            ) : null}
+            <div className="mt-2 flex items-center gap-3">
+              {isSessionLost && onNewChat ? (
+                <button
+                  type="button"
+                  onClick={onNewChat}
+                  className="rounded-md bg-accent-primary px-3 py-1 text-xs font-sans text-text-inverse transition-colors hover:bg-accent-primary/90"
+                >
+                  {labels.companion.sessionLostAction}
+                </button>
+              ) : onRetry ? (
+                <button
+                  type="button"
+                  onClick={onRetry}
+                  className="rounded-md bg-accent-primary px-3 py-1 text-xs font-sans text-text-inverse transition-colors hover:bg-accent-primary/90"
+                >
+                  {labels.companion.retry}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                onClick={onDismiss}
+                className="text-xs font-sans text-text-tertiary transition-colors hover:text-text-primary"
+              >
+                {labels.dismiss}
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -294,8 +377,13 @@ export interface CompanionChatProps {
   isSubmitting: boolean;
   /** In-flight streaming turn (null = idle or host without streaming). */
   streaming?: { raw: string; reasoning: string } | null;
-  error: string | null;
+  /** Classified failure shown as the gentle banner (null = no error). */
+  error: CompanionErrorView | null;
   onDismissError: () => void;
+  /** Re-fire the failed action (failed send / opener / history reload). */
+  onRetryError?: (() => void) | null;
+  /** Session-lost banner's one-tap recovery: start a fresh 夜话. */
+  onNewChat: () => void;
   currentSessionTitle?: string | null;
   /** No session and nothing on screen yet: the big-owl welcome. */
   showEmptyState: boolean;
@@ -322,6 +410,8 @@ export function CompanionChat({
   streaming,
   error,
   onDismissError,
+  onRetryError,
+  onNewChat,
   currentSessionTitle,
   showEmptyState,
   sidebarOpen,
@@ -448,6 +538,8 @@ export function CompanionChat({
                 labels={labels}
                 owlIcons={owlIcons}
                 onDismiss={onDismissError}
+                onRetry={onRetryError}
+                onNewChat={onNewChat}
               />
             ) : null}
             <div ref={messagesEndRef} />

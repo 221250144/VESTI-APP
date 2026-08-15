@@ -3,6 +3,7 @@ import type { ExploreMessage } from "../../types";
 import {
   COMPANION_MEMORY_SCOPE_PREF_KEY,
   COMPANION_PERSONA_PREF_KEY,
+  companionErrorFrom,
   loadCompanionPreferences,
   normalizeCompanionMemoryScope,
   normalizeCompanionMood,
@@ -226,5 +227,36 @@ describe("streamDisplayBody", () => {
 
   it("keeps content unchanged when the first line is not a tag", () => {
     expect(streamDisplayBody("先回答问题\ncalm 在第二行不算")).toBe("先回答问题\ncalm 在第二行不算");
+  });
+});
+
+describe("companionErrorFrom", () => {
+  it("prefers the structured category the host stamps on the error", () => {
+    expect(
+      companionErrorFrom(Object.assign(new Error("HTTP 401"), { category: "auth" })),
+    ).toEqual({ category: "auth", message: "HTTP 401" });
+    expect(
+      companionErrorFrom(Object.assign(new Error("积分用完"), { category: "credits" })).category,
+    ).toBe("credits");
+  });
+
+  it("recognizes the lost-session error by name", () => {
+    const err = Object.assign(new Error("这场夜话已经不在了"), { name: "CompanionSessionLostError" });
+    expect(companionErrorFrom(err).category).toBe("session-lost");
+  });
+
+  it("ignores a bogus category and falls back to message markers", () => {
+    expect(
+      companionErrorFrom(Object.assign(new Error("[CREDITS_EXHAUSTED] 用完"), { category: "bogus" })).category,
+    ).toBe("credits");
+    expect(companionErrorFrom(new Error("无法连接模型服务：fetch failed")).category).toBe("network");
+    expect(companionErrorFrom(new Error("The operation timed out.")).category).toBe("network");
+    expect(companionErrorFrom(new Error("请先在设置中填写 API Key")).category).toBe("auth");
+  });
+
+  it("degrades anything else to unknown without throwing", () => {
+    expect(companionErrorFrom(new Error("dexie exploded")).category).toBe("unknown");
+    expect(companionErrorFrom(undefined)).toEqual({ category: "unknown", message: "" });
+    expect(companionErrorFrom(null).category).toBe("unknown");
   });
 });

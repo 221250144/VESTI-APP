@@ -20,12 +20,14 @@ import {
   Sparkles,
 } from "lucide-react";
 import { SendToMenu } from "../components/SendToMenu";
+import { WeeklyContributionGrid } from "../components/WeeklyContributionGrid";
 import { sanitizeFileBaseName } from "../lib/extractMarkdown";
 import type {
   DailyLog,
   DailyLogOverview,
   RelayAvailability,
   StorageApi,
+  WeeklyContributionDay,
   WeeklyReport,
 } from "../types";
 
@@ -147,6 +149,21 @@ export function DailyTab({ storage, labels, sendToLabels }: DailyTabProps) {
     () => Math.max(1, ...(overview?.week ?? []).map((day) => day.messages)),
     [overview],
   );
+
+  /** GitHub-style contribution grid for the last 7 days (extension parity). */
+  const contributionGrid = useMemo<WeeklyContributionDay[]>(() => {
+    if (!overview) return [];
+    return overview.week.map((day) => {
+      const ratio = day.messages / weekMaxMessages;
+      let intensity = 0;
+      if (day.messages === 0) intensity = 0;
+      else if (ratio <= 0.25) intensity = 1;
+      else if (ratio <= 0.5) intensity = 2;
+      else if (ratio <= 0.75) intensity = 3;
+      else intensity = 4;
+      return { date: day.date, count: day.messages, intensity };
+    });
+  }, [overview, weekMaxMessages]);
 
   const selectDaily = (id: number) => {
     setSelection({ kind: "daily", id });
@@ -274,24 +291,11 @@ export function DailyTab({ storage, labels, sendToLabels }: DailyTabProps) {
                   )}
                 </span>
               </div>
-              <div
-                className="mt-2 flex h-10 items-end gap-1"
-                role="img"
-                aria-label={l("statsWeekActivity", "Messages per day, last 7 days")}
-              >
-                {overview.week.map((day) => (
-                  <div
-                    key={day.date}
-                    title={`${day.date} · ${day.messages}`}
-                    className={`flex-1 rounded-sm ${
-                      day.hasLog ? "bg-accent-primary" : "bg-border-subtle"
-                    }`}
-                    style={{
-                      height: `${Math.max(8, Math.round((day.messages / weekMaxMessages) * 100))}%`,
-                      opacity: day.hasLog ? 0.45 + (0.55 * day.messages) / weekMaxMessages : 1,
-                    }}
-                  />
-                ))}
+              <div className="mt-2">
+                <WeeklyContributionGrid
+                  days={contributionGrid}
+                  emptyLabel={l("weeklyGridEmpty", "No activity in the last 7 days.")}
+                />
               </div>
             </section>
           ) : null}

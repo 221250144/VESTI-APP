@@ -76,6 +76,11 @@ const en = {
   prompts: 'Prompt Assistant',
   // 夜话 companion chat (opens the main window's Explore tab)
   nightChat: 'Night Talk',
+  // Bubble toggles
+  ambientBubble: 'Ambient owl',
+  ambientBubbleHint: 'The owl occasionally says hello',
+  agentNotify: 'Agent done alerts',
+  agentNotifyHint: 'Notify when an AI agent finishes a run',
   promptSearchPlaceholder: 'Search prompts…',
   promptEmpty: 'No matching prompts',
   promptNoSnapshot: 'Personal library empty — showing curated catalog only',
@@ -165,6 +170,11 @@ const zh: CapsuleCopy = {
   deliverCli: '生成 CLI 命令',
   prompts: '提示词助手',
   nightChat: '夜话',
+  // 气泡开关
+  ambientBubble: '猫头鹰搭话',
+  ambientBubbleHint: '偶尔冒出一句温柔的问候',
+  agentNotify: '完工提醒',
+  agentNotifyHint: 'AI agent 完成新进展时通知我',
   promptSearchPlaceholder: '搜索提示词…',
   promptEmpty: '没有匹配的提示词',
   promptNoSnapshot: '个人提示词库为空，当前仅显示策展目录',

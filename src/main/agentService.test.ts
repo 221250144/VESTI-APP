@@ -79,6 +79,22 @@ describe('AgentService Demo proxy contract', () => {
     expect(body).not.toHaveProperty('max_tokens');
   });
 
+  it('raises a small user token cap to the per-kind floor for chat kinds', async () => {
+    vi.mocked(net.fetch).mockResolvedValue(new Response(JSON.stringify({
+      choices: [{ message: { content: '温柔的开场' } }],
+    }), { status: 200 }));
+
+    await service(runtime({ maxTokens: 128 })).run(
+      { ...request, kind: 'companion' as const, question: '' },
+      { persist: false },
+    );
+
+    const body = JSON.parse(String(vi.mocked(net.fetch).mock.calls[0][1]?.body));
+    // Reasoning models eat a small cap with the thinking trace, returning an
+    // empty visible answer — the floor keeps a real answer possible.
+    expect(body.max_tokens).toBe(2048);
+  });
+
   it('reuses the Auto body unchanged when falling back to the legacy gateway', async () => {
     vi.mocked(net.fetch)
       .mockResolvedValueOnce(new Response('{}', { status: 503 }))
@@ -177,5 +193,17 @@ describe('AgentService.runStream', () => {
     ).rejects.toThrow('mid-stream boom');
     expect(chunks).toEqual([{ delta: '部分', reasoning: undefined }]);
     expect(vi.mocked(net.fetch)).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a length-terminated empty stream as a token-cap truncation', async () => {
+    vi.mocked(net.fetch).mockResolvedValue(sseBody([
+      JSON.stringify({ choices: [{ delta: { reasoning_content: '长时间思考…' } }] }),
+      JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] }),
+      '[DONE]',
+    ]));
+
+    await expect(
+      service().runStream(request, () => undefined, { persist: false }),
+    ).rejects.toThrow('Token 上限');
   });
 });

@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CREDITS_FILE_NAME,
   CreditError,
@@ -9,6 +9,8 @@ import {
   FREE_DAILY_CREDITS,
   MEMBER_MONTHLY_CREDITS,
   creditCost,
+  normalizeCrowdfundCode,
+  redeemCrowdfundCode,
 } from './creditService';
 
 // Anchor on the 31st so month math crosses a short February, mirroring the
@@ -234,7 +236,225 @@ describe('CreditService', () => {
     expect(balance.used).toBe(205);
   });
 
+  it('migrates a pre-bonus-pool ledger to bonusCredits: 0', async () => {
+    // 奖励池上线前的旧账本没有 bonusCredits 字段,必须能正常读取。
+    // cycleAnchor 写成当前周期起点,避免读取时被滚动清零干扰断言。
+    const day = new Date(now);
+    const cycleStart = new Date(day.getFullYear(), day.getMonth(), day.getDate()).getTime();
+    await fs.writeFile(
+      path.join(directory, CREDITS_FILE_NAME),
+      JSON.stringify({ version: 1, cycleAnchor: cycleStart, cycleUsed: 3, lifetimeUsed: 3, entries: [] }),
+    );
+    const service = createService();
+    await service.initialize();
+
+    const balance = service.getBalance('free');
+    expect(balance.used).toBe(3);
+    expect(balance.remaining).toBe(FREE_DAILY_CREDITS - 3);
+  });
+
   function createService(): CreditService {
     return new CreditService(directory, { now: () => now });
   }
+});
+
+describe('CreditService bonus pool (crowdfund grants)', () => {
+  let directory: string;
+  let now: number;
+
+  beforeEach(async () => {
+    directory = await fs.mkdtemp(path.join(os.tmpdir(), 'vesti-credits-bonus-'));
+    now = Date.UTC(2026, 2, 15, 9, 0, 0);
+  });
+
+  afterEach(async () => {
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+
+  function createService(): CreditService {
+    return new CreditService(directory, { now: () => now });
+  }
+
+  it('grantBonus adds credits on top of the cycle allowance and records a grant entry', async () => {
+    const service = createService();
+    await service.initialize();
+
+    const balance = await service.grantBonus({ tier: 'free', credits: 6_000, label: '众筹兑换 · warm' });
+
+    expect(balance.quota).toBe(FREE_DAILY_CREDITS);
+    expect(balance.used).toBe(0);
+    expect(balance.remaining).toBe(FREE_DAILY_CREDITS + 6_000);
+    expect(balance.recent[0]).toMatchObject({ category: 'grant', credits: 6_000 });
+
+    // 重启后奖励池仍在
+    const restarted = createService();
+    await restarted.initialize();
+    expect(restarted.getBalance('free').remaining).toBe(FREE_DAILY_CREDITS + 6_000);
+  });
+
+  it('rejects non-positive bonus grants', async () => {
+    const service = createService();
+    await service.initialize();
+
+    await expect(service.grantBonus({ tier: 'free', credits: 0, label: 'x' }))
+      .rejects.toEqual(expect.objectContaining<Partial<CreditError>>({ code: 'INVALID_REQUEST' }));
+    await expect(service.grantBonus({ tier: 'free', credits: 2.5, label: 'x' }))
+      .rejects.toEqual(expect.objectContaining<Partial<CreditError>>({ code: 'INVALID_REQUEST' }));
+  });
+
+  it('consumes the cycle allowance first, then dips into the bonus pool', async () => {
+    const service = createService();
+    await service.initialize();
+    await service.grantBonus({ tier: 'free', credits: 50, label: 'grant' });
+
+    // 扣完当日 300 周期额度
+    for (let index = 0; index < 15; index += 1) {
+      await service.consume({ tier: 'free', category: 'image', label: `image-${index}` });
+    }
+    expect(service.getBalance('free').remaining).toBe(50);
+
+    // 周期额度耗尽后从奖励池扣
+    const balance = await service.consume({ tier: 'free', category: 'image', label: 'bonus-image' });
+    expect(balance.used).toBe(300); // cycleUsed 不再涨
+    expect(balance.remaining).toBe(30);
+    expect(balance.lifetimeUsed).toBe(320);
+
+    // 奖励池也耗尽后照旧报 CREDITS_EXHAUSTED
+    await service.consume({ tier: 'free', category: 'image', label: 'bonus-image-2' });
+    await expect(service.consume({ tier: 'free', category: 'image', label: 'one-too-many' }))
+      .rejects.toEqual(expect.objectContaining<Partial<CreditError>>({ code: 'CREDITS_EXHAUSTED' }));
+  });
+
+  it('keeps the bonus pool across cycle resets', async () => {
+    const service = createService();
+    await service.initialize();
+    await service.grantBonus({ tier: 'free', credits: 6_000, label: 'grant' });
+    await service.consume({ tier: 'free', category: 'image', label: 'today' });
+
+    const nextDay = new Date(now);
+    nextDay.setDate(nextDay.getDate() + 1);
+    now = nextDay.getTime();
+
+    const rolled = service.getBalance('free');
+    expect(rolled.used).toBe(0);
+    expect(rolled.remaining).toBe(FREE_DAILY_CREDITS + 6_000);
+  });
+});
+
+describe('normalizeCrowdfundCode', () => {
+  it('normalizes case, whitespace and unicode dashes', () => {
+    expect(normalizeCrowdfundCode('  vesti-7k2m-9qxd-4tbn ')).toBe('VESTI-7K2M-9QXD-4TBN');
+    expect(normalizeCrowdfundCode('VESTI-7K2M—9QXD–4TBN')).toBe('VESTI-7K2M-9QXD-4TBN');
+    expect(normalizeCrowdfundCode('VESTI7K2M9QXD4TBN')).toBe('VESTI-7K2M-9QXD-4TBN');
+  });
+
+  it('rejects non-strings and empty input', () => {
+    expect(normalizeCrowdfundCode(undefined)).toBeNull();
+    expect(normalizeCrowdfundCode(42)).toBeNull();
+    expect(normalizeCrowdfundCode('   ')).toBeNull();
+  });
+});
+
+describe('redeemCrowdfundCode', () => {
+  let directory: string;
+
+  beforeEach(async () => {
+    directory = await fs.mkdtemp(path.join(os.tmpdir(), 'vesti-crowdfund-redeem-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+
+  async function createService(): Promise<CreditService> {
+    const service = new CreditService(directory);
+    await service.initialize();
+    return service;
+  }
+
+  const context = { tier: 'free' as const, memberSince: null };
+
+  function fetchReturning(status: number, body: unknown) {
+    return vi.fn(async () => new Response(JSON.stringify(body), { status }));
+  }
+
+  it('rejects malformed codes locally without hitting the network', async () => {
+    const service = await createService();
+    const fetchImpl = vi.fn();
+
+    const result = await redeemCrowdfundCode(service, 'not-a-code', context, {
+      endpoint: 'https://gate.test/v1/crowdfund/redeem',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result).toEqual({ ok: false, error: 'invalid_code' });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('redeems a valid code: posts it to the gateway and grants the credits', async () => {
+    const service = await createService();
+    const fetchImpl = fetchReturning(200, { ok: true, tier: 'warm', credits: 6_000 });
+
+    const result = await redeemCrowdfundCode(service, 'vesti-7k2m 9qxd-4tbn', context, {
+      endpoint: 'https://gate.test/v1/crowdfund/redeem',
+      token: 'test-token',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    const [endpoint, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(endpoint).toBe('https://gate.test/v1/crowdfund/redeem');
+    expect((init.headers as Record<string, string>)['x-vesti-service-token']).toBe('test-token');
+    expect(JSON.parse(String(init.body))).toEqual({ code: 'VESTI-7K2M-9QXD-4TBN' }); // 已归一化
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.tier).toBe('warm');
+      expect(result.credits).toBe(6_000);
+      expect(result.balance.remaining).toBe(FREE_DAILY_CREDITS + 6_000);
+    }
+  });
+
+  it('maps invalid_code and already_redeemed responses to their UI errors', async () => {
+    const service = await createService();
+
+    const invalid = await redeemCrowdfundCode(service, 'VESTI-7K2M-9QXD-4TBN', context, {
+      endpoint: 'https://gate.test/v1/crowdfund/redeem',
+      fetchImpl: fetchReturning(400, { error: { message: 'invalid_code' } }) as unknown as typeof fetch,
+    });
+    expect(invalid).toEqual({ ok: false, error: 'invalid_code' });
+
+    const used = await redeemCrowdfundCode(service, 'VESTI-7K2M-9QXD-4TBN', context, {
+      endpoint: 'https://gate.test/v1/crowdfund/redeem',
+      fetchImpl: fetchReturning(409, { error: { message: 'already_redeemed' } }) as unknown as typeof fetch,
+    });
+    expect(used).toEqual({ ok: false, error: 'already_redeemed' });
+
+    // 失败不落账
+    expect(service.getBalance('free').remaining).toBe(FREE_DAILY_CREDITS);
+  });
+
+  it('maps network failures and unexpected payloads to network_error', async () => {
+    const service = await createService();
+
+    const offline = await redeemCrowdfundCode(service, 'VESTI-7K2M-9QXD-4TBN', context, {
+      endpoint: 'https://gate.test/v1/crowdfund/redeem',
+      fetchImpl: vi.fn(async () => {
+        throw new Error('offline');
+      }) as unknown as typeof fetch,
+    });
+    expect(offline).toEqual({ ok: false, error: 'network_error' });
+
+    const rateLimited = await redeemCrowdfundCode(service, 'VESTI-7K2M-9QXD-4TBN', context, {
+      endpoint: 'https://gate.test/v1/crowdfund/redeem',
+      fetchImpl: fetchReturning(429, { error: { message: 'rate_limited' } }) as unknown as typeof fetch,
+    });
+    expect(rateLimited).toEqual({ ok: false, error: 'network_error' });
+
+    const malformed = await redeemCrowdfundCode(service, 'VESTI-7K2M-9QXD-4TBN', context, {
+      endpoint: 'https://gate.test/v1/crowdfund/redeem',
+      fetchImpl: fetchReturning(200, { ok: true }) as unknown as typeof fetch,
+    });
+    expect(malformed).toEqual({ ok: false, error: 'network_error' });
+  });
 });

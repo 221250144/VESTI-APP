@@ -19,6 +19,9 @@ const WSL_PROBES: Record<string, string[][]> = {
   codex: [['.codex', 'sessions']],
   'claude-code': [['.claude', 'projects']],
   aider: [['.aider.chat.history.md']],
+  trae: [['.config', 'Trae', 'User'], ['.config', 'Trae CN', 'User'], ['.config', 'TRAE SOLO CN', 'User']],
+  coder: [['.qoder', 'projects'], ['.qoderwork', 'projects'], ['.config', 'Qoder', 'SharedClientCache', 'cli', 'projects']],
+  workbuddy: [['.workbuddy', 'projects']],
 };
 
 export interface WslUserHome {

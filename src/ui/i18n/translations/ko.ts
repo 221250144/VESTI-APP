@@ -1349,7 +1349,7 @@ export const koTranslations = {
       scanClose: "닫기"
     },
     aiti: {
-      modeAsk: "질문",
+      modeAsk: "밤의 대화",
       modeAiti: "AITI",
       modeRoundtable: "원탁",
       title: "당신의 AITI — 사고의 강점",
@@ -1411,7 +1411,7 @@ export const koTranslations = {
       deepenAiFailed: "심화 분석 실패",
       llmMissing: "모델이 설정되지 않았습니다 — 먼저 「설정」에서 LLM을 설정하세요. AI 심화에는 모델이 필요합니다.",
       groundedHint: "과거 대화 {n}개를 배경으로 사용",
-      savedHint: "이 분석은 「Ask」 기록에 저장되었습니다. 언제든 다시 볼 수 있습니다.",
+      savedHint: "이 분석은 「밤의 대화」 기록에 저장되었습니다. 언제든 다시 볼 수 있습니다.",
       synthesisRunning: "학습 경로 해설을 생성하는 중… {done}/{total}",
       synthesisRegenerate: "해설 다시 생성",
       synthesisNextSteps: "추천 다음 단계"
@@ -1440,7 +1440,7 @@ export const koTranslations = {
       empty: "질문을 입력하고 패널을 소집하면 관점과 종합을 볼 수 있습니다.",
       llmMissing: "모델이 설정되지 않았습니다 — 먼저 「설정」에서 LLM을 설정하세요. 토론에는 모델이 필요합니다.",
       seatFailed: "발언 실패",
-      savedHint: "이 토론은 「Ask」 기록에 저장되었습니다. 언제든 다시 볼 수 있습니다.",
+      savedHint: "이 토론은 「밤의 대화」 기록에 저장되었습니다. 언제든 다시 볼 수 있습니다.",
       groundedHint: "과거 대화 {n}개를 배경으로 사용",
       personaSkeptic: "회의론자",
       personaOptimist: "낙관론자",

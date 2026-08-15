@@ -362,6 +362,27 @@ describe("applyDreamMaintainOps", () => {
     const second = applyDreamMaintainOps([makeOp({ op: "DELETE", target_id: "dream:e1" })], byId, ctx);
     expect(second.orphans).toBe(1);
   });
+
+  it("sets ADD entryDate from per-candidate eventDateByContent", () => {
+    const byId = new Map<string, MemoryEntryView>();
+    const eventMap = new Map([["用户在开发 Vesti 记忆功能", "2026-08-11"]]);
+    const result = applyDreamMaintainOps(
+      [
+        makeOp({
+          op: "ADD",
+          tag: "goal",
+          title: "开发记忆功能",
+          content: "用户在开发 Vesti 记忆功能",
+        }),
+        makeOp({ op: "ADD", tag: "goal", content: "没有日期映射的事实" }),
+      ],
+      byId,
+      { ...ctx, eventDateByContent: eventMap },
+    );
+    expect(result.counts.added).toBe(2);
+    expect(result.addedEntries[0].entryDate).toBe("2026-08-11");
+    expect(result.addedEntries[1].entryDate).toBe(TODAY);
+  });
 });
 
 describe("buildDreamJournalMarkdown", () => {
@@ -447,8 +468,8 @@ describe("runDreamPipeline", () => {
     expect(maintainPayload.existing).toEqual([]);
     expect(maintainPayload.candidates).toHaveLength(1);
 
-    // One ADD upsert + one dream-log journal upsert.
-    expect(calls.upserts).toHaveLength(2);
+    // One ADD upsert + one dream-log journal upsert + one owl-diary upsert.
+    expect(calls.upserts).toHaveLength(3);
     const added = calls.upserts[0];
     expect(added.kind).toBe("dream");
     expect(added.title).toBe("开发记忆功能");
@@ -462,6 +483,12 @@ describe("runDreamPipeline", () => {
     expect(journal.contentMarkdown).toContain("## 新增记忆");
     expect(journal.contentMarkdown).toContain("开发记忆功能");
     expect(journal.summary).toContain("新增 1");
+    const owlDiary = calls.upserts[2];
+    expect(owlDiary.id).toBe(`owl-diary:${TODAY}`);
+    expect(owlDiary.kind).toBe("dream-log");
+    expect(owlDiary.title).toBe(`猫头鹰日记 · ${TODAY}`);
+    expect(owlDiary.contentMarkdown).toContain("今天用户");
+    expect(owlDiary.tags).toContain("owl-diary");
 
     // Watermarks advanced.
     expect(calls.metaSets).toEqual([
@@ -639,8 +666,9 @@ describe("runDreamPipeline", () => {
       "dream-extract",
       "dream-extract",
       "dream-maintain",
+      "companion",
     ]);
-    const journal = calls.upserts[calls.upserts.length - 1];
+    const journal = calls.upserts.find((entry) => entry.id === `dream-log:${TODAY}`)!;
     expect(journal.contentMarkdown).toContain("批次 1 提取失败：网关超时");
   });
 
@@ -659,7 +687,7 @@ describe("runDreamPipeline", () => {
     const result = await runDreamPipeline({ mode: "auto" }, makeDeps(sessions, messages));
     expect(result.ok).toBe(true);
     expect(extractCalls).toBe(2);
-    const journal = calls.upserts[calls.upserts.length - 1];
+    const journal = calls.upserts.find((entry) => entry.id === `dream-log:${TODAY}`)!;
     expect(journal.contentMarkdown).not.toContain("提取失败");
   });
 
@@ -670,15 +698,17 @@ describe("runDreamPipeline", () => {
         if (request.kind === "dream-extract") {
           return { content: JSON.stringify([{ tag: "event", fact: "用户发布了 1.0", evidence: "", session_ids: ["cli-1"] }]) };
         }
-        maintainCalls += 1;
-        if (maintainCalls === 1) throw new Error("模型没有返回可显示的内容");
+        if (request.kind === "dream-maintain") {
+          maintainCalls += 1;
+          if (maintainCalls === 1) throw new Error("模型没有返回可显示的内容");
+        }
         return { content: JSON.stringify([{ op: "ADD", target_id: null, tag: "event", title: "发布 1.0", content: "用户发布了 Vesti 1.0", reason: "里程碑" }]) };
       },
     });
     const result = await runDreamPipeline({ mode: "auto" }, makeDeps(sessions, messages));
     expect(result).toMatchObject({ ok: true, added: 1 });
     expect(maintainCalls).toBe(2);
-    const journal = calls.upserts[calls.upserts.length - 1];
+    const journal = calls.upserts.find((entry) => entry.id === `dream-log:${TODAY}`)!;
     expect(journal.contentMarkdown).not.toContain("合并失败");
   });
 
@@ -721,7 +751,7 @@ describe("runDreamPipeline", () => {
     expect(updated?.version).toBe(3);
     expect(updated?.createdAt).toBe(111);
     expect(calls.deletes).toEqual([]);
-    const journal = calls.upserts[calls.upserts.length - 1];
+    const journal = calls.upserts.find((entry) => entry.id === `dream-log:${TODAY}`)!;
     expect(journal.contentMarkdown).toContain("丢弃孤儿操作 1");
   });
 
@@ -755,7 +785,7 @@ describe("runDreamPipeline", () => {
     const roundOneAdded = calls.upserts.find((entry) => entry.kind === "dream");
     expect(roundTwo.existing.map((entry) => entry.id)).toContain(roundOneAdded?.id);
     // 65 candidates fit within the round budget — nothing is dropped.
-    const journal = calls.upserts[calls.upserts.length - 1];
+    const journal = calls.upserts.find((entry) => entry.id === `dream-log:${TODAY}`)!;
     expect(journal.contentMarkdown).not.toContain("丢弃 ");
   });
 
@@ -777,7 +807,7 @@ describe("runDreamPipeline", () => {
     const maintainRequests = calls.agentRequests.filter((r) => r.kind === "dream-maintain");
     expect(maintainRequests).toHaveLength(12);
     // 365 - 12×30 = 5 candidates overflow into the warning.
-    const journal = calls.upserts[calls.upserts.length - 1];
+    const journal = calls.upserts.find((entry) => entry.id === `dream-log:${TODAY}`)!;
     expect(journal.contentMarkdown).toContain("丢弃 5 条");
   });
 
@@ -818,7 +848,7 @@ describe("runDreamPipeline", () => {
     });
     const result = await runDreamPipeline({ mode: "auto" }, makeDeps(sessions, messages));
     expect(result.ok).toBe(true);
-    const journal = calls.upserts[calls.upserts.length - 1];
+    const journal = calls.upserts.find((entry) => entry.id === `dream-log:${TODAY}`)!;
     expect(journal.id).toBe(`dream-log:${TODAY}`);
     expect(journal.version).toBe(4);
     expect(journal.createdAt).toBe(222);

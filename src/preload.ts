@@ -38,6 +38,7 @@ const membership: VestiMembershipApi = {
   getDataContribution: () => ipcRenderer.invoke(IPC.membershipDataContributionGet),
   setDataContribution: enabled =>
     ipcRenderer.invoke(IPC.membershipDataContributionSet, enabled),
+  redeemCrowdfundCode: code => ipcRenderer.invoke(IPC.crowdfundRedeem, code),
   onStatusChanged: listener => {
     const wrapped = (_event: unknown, status: Parameters<typeof listener>[0]) => listener(status);
     ipcRenderer.on(IPC.membershipChanged, wrapped);

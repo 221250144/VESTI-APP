@@ -35,12 +35,15 @@ import type {
 } from '../shared/contracts';
 import { computeBundleFingerprint } from '../shared/exportFingerprint';
 
-const PRIMARY_PLATFORMS: CapturePlatform[] = ['codex', 'cursor', 'kimi-code', 'claude-code'];
+const PRIMARY_PLATFORMS: CapturePlatform[] = ['codex', 'cursor', 'kimi-code', 'claude-code', 'trae', 'coder', 'workbuddy'];
 const SOURCE_LABELS: Record<CapturePlatform, string> = {
   codex: 'Codex',
   cursor: 'Cursor',
   'kimi-code': 'Kimi Code',
   'claude-code': 'Claude Code',
+  trae: 'Trae',
+  coder: 'Qoder',
+  workbuddy: 'WorkBuddy',
 };
 
 /**

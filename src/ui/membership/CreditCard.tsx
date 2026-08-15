@@ -7,6 +7,7 @@ import {
   formatCreditReset,
   MEMBERSHIP_COPY,
 } from "./copy";
+import { CrowdfundCard } from "./CrowdfundCard";
 import { MembershipDocModal } from "./MembershipDocModal";
 
 export interface CreditCardProps {
@@ -59,6 +60,9 @@ export function CreditCard({ membership, llmMode, locale }: CreditCardProps) {
   const percent = quota > 0 ? Math.min(100, Math.max(0, (remaining / quota) * 100)) : 0;
 
   return (
+    // 支持众筹卡片与积分卡同属设置页会员区;SettingsPage 只渲染本组件,
+    // 众筹卡作为其后续兄弟卡片挂在同一个 fragment 里。
+    <>
     <section className="rounded-card border border-border-subtle bg-bg-surface-card p-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
@@ -142,5 +146,7 @@ export function CreditCard({ membership, llmMode, locale }: CreditCardProps) {
 
       <MembershipDocModal open={docOpen} onClose={() => setDocOpen(false)} locale={locale} />
     </section>
+    <CrowdfundCard locale={locale} />
+    </>
   );
 }

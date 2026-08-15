@@ -21,6 +21,14 @@ import { db } from "../db/schema";
 import type { ConversationRecord } from "../db/schema";
 import { listMessages } from "../db/repository";
 import { pad2, toLocalDateString, todayDateString } from "../daily/dailyActivity";
+import {
+  OWL_DIARY_QUESTION,
+  buildOwlDiaryContext,
+  buildOwlDiaryFallback,
+  owlDiarySummary,
+  parseOwlDiaryBody,
+  type OwlDiaryInput,
+} from "./owlDiary";
 
 // ---- Tunables ----------------------------------------------------------------
 
@@ -304,9 +312,19 @@ export function buildDreamMaintainTranscript(
 
 export interface DreamApplyContext {
   today: string;
-  /** Union of the run's candidate session_ids, stamped on every ADD and
-   * merged into UPDATE targets (the ops carry no candidate mapping). */
+  /** Session ids cited by the candidates of the maintain round being applied,
+   * stamped on every ADD and merged into UPDATE targets (the ops carry no
+   * candidate mapping). */
   sourceSessionIds: string[];
+  /** Earliest event day (YYYY-MM-DD) among the round's candidates; ADD entries
+   * record it as their entryDate so the library remembers when the fact
+   * happened, not just when the dream ran. Falls back to `today` when the
+   * round has no derivable event time. */
+  eventDate?: string | null;
+  /** Per-candidate event date keyed by original fact text, used to set the
+   * entryDate of ADD operations. The model's maintain output content usually
+   * mirrors the candidate fact, so we look up by op.content then op.title. */
+  eventDateByContent?: ReadonlyMap<string, string>;
   now: number;
 }
 
@@ -353,6 +371,49 @@ export function dedupeDreamCandidates(
 }
 
 /**
+ * 做梦时间戳 (event time): the earliest activity timestamp among the sessions
+ * a candidate cites. The first time a fact shows up in conversation is the
+ * closest deterministic proxy for when the event actually happened — the
+ * extract/maintain payloads carry no time field, and the main-process prompts
+ * are off-limits to this area, so the pipeline derives it renderer-side.
+ * Returns null when no cited session is known (the model sometimes cites
+ * foreign ids); callers then fall back to the dream day.
+ */
+/** Ignore timestamps before 2001-09-09 — tests use small numbers and some
+ * legacy rows may carry zero/anchor values. Real conversation activityAt is ms
+ * since epoch and well above this threshold. */
+export const DREAM_MIN_PLAUSIBLE_EVENT_TS = 1_000_000_000_000;
+
+export function deriveDreamEventTs(
+  candidate: DreamMemoryCandidate,
+  sessionTsByKey: ReadonlyMap<string, number>,
+): number | null {
+  let earliest: number | null = null;
+  for (const id of candidate.session_ids) {
+    const ts = sessionTsByKey.get(id);
+    if (typeof ts !== "number" || ts < DREAM_MIN_PLAUSIBLE_EVENT_TS) continue;
+    if (earliest === null || ts < earliest) earliest = ts;
+  }
+  return earliest;
+}
+
+/**
+ * Thread the event day into the maintain prompt without touching the
+ * main-process prompt template: renderDreamCandidateList prints the evidence
+ * verbatim, so a `[YYYY-MM-DD]` prefix reaches the model and keeps event
+ * memories in chronological order semantics during the merge. The dedupe key
+ * (tag + fact) never sees the evidence, so markers don't affect dedupe.
+ */
+function withEventMarker(
+  candidate: DreamMemoryCandidate,
+  eventTs: number | null,
+): DreamMemoryCandidate {
+  if (eventTs === null) return candidate;
+  const marker = `[${toLocalDateString(eventTs)}]`;
+  return { ...candidate, evidence: `${marker} ${candidate.evidence}`.trim() };
+}
+
+/**
  * Apply one round of maintain ops against the in-memory library map (mutated
  * in place, so a second round sees the first round's results). IO is left to
  * the caller: it receives the upserts/deletes to persist. Ops naming a
@@ -388,7 +449,11 @@ export function applyDreamMaintainOps(
           prevId: null,
           lastOps: null,
           status: "active",
-          entryDate: ctx.today,
+          entryDate:
+            ctx.eventDateByContent?.get(op.content.trim()) ??
+            ctx.eventDateByContent?.get(op.title.trim()) ??
+            ctx.eventDate ??
+            ctx.today,
           createdAt: ctx.now,
           updatedAt: ctx.now,
         };
@@ -817,21 +882,33 @@ export async function runDreamPipeline(
           `候选记忆超出合并容量（${DREAM_MAINTAIN_MAX_ROUNDS} 轮上限），丢弃 ${overflow} 条`,
         );
       }
+      // Pre-compute per-candidate event timestamps once per round. The same map
+      // is used both to annotate the maintain transcript (so the model keeps
+      // chronological order in mind) and to set entryDate on ADD ops.
+      const sessionTsByKey = new Map(blocks.map((block) => [block.sessionKey, block.activityAt]));
       for (let round = 0; round < rounds.length; round += 1) {
+        const eventDateByContent = new Map<string, string>();
+        const markedCandidates = rounds[round].map((candidate) => {
+          const eventTs = deriveDreamEventTs(candidate, sessionTsByKey);
+          if (eventTs !== null) {
+            eventDateByContent.set(candidate.fact.trim(), toLocalDateString(eventTs));
+          }
+          return withEventMarker(candidate, eventTs);
+        });
         const runRound = async () => {
           const result = await api.runAgent({
             kind: "dream-maintain",
             sessionId: batchAnchor(batches[0]),
             transcriptOverride: buildDreamMaintainTranscript(
               [...byId.values()],
-              rounds[round],
+              markedCandidates,
             ),
             persist: false,
           });
           return applyDreamMaintainOps(
             parseDreamMaintainResult(result.content),
             byId,
-            { today, sourceSessionIds, now: deps.now() },
+            { today, sourceSessionIds, eventDateByContent, now: deps.now() },
           );
         };
         let applied: DreamApplyResult | null = null;
@@ -901,6 +978,55 @@ export async function runDreamPipeline(
       updatedAt: deps.now(),
     };
     await api.upsertMemoryEntry(journal);
+
+    // ---- owl diary (warm third-person journal) -----------------------------------
+    progress({ phase: "journal", message: "正在写下猫头鹰日记…" });
+    const owlDiaryId = `owl-diary:${today}`;
+    const previousOwlDiary = (
+      await api.getMemoryEntries([owlDiaryId]).catch(() => [] as MemoryEntryView[])
+    )[0];
+    const owlInput: OwlDiaryInput = {
+      today,
+      firstFull,
+      sessionsProcessed: processedSessionKeys.length,
+      gatedSessions,
+      cappedBatches,
+      counts,
+      addedEntries,
+      updatedEntries,
+    };
+    let owlBody: string | null = null;
+    try {
+      const owlResult = await api.runAgent({
+        kind: "companion",
+        sessionId: owlDiaryId,
+        transcriptOverride: `${buildOwlDiaryContext(owlInput)}\n\n${OWL_DIARY_QUESTION}`,
+        persist: false,
+      });
+      owlBody = parseOwlDiaryBody(owlResult.content);
+    } catch (error) {
+      console.warn("[dream] owl diary LLM failed; falling back:", errorMessage(error));
+    }
+    const owlDiaryBody = owlBody ?? buildOwlDiaryFallback(owlInput);
+    const owlDiary: MemoryEntryView = {
+      id: owlDiaryId,
+      kind: "dream-log",
+      title: `猫头鹰日记 · ${today}`,
+      contentMarkdown: owlDiaryBody,
+      summary: owlDiarySummary(owlDiaryBody),
+      scope: null,
+      template: null,
+      sourceSessionIds: processedSessionKeys.slice(0, 100),
+      tags: ["owl-diary", "dream-log"],
+      version: previousOwlDiary ? previousOwlDiary.version + 1 : 1,
+      prevId: null,
+      lastOps: null,
+      status: "active",
+      entryDate: today,
+      createdAt: previousOwlDiary?.createdAt ?? deps.now(),
+      updatedAt: deps.now(),
+    };
+    await api.upsertMemoryEntry(owlDiary);
 
     // ---- watermarks (advanced even on partial failure; the journal records it) -----
     await api.setMemoryMeta(META_LAST_RUN_AT, String(deps.now()));
