@@ -571,7 +571,7 @@ export type MembershipActionResult =
 
 /** 'member' = active Beta membership; 'free' = registered but expired. */
 export type CreditTier = 'member' | 'free';
-export type CreditCategory = 'chat' | 'image' | 'embedding';
+export type CreditCategory = 'chat' | 'image' | 'embedding' | 'grant';
 
 export interface CreditEntry {
   ts: number;
@@ -586,6 +586,7 @@ export interface CreditBalance {
   /** Cycle allowance: 50,000 monthly (member) / 300 daily (free). */
   quota: number;
   used: number;
+  /** Cycle-quota remainder plus any unredeemed bonus pool (e.g. crowdfund grants). */
   remaining: number;
   /** Cycle-end timestamp (member anchor-day month / next local midnight). */
   resetsAt: number;
@@ -593,6 +594,15 @@ export interface CreditBalance {
   /** Up to 20 most recent deductions, newest first. */
   recent: CreditEntry[];
 }
+
+// ---- 众筹「众筹码」兑换 ----
+
+/** Redeem failures the settings UI distinguishes; everything else is network_error. */
+export type CrowdfundRedeemError = 'invalid_code' | 'already_redeemed' | 'network_error';
+
+export type CrowdfundRedeemResult =
+  | { ok: true; tier: string; credits: number; balance: CreditBalance }
+  | { ok: false; error: CrowdfundRedeemError };
 
 export const IPC = {
   windowMinimize: 'vesti:window-minimize',
@@ -607,6 +617,7 @@ export const IPC = {
   membershipChanged: 'vesti:membership-changed',
   membershipDataContributionGet: 'vesti:membership-data-contribution-get',
   membershipDataContributionSet: 'vesti:membership-data-contribution-set',
+  crowdfundRedeem: 'vesti:crowdfund-redeem',
   creditBalance: 'vesti:credit-balance',
   creditChanged: 'vesti:credit-changed',
   overview: 'vesti:overview',
@@ -1259,6 +1270,8 @@ export interface VestiMembershipApi {
   /** Turning contribution off is always allowed; turning it back on records a
    * fresh consent timestamp (the UI re-shows the agreement first). */
   setDataContribution(enabled: boolean): Promise<DataContributionState>;
+  /** 兑换一次性「众筹码」:主进程调网关核销,成功后积分直接打入本地账本。 */
+  redeemCrowdfundCode(code: string): Promise<CrowdfundRedeemResult>;
   onStatusChanged(listener: (status: MembershipStatus) => void): () => void;
 }
 

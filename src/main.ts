@@ -20,7 +20,7 @@ import { AgentMcpRegistry, createAgentMcpRegistry, resolveAgentMcpTargetId } fro
 import { CaptureService } from './main/captureService';
 import { ContributionService } from './main/contributionService';
 import { CapsuleWindowService, normalizeCapsuleBubblePayload } from './main/capsuleWindowService';
-import { CreditError, CreditService } from './main/creditService';
+import { CreditError, CreditService, redeemCrowdfundCode } from './main/creditService';
 import { DigestService } from './main/digestService';
 import { ProjectMemoryService } from './main/projectMemoryService';
 import { EmbeddingService, type EmbeddingCreditMeter } from './main/embeddingService';
@@ -941,6 +941,12 @@ function registerIpc(): void {
     return state;
   });
   memberIpcHandle(IPC.creditBalance, () => currentCreditBalance());
+  // 众筹「众筹码」兑换:网关核销成功后积分打入本地奖励池,并推送最新余额。
+  memberIpcHandle(IPC.crowdfundRedeem, async (_event, value: unknown) => {
+    const result = await redeemCrowdfundCode(credits, value, creditTierContext());
+    if (result.ok) broadcastCreditChange();
+    return result;
+  });
   memberIpcHandle(IPC.overview, () => capture.getOverview());
   memberIpcHandle(IPC.sessions, () => capture.getSessions());
   memberIpcHandle(IPC.session, (_event, id: unknown) => {

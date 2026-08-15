@@ -11,6 +11,12 @@
 import http from 'node:http';
 import { appendFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import {
+  CROWDFUND_REDEEM_RATE_LIMIT,
+  CROWDFUND_REDEEM_RATE_WINDOW_MS,
+  createCrowdfundRedeemer,
+} from './crowdfund.mjs';
+import { renderCrowdfundPage } from './crowdfund-page.mjs';
 
 // ---- config ----------------------------------------------------------------
 
@@ -47,6 +53,19 @@ const UPSTREAM_CONNECT_TIMEOUT_MS = 20_000;
 const IMAGE_UPSTREAM_TIMEOUT_MS = 150_000; // 绘图上游 30-120s 才回响应头
 const COLLECT_DIR = env.COLLECT_DIR || '/var/lib/vesti-gate/collect';
 mkdirSync(COLLECT_DIR, { recursive: true });
+
+// ---- 众筹「众筹码」配置 ------------------------------------------------------
+// 档位 → 积分映射(改这里即可调档;公开页与兑换响应都从这里取数)。
+const CROWDFUND_TIERS = {
+  warm: { credits: 6_000 },      // 暖心档 ¥19
+  fellow: { credits: 20_000 },   // 同行档 ¥59
+  cocreate: { credits: 55_000 }, // 共创档 ¥129
+};
+// 有效码清单:上线前由运营投放,{ codes: { "VESTI-XXXX-XXXX-XXXX": "warm" } }。
+// 文件不存在时所有码一律 invalid_code(见 crowdfund.mjs)。
+const CROWDFUND_CODES_PATH = env.CROWDFUND_CODES_PATH || '/opt/vesti-gate/crowdfund-codes.json';
+const CROWDFUND_DIR = env.CROWDFUND_DIR || '/var/lib/vesti-gate/crowdfund';
+mkdirSync(CROWDFUND_DIR, { recursive: true });
 
 // 服务端 PII 复查(兜底;客户端已过滤一遍,这里再挡一层):
 // 命中任一模式的会话整条丢弃,只收干净会话。
@@ -111,6 +130,14 @@ setInterval(() => {
   }
 }, 60_000).unref();
 
+// 众筹兑换器:每 IP 每小时 ≤20 次防爆破;码表每次兑换重读,投放新码无需重启。
+const crowdfundRedeemer = createCrowdfundRedeemer({
+  codesPath: CROWDFUND_CODES_PATH,
+  redeemDir: CROWDFUND_DIR,
+  tiers: CROWDFUND_TIERS,
+  checkRateLimit: (ip) => rateLimitOk(ip, 'crowdfund', CROWDFUND_REDEEM_RATE_LIMIT, CROWDFUND_REDEEM_RATE_WINDOW_MS),
+});
+
 // ---- helpers -----------------------------------------------------------------
 
 function sendJson(res, status, obj, extraHeaders = {}) {
@@ -121,6 +148,14 @@ function sendJson(res, status, obj, extraHeaders = {}) {
     ...extraHeaders,
   });
   res.end(body);
+}
+
+function sendHtml(res, status, html) {
+  res.writeHead(status, {
+    'content-type': 'text/html; charset=utf-8',
+    'cache-control': 'public, max-age=300',
+  });
+  res.end(html);
 }
 
 function readBody(req, cap) {
@@ -263,6 +298,12 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // 众筹公开页:无需鉴权的自包含静态页(支持者们从任意浏览器打开)。
+  if (req.method === 'GET' && path === '/crowdfund') {
+    sendHtml(res, 200, renderCrowdfundPage(CROWDFUND_TIERS));
+    return;
+  }
+
   if (!authorized(req)) {
     sendJson(res, 401, { error: { message: 'unauthorized' } });
     return;
@@ -386,6 +427,22 @@ const server = http.createServer(async (req, res) => {
           { id: 'gemini-3.1-flash-image-preview', object: 'model', owned_by: '147ai' },
         ],
       });
+      return;
+    }
+
+    // 众筹「众筹码」兑换:用户付款后凭运营发放的一次性码换积分。
+    // 码表在 CROWDFUND_CODES_PATH(缺失即全部 invalid_code),兑换记录 JSONL
+    // 落盘 CROWDFUND_DIR;限流与作废逻辑在 crowdfund.mjs 的兑换器里。
+    if (req.method === 'POST' && path === '/v1/crowdfund/redeem') {
+      const raw = await readBody(req, 16 * 1024);
+      let parsed;
+      try { parsed = JSON.parse(raw.toString('utf8')); } catch {
+        sendJson(res, 400, { error: { message: 'invalid_json' } });
+        return;
+      }
+      const { status, body } = crowdfundRedeemer.redeem({ code: parsed?.code, ip });
+      if (status === 200) logUsage({ ip, route: 'crowdfund-redeem', tier: body.tier, credits: body.credits });
+      sendJson(res, status, body);
       return;
     }
 

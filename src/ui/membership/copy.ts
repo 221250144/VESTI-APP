@@ -98,6 +98,24 @@ export interface MembershipCopy {
   dataContributionConsentedAt: string;
   dataContributionEnabled: string;
   dataContributionDisabled: string;
+  // ---- 支持众筹 card (settings) ----
+  crowdfundTitle: string;
+  crowdfundDescription: string;
+  /** 三档众筹展示:名称 / 金额 / 权益说明。 */
+  crowdfundTiers: Array<{ name: string; price: string; perk: string }>;
+  /** 付款备注提示(备注邮箱/用户名,运营据此发放众筹码)。 */
+  crowdfundPaymentHint: string;
+  crowdfundPageButton: string;
+  crowdfundRedeemLabel: string;
+  crowdfundCodePlaceholder: string;
+  crowdfundRedeemSubmit: string;
+  crowdfundRedeeming: string;
+  /** "{credits}" = 到账积分。 */
+  crowdfundRedeemSuccess: string;
+  crowdfundThanks: string;
+  crowdfundErrorInvalid: string;
+  crowdfundErrorUsed: string;
+  crowdfundErrorNetwork: string;
   errors: Record<MembershipUiError, string>;
 }
 
@@ -194,6 +212,10 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
         heading: "过期之后",
         body: "会员到期不会锁死你的数据与工作空间——账号自动转为免费版，每日积分照常发放，所有本地数据始终属于你自己。",
       },
+      {
+        heading: "众筹支持",
+        body: "Vesti 目前由一个小团队自筹运转。如果你愿意推我们一把，可以在「设置 → 会员与账号 → 支持众筹」选择暖心、同行、共创三档方案：付款后我们会发放一次性「众筹码」，在 App 内兑换后积分立即到账。所有众筹款项只用于服务器、模型额度，以及让更多人用上 Vesti；众筹完全自愿，不参与也不会影响你的任何既有权益。",
+      },
     ],
     consentPrefix: "我已阅读并同意",
     privacyAgreementName: "《隐私说明与数据贡献协议》",
@@ -239,6 +261,24 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     dataContributionConsentedAt: "同意于 {date}",
     dataContributionEnabled: "已开启",
     dataContributionDisabled: "已关闭",
+    crowdfundTitle: "支持众筹",
+    crowdfundDescription: "Vesti 由一个小团队自筹维护。你的支持会直接变成服务器与模型额度，让更多人能用上它。",
+    crowdfundTiers: [
+      { name: "暖心档", price: "¥19", perk: "一杯咖啡的心意 · 获赠 6,000 积分" },
+      { name: "同行档", price: "¥59", perk: "与 Vesti 同行一程 · 获赠 20,000 积分" },
+      { name: "共创档", price: "¥129", perk: "参与 Vesti 的长大 · 获赠 55,000 积分，名字可写入致谢名单" },
+    ],
+    crowdfundPaymentHint: "扫码付款时请备注你的注册邮箱或用户名；确认到账后，我们会把一次性「众筹码」发给你。",
+    crowdfundPageButton: "了解众筹详情",
+    crowdfundRedeemLabel: "我有众筹码",
+    crowdfundCodePlaceholder: "VESTI-XXXX-XXXX-XXXX",
+    crowdfundRedeemSubmit: "兑换",
+    crowdfundRedeeming: "正在兑换…",
+    crowdfundRedeemSuccess: "已到账 {credits} 积分",
+    crowdfundThanks: "谢谢你的支持，Vesti 会继续好好长大。",
+    crowdfundErrorInvalid: "这个众筹码无效，请核对后重试。",
+    crowdfundErrorUsed: "这个众筹码已被兑换过，每枚只能使用一次。",
+    crowdfundErrorNetwork: "网络异常，未能完成兑换，请稍后重试。",
     errors: {
       NOT_INITIALIZED: "会员服务尚未准备好，请稍后重试。",
       ALREADY_REGISTERED: "这台设备已经注册过 Vesti 账号，请直接登录。",
@@ -347,6 +387,10 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
         heading: "After expiry",
         body: "An expired membership never locks your data or workspace — the account automatically converts to the free tier, daily credits keep flowing, and all local data remains yours.",
       },
+      {
+        heading: "Crowdfunding",
+        body: "Vesti is currently self-funded by a small team. If you'd like to give us a push, see Settings → Membership & account → Support the crowdfund for three tiers (Warmth, Companion, Co-creator): after payment we issue a one-time supporter code, and redeeming it in the app adds credits immediately. All proceeds go to servers, model quota, and bringing Vesti to more people; contributing is entirely voluntary and never affects your existing benefits.",
+      },
     ],
     consentPrefix: "I have read and agree to the ",
     privacyAgreementName: "Privacy & Data Contribution Agreement",
@@ -393,6 +437,26 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     dataContributionConsentedAt: "Consented on {date}",
     dataContributionEnabled: "On",
     dataContributionDisabled: "Off",
+    crowdfundTitle: "Support the crowdfund",
+    crowdfundDescription:
+      "Vesti is maintained by a small self-funded team. Your support turns directly into servers and model quota, so more people can use it.",
+    crowdfundTiers: [
+      { name: "Warmth", price: "¥19", perk: "A coffee's worth of encouragement · 6,000 credits" },
+      { name: "Companion", price: "¥59", perk: "Walk a stretch with Vesti · 20,000 credits" },
+      { name: "Co-creator", price: "¥129", perk: "Help Vesti grow · 55,000 credits, with an optional name in our thanks list" },
+    ],
+    crowdfundPaymentHint:
+      "When paying by QR code, please note your registered email or username; once the payment is confirmed, we will send you a one-time supporter code.",
+    crowdfundPageButton: "Learn more",
+    crowdfundRedeemLabel: "I have a supporter code",
+    crowdfundCodePlaceholder: "VESTI-XXXX-XXXX-XXXX",
+    crowdfundRedeemSubmit: "Redeem",
+    crowdfundRedeeming: "Redeeming…",
+    crowdfundRedeemSuccess: "{credits} credits added",
+    crowdfundThanks: "Thank you for your support — Vesti will keep growing well.",
+    crowdfundErrorInvalid: "This supporter code is invalid. Please check it and try again.",
+    crowdfundErrorUsed: "This supporter code has already been redeemed; each code works only once.",
+    crowdfundErrorNetwork: "A network error prevented the redemption. Please try again later.",
     errors: {
       NOT_INITIALIZED: "The membership service is not ready yet. Please try again.",
       ALREADY_REGISTERED: "A Vesti account already exists on this device. Sign in instead.",
@@ -501,6 +565,10 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
         heading: "有効期限が切れた後",
         body: "メンバーシップが切れても、データやワークスペースがロックされることはありません。アカウントは自動的に無料版に移行し、毎日のクレジットは引き続き付与されます。すべてのローカルデータは常にあなたのものです。",
       },
+      {
+        heading: "クラウドファンディング",
+        body: "Vesti は現在、小さなチームの自費で運営されています。後押ししていただける場合は、「設定 → メンバーシップとアカウント → クラウドファンディング」から 3 つのプラン(ほっと応援・同行・共創)をご覧いただけます。お支払い後に使い捨ての「サポーターコード」を発行し、アプリ内で引き換えるとクレジットがすぐに加算されます。資金はサーバー、モデル枠、そしてより多くの人に Vesti を届けるためにのみ使われます。参加は完全に任意で、既存の特典への影響はありません。",
+      },
     ],
     consentPrefix: "",
     privacyAgreementName: "「プライバシーとデータ貢献に関する同意書」",
@@ -547,6 +615,26 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     dataContributionConsentedAt: "同意日 {date}",
     dataContributionEnabled: "オン",
     dataContributionDisabled: "オフ",
+    crowdfundTitle: "クラウドファンディング",
+    crowdfundDescription:
+      "Vesti は小さな自費チームが運営しています。あなたの支援はそのままサーバーとモデル枠になり、より多くの人が Vesti を使えるようになります。",
+    crowdfundTiers: [
+      { name: "ほっと応援", price: "¥19", perk: "コーヒー一杯分の心意気 · 6,000 クレジット" },
+      { name: "同行", price: "¥59", perk: "Vesti と一緒に歩む · 20,000 クレジット" },
+      { name: "共創", price: "¥129", perk: "Vesti の成長に参加 · 55,000 クレジット、希望者は謝辞リストに掲載" },
+    ],
+    crowdfundPaymentHint:
+      "QR 決済の備考欄に登録メールアドレスまたはユーザー名をご記入ください。確認後、使い捨ての「サポーターコード」をお送りします。",
+    crowdfundPageButton: "詳しく見る",
+    crowdfundRedeemLabel: "サポーターコードを持っている",
+    crowdfundCodePlaceholder: "VESTI-XXXX-XXXX-XXXX",
+    crowdfundRedeemSubmit: "引き換え",
+    crowdfundRedeeming: "引き換え中…",
+    crowdfundRedeemSuccess: "{credits} クレジットが加算されました",
+    crowdfundThanks: "ご支援ありがとうございます。Vesti はこれからも健やかに育っていきます。",
+    crowdfundErrorInvalid: "このサポーターコードは無効です。確認してもう一度お試しください。",
+    crowdfundErrorUsed: "このサポーターコードはすでに引き換え済みです。各コードは一度だけ使用できます。",
+    crowdfundErrorNetwork: "ネットワークエラーで引き換えできませんでした。後でもう一度お試しください。",
     errors: {
       NOT_INITIALIZED: "メンバーシップサービスの準備が完了していません。もう一度お試しください。",
       ALREADY_REGISTERED: "この端末にはすでに Vesti アカウントがあります。ログインしてください。",
@@ -655,6 +743,10 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
         heading: "만료 이후",
         body: "멤버십이 만료되어도 데이터와 작업 공간은 잠기지 않습니다. 계정이 자동으로 무료 버전으로 전환되고 매일 크레딧이 계속 지급되며, 모든 로컬 데이터는 항상 사용자의 것입니다.",
       },
+      {
+        heading: "크라우드펀딩",
+        body: "Vesti는 현재 작은 팀의 자체 자금으로 운영됩니다. 힘을 보태고 싶으시다면 「설정 → 멤버십 및 계정 → 크라우드펀딩 후원」에서 세 가지 플랜(따뜻한 응원·동행·공동 창작)을 확인하실 수 있습니다. 결제 후 일회용 「서포터 코드」를 발급해 드리며, 앱에서 교환하면 크레딧이 즉시 추가됩니다. 모든 후원금은 서버, 모델 할당량, 그리고 더 많은 사람에게 Vesti를 전하는 데만 사용됩니다. 참여는 전적으로 자발적이며 기존 혜택에는 영향이 없습니다.",
+      },
     ],
     consentPrefix: "",
     privacyAgreementName: "「개인정보 및 데이터 기여 동의서」",
@@ -701,6 +793,26 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     dataContributionConsentedAt: "동의일 {date}",
     dataContributionEnabled: "켜짐",
     dataContributionDisabled: "꺼짐",
+    crowdfundTitle: "크라우드펀딩 후원",
+    crowdfundDescription:
+      "Vesti는 작은 자체 자금 팀이 운영합니다. 여러분의 후원은 서버와 모델 할당량으로 직결되어 더 많은 사람이 Vesti를 사용할 수 있게 합니다.",
+    crowdfundTiers: [
+      { name: "따뜻한 응원", price: "¥19", perk: "커피 한 잔의 마음 · 6,000 크레딧" },
+      { name: "동행", price: "¥59", perk: "Vesti와 함께 걷기 · 20,000 크레딧" },
+      { name: "공동 창작", price: "¥129", perk: "Vesti의 성장에 참여 · 55,000 크레딧, 원하시면 감사 명단에 이름 게재" },
+    ],
+    crowdfundPaymentHint:
+      "QR 결제 시 메모에 가입 이메일 또는 사용자 이름을 남겨 주세요. 확인 후 일회용 「서포터 코드」를 보내드립니다.",
+    crowdfundPageButton: "자세히 보기",
+    crowdfundRedeemLabel: "서포터 코드가 있어요",
+    crowdfundCodePlaceholder: "VESTI-XXXX-XXXX-XXXX",
+    crowdfundRedeemSubmit: "교환",
+    crowdfundRedeeming: "교환 중…",
+    crowdfundRedeemSuccess: "{credits} 크레딧이 추가되었습니다",
+    crowdfundThanks: "후원해 주셔서 감사합니다. Vesti는 계속 건강하게 자라겠습니다.",
+    crowdfundErrorInvalid: "유효하지 않은 서포터 코드입니다. 확인 후 다시 시도해 주세요.",
+    crowdfundErrorUsed: "이미 사용된 서포터 코드입니다. 각 코드는 한 번만 사용할 수 있습니다.",
+    crowdfundErrorNetwork: "네트워크 오류로 교환하지 못했습니다. 잠시 후 다시 시도해 주세요.",
     errors: {
       NOT_INITIALIZED: "멤버십 서비스가 아직 준비되지 않았습니다. 다시 시도해 주세요.",
       ALREADY_REGISTERED: "이 기기에 Vesti 계정이 이미 있습니다. 로그인해 주세요.",
@@ -769,6 +881,9 @@ export function formatCreditReset(timestamp: number | null, locale: SupportedLoc
 
 /** Marker main embeds in the exhaustion error message so renderers can detect it. */
 export const CREDITS_EXHAUSTED_MARKER = "CREDITS_EXHAUSTED";
+
+/** 众筹公开页(网关 deploy/vesti-gate 的 GET /crowdfund/,经 vesti.world/gate 反代暴露)。 */
+export const CROWDFUND_PAGE_URL = "https://vesti.world/gate/crowdfund/";
 
 export function isCreditsExhaustedError(error: unknown): boolean {
   const text = error instanceof Error ? error.message : String(error);
