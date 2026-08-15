@@ -48,6 +48,29 @@ describe('MCP handshake', () => {
     expect(instructions).toMatch(/vesti_memory_search.*vesti_memory_get/s);
   });
 
+  it('supports a process-local instruction override for blinded evaluations', async () => {
+    const isolatedFixture = createFixtureDb();
+    const isolatedDb = openVestiDb(isolatedFixture.dbPath);
+    const isolatedServer = createVestiMcpServer(isolatedDb, {
+      serverInstructions: 'Use only the advertised read-only VESTI tools.',
+    });
+    const [isolatedClientTransport, isolatedServerTransport] = InMemoryTransport.createLinkedPair();
+    const isolatedClient = new Client({ name: 'instruction-test-client', version: '0.0.1' });
+
+    try {
+      await Promise.all([
+        isolatedServer.connect(isolatedServerTransport),
+        isolatedClient.connect(isolatedClientTransport),
+      ]);
+      expect(isolatedClient.getInstructions()).toBe('Use only the advertised read-only VESTI tools.');
+    } finally {
+      await isolatedClient.close();
+      await isolatedServer.close();
+      isolatedDb.close();
+      isolatedFixture.cleanup();
+    }
+  });
+
   it('lists the context tools plus the three progressive-disclosure layers', async () => {
     const { tools } = await client.listTools();
     expect(tools.map(t => t.name)).toEqual([
@@ -74,8 +97,18 @@ describe('MCP handshake', () => {
     // File lookup needs a query; memory space: search needs nothing (browse
     // mode), get requires ids.
     expect(tools[6].inputSchema.required).toContain('query');
+    expect(tools[6].inputSchema.properties).toHaveProperty('project');
+    expect(tools[6].inputSchema.additionalProperties).toBe(false);
     expect(tools[7].inputSchema.required ?? []).toHaveLength(0);
     expect(tools[8].inputSchema.required).toContain('ids');
+    for (const tool of tools) {
+      expect(tool.annotations).toEqual(expect.objectContaining({
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      }));
+    }
   });
 
   it('serves vesti_search → vesti_timeline → vesti_get_turns end to end', async () => {
@@ -95,6 +128,21 @@ describe('MCP handshake', () => {
     });
     const turnsPayload = JSON.parse((turns.content as Array<{ text: string }>)[0].text);
     expect(turnsPayload.turns[0].assistant).toContain('transaction');
+  });
+
+  it('serves the externally owned file-search core through the unchanged MCP tool', async () => {
+    const response = await client.callTool({
+      name: 'vesti_search_files',
+      arguments: { query: 'transactional migrations' },
+    });
+    expect(response.isError).toBeFalsy();
+    const payload = JSON.parse((response.content as Array<{ text: string }>)[0].text);
+    expect(payload.results).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        path: 'packages/capture-core/src/storage/migrations.ts',
+        projects: ['C:/work/vesti'],
+      }),
+    ]));
   });
 
   it('returns isError for unknown tools and unknown sessions', async () => {

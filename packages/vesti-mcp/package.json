@@ -33,6 +33,7 @@
     "vitest": "^1.2.0"
   },
   "dependencies": {
+    "@vesti/search-files-core": "link:../../../VESTI-SKILLS/packages/vesti-search-files-core",
     "@modelcontextprotocol/sdk": "^1.29.0"
   }
 }

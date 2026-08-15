@@ -130,6 +130,8 @@ RRF 融合后再做两项后处理（bench 依据见 `docs/bench/after-trigram-2
 
 `packages/vesti-mcp` 把本库的召回能力包装成 stdio MCP server，供 kimi-code / Claude Code / codex 等 agent 注册后自助检索历史会话。要点：
 
+- `vesti_search_files` 的数据库查询适配仍在本包，纯路径提取、证据聚合和排序算法已由独立仓库 VESTI-SKILLS 的 `@vesti/search-files-core` 维护，并在构建时内联到单文件 MCP 产物中。
+
 - 只读打开 `~/.vesti/db/vesti.db`（`VESTI_DB_PATH` 可覆盖）；不依赖 capture-core 与 better-sqlite3，改用 Node 内置 `node:sqlite`，规避桌面端 Electron ABI 原生模块的耦合。
 - 三个工具对应三层渐进披露：`vesti_search`（会话级索引条目，复刻 `SessionRecall` 的 FTS5 + RRF 纯 FTS 路径——无 embedding 服务，向量信号自然缺席）→ `vesti_timeline`（turn 大纲；会话有子代理时附 `subagents` 列表——子会话 id、角色、one_liner，可用子会话 id 再调 timeline 下钻）→ `vesti_get_turns`（按 `max_chars` 截断的完整内容）。
 - 注册方式与给 agent 的引导文本见 [packages/vesti-mcp/README.md](../packages/vesti-mcp/README.md)。

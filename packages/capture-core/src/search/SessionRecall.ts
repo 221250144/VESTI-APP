@@ -94,82 +94,103 @@ export function effectiveTokens(query: string, tokenizer: string): string[] {
   return tokens.filter(token => [...token].length >= TRIGRAM_MIN_TOKEN_CHARS);
 }
 
-interface QueryTokenSpan { text: string; start: number; end: number }
+const charLen = (s: string): number => [...s].length;
+const SHORT_FALLBACK_STOP_WORDS = new Set([
+  'a', 'an', 'as', 'at', 'be', 'by', 'if', 'in', 'is', 'it', 'of', 'on',
+  'or', 'to', '项目', '文件', '目录', '位置', '代码', '哪里', '哪个',
+  '哪些', '什么', '怎么', '如何', '是否', '请问', '帮我', '一个',
+  '相关', '内容', '信息', '记录', '对话', '会话', '历史', '最近',
+  '目前', '现在', '最终', '找到', '查找', '定位', '查看', '看看',
+]);
+const CJK_WORD = /^[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]+$/u;
+const MAX_SHORT_FALLBACK_TOKENS = 8;
 
-/** recallTokens with source offsets, so original separators stay recoverable. */
-function queryTokenSpans(query: string): QueryTokenSpan[] {
-  const spans: QueryTokenSpan[] = [];
-  const re = /[\p{L}\p{N}_]+/gu;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(query)) !== null) {
-    spans.push({ text: match[0], start: match.index, end: match.index + match[0].length });
-  }
-  return spans;
+interface SegmentLike {
+  segment: string;
+  isWordLike?: boolean;
 }
 
-const charLen = (s: string): number => [...s].length;
+/** Split a natural unspaced CJK run into conservative semantic words. */
+function cjkSemanticUnits(token: string): string[] {
+  if (!CJK_WORD.test(token) || charLen(token) < TRIGRAM_MIN_TOKEN_CHARS) return [token];
+  try {
+    const segments = [...new Intl.Segmenter('zh', { granularity: 'word' }).segment(token)] as SegmentLike[];
+    const meaningful = segments
+      .filter(segment => segment.isWordLike !== false)
+      .map(segment => segment.segment.toLowerCase())
+      .filter(segment => charLen(segment) >= 2)
+      .filter(segment => !SHORT_FALLBACK_STOP_WORDS.has(segment));
+
+    // ICU can split domain terms such as "重试" and "轮询" into separate
+    // one-character words. Trigram FTS cannot search those characters, so
+    // reconstruct adjacent bigrams inside each uninterrupted single-word run.
+    const reconstructedBigrams: string[] = [];
+    let singleRun: string[] = [];
+    const flushSingleRun = (): void => {
+      for (let i = 0; i + 1 < singleRun.length; i += 1) {
+        const bigram = `${singleRun[i]}${singleRun[i + 1]}`.toLowerCase();
+        if (!SHORT_FALLBACK_STOP_WORDS.has(bigram)) reconstructedBigrams.push(bigram);
+      }
+      singleRun = [];
+    };
+    for (const segment of segments) {
+      const value = segment.segment.toLowerCase();
+      if (segment.isWordLike !== false && CJK_WORD.test(value) && charLen(value) === 1) {
+        singleRun.push(value);
+      } else {
+        flushSingleRun();
+      }
+    }
+    flushSingleRun();
+
+    const units = [...new Set([...meaningful, ...reconstructedBigrams])];
+    return units.length > 0 ? units : [token];
+  } catch {
+    return [token];
+  }
+}
 
 export interface QueryPlan {
   /**
-   * FTS5 MATCH expression: every matchable token quoted and OR-combined.
-   * Under trigram, runs of short (<3-char) tokens are additionally merged
-   * into verbatim spans using the original separators ("CI 平台 选型" →
-   * `"CI 平台"`), because a quoted trigram phrase is a substring match and a
-   * ≥3-char span CAN match even though its 2-char parts cannot.
+   * FTS5 MATCH expression (quoted OR branches). Under trigram this contains
+   * only independently matchable tokens (three or more Unicode code points).
    */
   ftsQuery: string;
   /**
-   * Units that can literally appear in the matched text (long tokens plus
-   * merged spans of COVERAGE_MERGED_MIN_CHARS+). Basis of confidence
-   * coverage; a hit covering none of them is corroborated by nothing.
+   * Units that can literally appear in the matched text. Confidence coverage
+   * includes independently queried two-character LIKE fallback terms.
    */
   matchUnits: string[];
+  /** Meaningful two-character terms queried independently through LIKE. */
+  shortFallbackTokens: string[];
 }
 
 /** Tokenizer-aware query construction; the unicode61 path is unchanged. */
 export function buildQueryPlan(query: string, tokenizer: string): QueryPlan {
-  const spans = queryTokenSpans(query);
+  const tokens = recallTokens(query);
   const quote = (s: string) => `"${s.replace(/"/g, '""')}"`;
   if (tokenizer !== 'trigram') {
-    return { ftsQuery: spans.map(s => quote(s.text)).join(' OR '), matchUnits: spans.map(s => s.text) };
+    return {
+      ftsQuery: tokens.map(quote).join(' OR '),
+      matchUnits: tokens,
+      shortFallbackTokens: [],
+    };
   }
-  const isShort = (text: string) => charLen(text) < TRIGRAM_MIN_TOKEN_CHARS;
-  const branches: string[] = [];
-  const matchUnits: string[] = [];
-  let i = 0;
-  while (i < spans.length) {
-    const span = spans[i];
-    if (!isShort(span.text)) {
-      branches.push(quote(span.text));
-      matchUnits.push(span.text);
-      i += 1;
-      continue;
-    }
-    // A run of consecutive short tokens merges into one verbatim span.
-    let j = i;
-    while (j + 1 < spans.length && isShort(spans[j + 1].text)) j += 1;
-    const shortChars = spans.slice(i, j + 1).reduce((n, s) => n + charLen(s.text), 0);
-    let merged = query.slice(span.start, spans[j].end);
-    if (charLen(merged) < TRIGRAM_MIN_TOKEN_CHARS) {
-      // Still too short ("M3 里程碑…" → "M3"): absorb a prefix of the next
-      // long token (or a suffix of the previous one at query end). The
-      // neighbour keeps its own branch — the merge only adds a span branch.
-      const need = TRIGRAM_MIN_TOKEN_CHARS - charLen(merged);
-      if (j + 1 < spans.length) {
-        merged += query.slice(spans[j].end, spans[j + 1].start)
-          + [...spans[j + 1].text].slice(0, need).join('');
-      } else if (i > 0) {
-        merged = [...spans[i - 1].text].slice(-need).join('')
-          + query.slice(spans[i - 1].end, spans[j].end);
-      }
-    }
-    if (charLen(merged) >= TRIGRAM_MIN_TOKEN_CHARS) {
-      branches.push(quote(merged));
-      if (shortChars >= COVERAGE_MERGE_MIN_SHORT_CHARS) matchUnits.push(merged);
-    }
-    i = j + 1;
-  }
-  return { ftsQuery: branches.join(' OR '), matchUnits };
+  const plannedUnits = tokens.flatMap(cjkSemanticUnits);
+  // Preserve the original long phrase for exact trigram matches while adding
+  // word-level branches for natural CJK queries without artificial spaces.
+  const longTokens = [...new Set([...tokens, ...plannedUnits]
+    .map(token => token.toLowerCase())
+    .filter(token => charLen(token) >= TRIGRAM_MIN_TOKEN_CHARS))];
+  const shortFallbackTokens = [...new Set(plannedUnits
+    .map(token => token.toLowerCase())
+    .filter(token => charLen(token) === 2 && !SHORT_FALLBACK_STOP_WORDS.has(token)))]
+    .slice(0, MAX_SHORT_FALLBACK_TOKENS);
+  return {
+    ftsQuery: longTokens.map(quote).join(' OR '),
+    matchUnits: [...longTokens, ...shortFallbackTokens],
+    shortFallbackTokens,
+  };
 }
 
 /**
@@ -262,13 +283,25 @@ interface MessageHitRow {
 function rankMessageHits(db: Database, ftsQuery: string, limit: number): MessageHitRow[] {
   try {
     return db.prepare(`
-      SELECT m.id AS message_id, m.session_id, m.content_text, rank,
-             ws.session_id AS raw_session_id, ws.platform
-      FROM messages_fts fts
-      JOIN messages m ON m.rowid = fts.rowid
-      JOIN work_sessions ws ON ws.id = m.session_id
-      WHERE messages_fts MATCH ?
-      ORDER BY rank
+      WITH ranked_messages AS (
+        SELECT m.id AS message_id, m.session_id, m.content_text,
+               ws.session_id AS raw_session_id, ws.platform,
+               m.timestamp, fts.rank AS rank,
+               CASE WHEN ws.forked_from IS NULL THEN 0 ELSE 1 END AS fork_rank,
+               ws.started_at AS session_started_at,
+               ROW_NUMBER() OVER (
+                 PARTITION BY m.session_id
+                 ORDER BY fts.rank ASC, m.timestamp DESC, m.rowid DESC
+               ) AS session_row
+        FROM messages_fts fts
+        JOIN messages m ON m.rowid = fts.rowid
+        JOIN work_sessions ws ON ws.id = m.session_id
+        WHERE messages_fts MATCH ?
+      )
+      SELECT message_id, session_id, content_text, rank, raw_session_id, platform
+      FROM ranked_messages
+      WHERE session_row = 1
+      ORDER BY rank ASC, fork_rank ASC, session_started_at ASC, timestamp DESC, session_id
       LIMIT ?
     `).all(ftsQuery, limit) as MessageHitRow[];
   } catch {
@@ -286,6 +319,54 @@ function rankSessionHits(db: Database, ftsQuery: string, limit: number): Array<{
       ORDER BY rank
       LIMIT ?
     `).all(ftsQuery, limit) as Array<{ id: string }>;
+  } catch {
+    return [];
+  }
+}
+
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, match => `\\${match}`);
+}
+
+function rankMessageLikeHits(db: Database, token: string, limit: number): MessageHitRow[] {
+  try {
+    return db.prepare(`
+      WITH ranked_messages AS (
+        SELECT m.id AS message_id, m.session_id, m.content_text,
+               ws.session_id AS raw_session_id, ws.platform,
+               m.timestamp, 0 AS rank,
+               CASE WHEN ws.forked_from IS NULL THEN 0 ELSE 1 END AS fork_rank,
+               ws.started_at AS session_started_at,
+               ROW_NUMBER() OVER (
+                 PARTITION BY m.session_id
+                 ORDER BY m.timestamp DESC, m.rowid DESC
+               ) AS session_row
+        FROM messages m
+        JOIN work_sessions ws ON ws.id = m.session_id
+        WHERE m.content_text LIKE ? ESCAPE '\\'
+      )
+      SELECT message_id, session_id, content_text, rank, raw_session_id, platform
+      FROM ranked_messages
+      WHERE session_row = 1
+      ORDER BY fork_rank ASC, session_started_at ASC, timestamp DESC, session_id
+      LIMIT ?
+    `).all(`%${escapeLike(token)}%`, limit) as MessageHitRow[];
+  } catch {
+    return [];
+  }
+}
+
+function rankSessionLikeHits(db: Database, token: string, limit: number): Array<{ id: string }> {
+  try {
+    const pattern = `%${escapeLike(token)}%`;
+    return db.prepare(`
+      SELECT ws.id
+      FROM work_sessions ws
+      WHERE ws.title LIKE ? ESCAPE '\\'
+         OR COALESCE(ws.summary, '') LIKE ? ESCAPE '\\'
+      ORDER BY ws.last_activity_at DESC, ws.id
+      LIMIT ?
+    `).all(pattern, pattern, limit) as Array<{ id: string }>;
   } catch {
     return [];
   }
@@ -334,22 +415,21 @@ export function recallSessions(db: Database, query: string, options: SessionReca
   // Tokenizer-aware query plan: which FTS branches to run and which units
   // can literally appear in matched text (confidence coverage basis).
   const tokenizer = detectFtsTokenizer(db);
-  const { ftsQuery, matchUnits } = buildQueryPlan(query, tokenizer);
+  const { ftsQuery, matchUnits, shortFallbackTokens } = buildQueryPlan(query, tokenizer);
   const coverageBySession = new Map<string, number>();
 
   // Ranked session id lists (best first) per signal.
   const lists: string[][] = [];
   const snippetBySession = new Map<string, string>();
-
-  if (ftsQuery) {
-    const messageSessionIds: string[] = [];
+  const loweredUnits = matchUnits.map(unit => unit.toLowerCase());
+  const collectMessageSessionIds = (rows: MessageHitRow[]): string[] => {
+    const sessionIds: string[] = [];
     // Fork dedup (memory v2): a forked rollout copies the parent's history,
-    // so the same message can hit once per fork-chain member. The earliest
-    // (best-ranked) copy wins; later duplicates neither re-add the session
-    // nor overwrite its snippet.
+    // so the same message can hit once per fork-chain member. Deduplicate
+    // within each signal, while allowing distinct short-token signals to
+    // contribute independently to RRF.
     const seenMessageKeys = new Set<string>();
-    const loweredUnits = matchUnits.map(unit => unit.toLowerCase());
-    for (const row of rankMessageHits(db, ftsQuery, candidateLimit * 4)) {
+    for (const row of rows) {
       const dedupKey = messageDedupKey(row.platform, row.raw_session_id, row.message_id);
       if (seenMessageKeys.has(dedupKey)) continue;
       seenMessageKeys.add(dedupKey);
@@ -364,12 +444,19 @@ export function recallSessions(db: Database, query: string, options: SessionReca
           coverageBySession.set(row.session_id, ratio);
         }
       }
-      if (!messageSessionIds.includes(row.session_id)) {
-        messageSessionIds.push(row.session_id);
-      }
+      if (!sessionIds.includes(row.session_id)) sessionIds.push(row.session_id);
     }
-    lists.push(messageSessionIds.slice(0, candidateLimit));
+    return sessionIds.slice(0, candidateLimit);
+  };
+
+  if (ftsQuery) {
+    lists.push(collectMessageSessionIds(rankMessageHits(db, ftsQuery, candidateLimit)));
     lists.push(rankSessionHits(db, ftsQuery, candidateLimit).map(row => row.id));
+  }
+
+  for (const token of shortFallbackTokens) {
+    lists.push(collectMessageSessionIds(rankMessageLikeHits(db, token, candidateLimit)));
+    lists.push(rankSessionLikeHits(db, token, candidateLimit).map(row => row.id));
   }
 
   if (options.queryVector && options.queryVector.length > 0) {
@@ -391,6 +478,15 @@ export function recallSessions(db: Database, query: string, options: SessionReca
     list.forEach((sessionId, index) => {
       scores.set(sessionId, (scores.get(sessionId) ?? 0) + 1 / (RRF_K + index + 1));
     });
+  }
+  // Reward evidence that covers more independent query units. The bounded
+  // factor keeps vector-only and title-only candidates available, while a
+  // session matching both two-character terms outranks one-term distractors.
+  if (matchUnits.length > 1) {
+    for (const [sessionId, score] of scores) {
+      const coverage = coverageBySession.get(sessionId) ?? 0;
+      scores.set(sessionId, score * (0.45 + 0.55 * coverage));
+    }
   }
 
   // child session id → parent session id, for hit attribution.

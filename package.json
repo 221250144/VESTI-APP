@@ -8,7 +8,8 @@
   "main": ".vite/build/main.js",
   "scripts": {
     "core:build": "pnpm --filter @vesti/capture-core build",
-    "mcp:build": "pnpm --filter @vesti/vesti-mcp build",
+    "mcp:core:build": "pnpm --dir ../VESTI-SKILLS --filter @vesti/search-files-core build",
+    "mcp:build": "pnpm mcp:core:build && pnpm --filter @vesti/vesti-mcp build",
     "mcp:stage": "node scripts/stage-mcp.mjs",
     "packages:build": "pnpm core:build && pnpm mcp:build",
     "native:prepare": "node scripts/prepare-native.mjs",

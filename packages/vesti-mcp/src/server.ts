@@ -7,6 +7,7 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import type { FileSearchTrace, SearchFilesArgs } from '@vesti/search-files-core';
 
 import type { VestiDatabase } from './db.js';
 import { vestiSearchFiles } from './files.js';
@@ -90,10 +91,30 @@ const SEARCH_FILES_DESCRIPTION = [
   'Returns path, projects, up to 5 backing sessions, touch count and last_touched per file. Read the files with your own filesystem tools; drill into a backing session with vesti_timeline → vesti_get_turns when you need the surrounding context.',
 ].join(' ');
 
-export function createVestiMcpServer(db: VestiDatabase): Server {
+const READ_ONLY_TOOL_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false,
+} as const;
+
+export interface VestiMcpServerOptions {
+  /**
+   * Process-local instruction override used by controlled evaluations.
+   * It is never exposed as an MCP tool argument and production callers keep
+   * the product behavior contract above.
+   */
+  serverInstructions?: string;
+  /** Benchmark/debug override; not exposed in the public MCP input schema. */
+  fileSearchSessionRecallLimit?: number;
+  /** Out-of-band diagnostics; never serialized into the model-visible result. */
+  onFileSearchTrace?: (trace: FileSearchTrace) => void;
+}
+
+export function createVestiMcpServer(db: VestiDatabase, options: VestiMcpServerOptions = {}): Server {
   const server = new Server(
     { name: 'vesti-mcp', version: '0.1.0' },
-    { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS },
+    { capabilities: { tools: {} }, instructions: options.serverInstructions ?? SERVER_INSTRUCTIONS },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -101,6 +122,7 @@ export function createVestiMcpServer(db: VestiDatabase): Server {
       {
         name: 'vesti_get_project_context',
         description: PROJECT_CONTEXT_DESCRIPTION,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
         inputSchema: {
           type: 'object',
           properties: {
@@ -126,6 +148,7 @@ export function createVestiMcpServer(db: VestiDatabase): Server {
       {
         name: 'vesti_search',
         description: SEARCH_DESCRIPTION,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
         inputSchema: {
           type: 'object',
           properties: {
@@ -145,6 +168,7 @@ export function createVestiMcpServer(db: VestiDatabase): Server {
       {
         name: 'vesti_timeline',
         description: TIMELINE_DESCRIPTION,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
         inputSchema: {
           type: 'object',
           properties: {
@@ -168,6 +192,7 @@ export function createVestiMcpServer(db: VestiDatabase): Server {
       {
         name: 'vesti_get_turns',
         description: GET_TURNS_DESCRIPTION,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
         inputSchema: {
           type: 'object',
           properties: {
@@ -201,6 +226,7 @@ export function createVestiMcpServer(db: VestiDatabase): Server {
       {
         name: 'vesti_project_brief',
         description: PROJECT_BRIEF_DESCRIPTION,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
         inputSchema: {
           type: 'object',
           properties: {
@@ -215,6 +241,7 @@ export function createVestiMcpServer(db: VestiDatabase): Server {
       {
         name: 'vesti_get_handoff_context',
         description: HANDOFF_CONTEXT_DESCRIPTION,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
         inputSchema: {
           type: 'object',
           properties: {
@@ -242,8 +269,10 @@ export function createVestiMcpServer(db: VestiDatabase): Server {
       {
         name: 'vesti_search_files',
         description: SEARCH_FILES_DESCRIPTION,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
         inputSchema: {
           type: 'object',
+          additionalProperties: false,
           properties: {
             query: {
               type: 'string',
@@ -254,6 +283,10 @@ export function createVestiMcpServer(db: VestiDatabase): Server {
               description: 'Max file entries to return (default 10, max 25).',
               default: 10,
             },
+            project: {
+              type: 'string',
+              description: 'Optional project path or unambiguous project name/alias. Project hints at the end of query are also recognized.',
+            },
           },
           required: ['query'],
         },
@@ -261,6 +294,7 @@ export function createVestiMcpServer(db: VestiDatabase): Server {
       {
         name: 'vesti_memory_search',
         description: MEMORY_SEARCH_DESCRIPTION,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
         inputSchema: {
           type: 'object',
           properties: {
@@ -293,6 +327,7 @@ export function createVestiMcpServer(db: VestiDatabase): Server {
       {
         name: 'vesti_memory_get',
         description: MEMORY_GET_DESCRIPTION,
+        annotations: READ_ONLY_TOOL_ANNOTATIONS,
         inputSchema: {
           type: 'object',
           properties: {
@@ -338,7 +373,19 @@ export function createVestiMcpServer(db: VestiDatabase): Server {
           payload = vestiGetHandoffContext(db, (args ?? {}) as Parameters<typeof vestiGetHandoffContext>[1]);
           break;
         case 'vesti_search_files':
-          payload = vestiSearchFiles(db, (args ?? {}) as { query: string; topK?: number });
+          {
+            const searchArgs = (args ?? {}) as unknown as SearchFilesArgs;
+            const result = vestiSearchFiles(db, {
+              ...searchArgs,
+              ...(options.fileSearchSessionRecallLimit != null
+                ? { sessionRecallLimit: options.fileSearchSessionRecallLimit }
+                : {}),
+              ...(options.onFileSearchTrace ? { includeTrace: true } : {}),
+            });
+            if (result.trace) options.onFileSearchTrace?.(result.trace);
+            const { trace: _trace, ...publicResult } = result;
+            payload = publicResult;
+          }
           break;
         case 'vesti_memory_search':
           payload = vestiMemorySearch(db, (args ?? {}) as Parameters<typeof vestiMemorySearch>[1]);

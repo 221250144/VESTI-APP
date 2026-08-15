@@ -351,28 +351,44 @@ describe('effectiveTokens / confidenceForCoverage', () => {
 });
 
 describe('buildQueryPlan', () => {
-  it('is token-OR under unicode61 and merges short-token runs under trigram', () => {
+  it('keeps unicode61 token-OR and plans trigram two-character fallbacks independently', () => {
     expect(buildQueryPlan('login page', 'unicode61'))
-      .toEqual({ ftsQuery: '"login" OR "page"', matchUnits: ['login', 'page'] });
-    // 'CI 平台' (both <3 chars) merges into a verbatim span that trigram can
-    // substring-match; the long token keeps its own branch.
-    expect(buildQueryPlan('CI 平台 最终选了什么方案？', 'trigram')).toEqual({
-      ftsQuery: '"CI 平台" OR "最终选了什么方案"',
-      matchUnits: ['CI 平台', '最终选了什么方案'],
+      .toEqual({
+        ftsQuery: '"login" OR "page"',
+        matchUnits: ['login', 'page'],
+        shortFallbackTokens: [],
+      });
+    expect(buildQueryPlan('采集 增量 防护在哪个文件', 'trigram')).toEqual({
+      ftsQuery: '"防护在哪个文件"',
+      matchUnits: ['防护在哪个文件', '采集', '增量', '防护'],
+      shortFallbackTokens: ['采集', '增量', '防护'],
     });
-    // A lone short token absorbs a prefix of its neighbour: "M3 里".
-    expect(buildQueryPlan('M3 里程碑最终的截止日期是哪天？', 'trigram')).toEqual({
-      ftsQuery: '"M3 里" OR "里程碑最终的截止日期是哪天"',
-      matchUnits: ['M3 里', '里程碑最终的截止日期是哪天'],
+    expect(buildQueryPlan('采集增量防护在哪个文件', 'trigram')).toEqual({
+      ftsQuery: '"采集增量防护在哪个文件"',
+      matchUnits: ['采集增量防护在哪个文件', '采集', '增量', '防护'],
+      shortFallbackTokens: ['采集', '增量', '防护'],
     });
-    // Function-word merges ("的 ma") run in MATCH but do not count as
-    // coverage evidence (short-token part < COVERAGE_MERGE_MIN_SHORT_CHARS).
+    expect(buildQueryPlan('代理重试防护在哪个文件', 'trigram').shortFallbackTokens)
+      .toEqual(expect.arrayContaining(['代理', '重试', '防护']));
+    expect(buildQueryPlan('采集轮询旧实现以前在哪里', 'trigram').shortFallbackTokens)
+      .toEqual(expect.arrayContaining(['采集', '轮询', '实现']));
+    // Short English stop words never become broad LIKE scans; meaningful
+    // code/product abbreviations still do.
+    expect(buildQueryPlan('in CI to', 'trigram')).toEqual({
+      ftsQuery: '',
+      matchUnits: ['ci'],
+      shortFallbackTokens: ['ci'],
+    });
     expect(buildQueryPlan('生产环境 redis 的 maxmemory', 'trigram')).toEqual({
-      ftsQuery: '"生产环境" OR "redis" OR "的 ma" OR "maxmemory"',
-      matchUnits: ['生产环境', 'redis', 'maxmemory'],
+      ftsQuery: '"生产环境" OR "redis" OR "maxmemory"',
+      matchUnits: ['生产环境', 'redis', 'maxmemory', '生产', '环境'],
+      shortFallbackTokens: ['生产', '环境'],
     });
-    // An isolated short token with nothing to merge into is dropped.
-    expect(buildQueryPlan('的', 'trigram')).toEqual({ ftsQuery: '', matchUnits: [] });
+    expect(buildQueryPlan('的', 'trigram')).toEqual({
+      ftsQuery: '',
+      matchUnits: [],
+      shortFallbackTokens: [],
+    });
   });
 });
 
@@ -397,19 +413,62 @@ describe('recallSessions — trigram, recency decay, confidence', () => {
     });
   });
 
-  it('merges short-token runs into matchable verbatim spans', async () => {
+  it('recalls pure two-character queries and ranks full coverage above one-term distractors', async () => {
     await withManager(async manager => {
-      manager.upsertWorkSession(makeSession('codex:s1', '选型'));
+      manager.upsertWorkSession(makeSession('codex:target', '目标实现'));
+      manager.upsertWorkSession(makeSession('codex:capture', '采集看板'));
+      manager.upsertWorkSession(makeSession('codex:delta', '增量看板'));
       manager.insertSessionMessages([
-        makeMessage('m1', 'codex:s1', '讨论结论：CI 平台 最终决定采用 GitHub Actions。'),
+        makeMessage('m1', 'codex:target', '采集流程针对增量完成校验，并补齐失败防护。'),
+        makeMessage('m2', 'codex:capture', '采集页面只调整了视觉颜色。'),
+        makeMessage('m3', 'codex:delta', '增量统计图只修改了坐标轴。'),
       ]);
 
-      // 'CI' and '平台' are inert alone, but their merged span "CI 平台" is
-      // a verbatim substring of the statement — trigram phrase matching.
-      const merged = manager.recallSessions('CI 平台', { topK: 5 });
-      expect(merged.map(hit => hit.sessionId)).toContain('codex:s1');
-      // A lone 2-char token with no neighbour context stays unmatchable.
-      expect(manager.recallSessions('平台', { topK: 5 })).toEqual([]);
+      const hits = manager.recallSessions('采集 增量', { topK: 5 });
+      expect(hits[0].sessionId).toBe('codex:target');
+      expect(hits[0].confidence).toBe('high');
+      const oneTermScore = Math.max(
+        hits.find(hit => hit.sessionId === 'codex:capture')?.score ?? 0,
+        hits.find(hit => hit.sessionId === 'codex:delta')?.score ?? 0,
+      );
+      expect(hits[0].score).toBeGreaterThan(oneTermScore * 1.25);
+      expect(hits.map(hit => hit.sessionId)).toEqual(expect.arrayContaining([
+        'codex:capture',
+        'codex:delta',
+      ]));
+    });
+  });
+
+  it('recalls natural Chinese queries without artificial spaces', async () => {
+    await withManager(async manager => {
+      manager.upsertWorkSession(makeSession('codex:target', '目标实现'));
+      manager.upsertWorkSession(makeSession('codex:decoy', '采集看板'));
+      manager.insertSessionMessages([
+        makeMessage('m-natural-target', 'codex:target', '采集流程针对增量完成校验，并补齐失败防护。'),
+        makeMessage('m-natural-decoy', 'codex:decoy', '采集页面只调整了视觉颜色。'),
+      ]);
+
+      const hits = manager.recallSessions('采集增量防护在哪个文件', { topK: 5 });
+      expect(hits[0].sessionId).toBe('codex:target');
+      expect(hits[0].confidence).toBe('high');
+    });
+  });
+
+  it('deduplicates matching messages by session before applying the candidate limit', async () => {
+    await withManager(async manager => {
+      manager.upsertWorkSession(makeSession('codex:flood', 'Long session'));
+      manager.upsertWorkSession(makeSession('codex:independent', 'Independent session'));
+      manager.insertSessionMessages([
+        ...Array.from({ length: 80 }, (_, index) =>
+          makeMessage(`m-flood-${index}`, 'codex:flood', `needlephrase repeated message ${index}`)),
+        makeMessage('m-independent', 'codex:independent', 'needlephrase independent result'),
+      ]);
+
+      const hits = manager.recallSessions('needlephrase', { topK: 2, candidateLimit: 2 });
+      expect(hits.map(hit => hit.sessionId)).toEqual(expect.arrayContaining([
+        'codex:flood',
+        'codex:independent',
+      ]));
     });
   });
 

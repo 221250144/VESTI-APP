@@ -31,9 +31,15 @@ The server never modifies captured content. Its single write is `session_digests
 
 ```bash
 corepack pnpm install
-corepack pnpm --filter @vesti/vesti-mcp build   # outputs dist/cli.js (+ dist/index.js)
+corepack pnpm mcp:build                         # builds external core, then dist/cli.js (+ dist/index.js)
 corepack pnpm --filter @vesti/vesti-mcp test
 ```
+
+`vesti_search_files` 的纯路径提取、聚合与排序核心由独立的
+[`@vesti/search-files-core`](https://github.com/firefly-hefeng/VESTI-SKILLS/tree/main/packages/vesti-search-files-core)
+维护。本仓库仅保留 VESTI SQLite/FTS 适配器和 MCP 协议入口。本地开发时将
+`VESTI-APP` 与 `VESTI-SKILLS` 放在同一父目录，运行根目录的 `pnpm mcp:build`
+会先构建外部核心，再构建并内联 MCP 产物。
 
 ## Register in your agent
 
@@ -299,7 +305,7 @@ sessions comes back in `unmatched_paths` with the known projects in `hints`.
 - `src/recall.ts` — FTS5 + RRF recall (port of capture-core `SessionRecall`, pure-FTS path)
 - `src/tools.ts` — the three layer implementations + `vesti_project_brief`
 - `src/memory.ts` — the memory-space pair `vesti_memory_search` / `vesti_memory_get` (schema v14, same tokenizer-aware FTS strategy as recall)
-- `src/files.ts` — `vesti_search_files`: file-level index (recalled sessions' key_files + tool-input path extraction, name/content evidence channels)
+- `src/files.ts` — `vesti_search_files` 的 VESTI SQLite/FTS 数据适配器；路径提取、聚合和排序位于 VESTI-SKILLS 的 `@vesti/search-files-core`
 - `src/projectContext.ts` — `vesti_get_project_context` / `vesti_get_handoff_context`: project key derivation (port of capture-core `projectRegistry`), per-key memory-layer merge, cross-project links
 - `src/server.ts` — MCP wiring on the official `@modelcontextprotocol/sdk` (low-level `Server`, hand-written JSON Schemas, no zod), including the session-start behavior contract in `instructions`
 - `src/cli.ts` — stdio entry (`bin: vesti-mcp`)

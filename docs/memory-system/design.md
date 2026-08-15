@@ -2,7 +2,7 @@
 
 更新时间：2026-07-21（子代理归属修复 + timeline 子代理线 + degraded 语义修订）
 
-适用范围：记忆系统 v2 的分层设计与取舍说明，实现位于 `packages/capture-core/src/{state,search,tree,storage}/`、`src/main/{digestService,projectMemoryService}.ts` 与 `packages/vesti-mcp`。本文写「是什么/为什么」，字段级细节以代码为准；评测依据见 [bench.md](bench.md)。
+适用范围：记忆系统 v2 的分层设计与取舍说明，实现位于 `packages/capture-core/src/{state,search,tree,storage}/`、`src/main/{digestService,projectMemoryService}.ts` 与 `packages/vesti-mcp`。文件定位的纯算法核心由 VESTI-SKILLS 的 `@vesti/search-files-core` 维护，本仓 MCP 仅实现数据库适配与协议入口。本文写「是什么/为什么」，字段级细节以代码为准；评测依据见 [bench.md](bench.md)。
 
 ## 设计目标
 
