@@ -15,7 +15,7 @@ import DOMPurify from "dompurify";
 import { BookText, CalendarDays } from "lucide-react";
 import type { DailyLog, StorageApi, WeeklyReport } from "../../types";
 import type { MemorySpaceCopy } from "./memorySpaceCopy";
-import { MemoryOverviewCard } from "./memorySections";
+import { MemoryOverviewCard, CollapseChevron } from "./memorySections";
 
 // Fired by the desktop daily service after an auto (re)generation — same event
 // the daily tab listens to.
@@ -130,6 +130,7 @@ export function DailyLogCard({
       emptyText={copy.daily.empty}
       statusLine={todayStatusLine(copy, logs)}
       entryCountLabel={(count) => copy.entryCount.replace("{count}", String(count))}
+      tip={copy.daily.tip}
       onOpen={onOpen}
     />
   );
@@ -147,6 +148,9 @@ export function DailyLogSection({
 }) {
   const { logs, weekly, loadError } = useDailyLogs(storage);
   const [selection, setSelection] = useState<Selection | null>(null);
+  // Weekly reports are a secondary rollup — collapsed by default; the daily
+  // timeline above stays directly usable.
+  const [weeklyOpen, setWeeklyOpen] = useState(false);
 
   const viewLog = useMemo(
     () =>
@@ -228,30 +232,40 @@ export function DailyLogSection({
 
           {(weekly ?? []).length > 0 ? (
             <section>
-              <h2 className="mb-1.5 px-1 text-vesti-sm font-sans font-medium uppercase tracking-wide text-text-tertiary">
+              <button
+                type="button"
+                aria-expanded={weeklyOpen}
+                aria-label={`${weeklyOpen ? copy.collapseSection : copy.expandSection}: ${copy.weeklyTitle}`}
+                onClick={() => setWeeklyOpen((open) => !open)}
+                className="mb-1.5 flex w-full items-center gap-1.5 px-1 text-left text-vesti-sm font-sans font-medium uppercase tracking-wide text-text-tertiary"
+              >
                 {copy.weeklyTitle}
-              </h2>
-              <div className="space-y-1">
-                {(weekly ?? []).map((report) => (
-                  <button
-                    key={report.id}
-                    type="button"
-                    onClick={() => setSelection({ kind: "weekly", id: report.id })}
-                    className={`flex w-full flex-col gap-1 rounded-lg border px-3 py-2 text-left transition-colors ${
-                      selection?.kind === "weekly" && selection.id === report.id
-                        ? "border-accent-primary bg-bg-surface-card-active"
-                        : "border-transparent hover:bg-bg-surface-card"
-                    }`}
-                  >
-                    <span className="block truncate text-vesti-base font-sans font-medium text-text-primary">
-                      {formatRange(report.rangeStart, report.rangeEnd)}
-                    </span>
-                    <span className="block truncate text-vesti-sm font-sans text-text-tertiary">
-                      {previewDailyLog(report.content, 60)}
-                    </span>
-                  </button>
-                ))}
-              </div>
+                <span className="text-text-tertiary/60">({(weekly ?? []).length})</span>
+                <CollapseChevron open={weeklyOpen} className="ml-auto" />
+              </button>
+              {weeklyOpen ? (
+                <div className="space-y-1">
+                  {(weekly ?? []).map((report) => (
+                    <button
+                      key={report.id}
+                      type="button"
+                      onClick={() => setSelection({ kind: "weekly", id: report.id })}
+                      className={`flex w-full flex-col gap-1 rounded-lg border px-3 py-2 text-left transition-colors ${
+                        selection?.kind === "weekly" && selection.id === report.id
+                          ? "border-accent-primary bg-bg-surface-card-active"
+                          : "border-transparent hover:bg-bg-surface-card"
+                      }`}
+                    >
+                      <span className="block truncate text-vesti-base font-sans font-medium text-text-primary">
+                        {formatRange(report.rangeStart, report.rangeEnd)}
+                      </span>
+                      <span className="block truncate text-vesti-sm font-sans text-text-tertiary">
+                        {previewDailyLog(report.content, 60)}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
             </section>
           ) : null}
         </div>

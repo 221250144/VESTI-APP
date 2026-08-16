@@ -15,6 +15,7 @@ import { DataManagementPanel } from "./components/DataManagementPanel";
 import { LibraryDataProvider } from "./contexts/library-data";
 import { ExploreTab } from "./tabs/explore-tab";
 import { AitiCard } from "./components/AitiCard";
+import { InfoTip } from "./components/InfoTip";
 import { LearnCard } from "./components/LearnCard";
 import { RoundtablePanel } from "./components/RoundtablePanel";
 import { learnTopicSuggestions } from "./lib/learnTopics";
@@ -129,6 +130,12 @@ const DEFAULT_LABELS: DashboardLabels = {
     notion: "Notion",
     general: "General",
     libraryNavigation: "Library navigation",
+    navAllTip: "Every conversation captured on desktop and the browser extension.",
+    navStarredTip: "Conversations you starred, for quick revisits.",
+    navRecentTip: "Recently active conversations, newest first.",
+    navSourcesTip: "Browse by source — browser / agent platforms → project → topic; custom folders live under the browser node.",
+    navNotesTip: "Local Markdown notes, exportable to Obsidian.",
+    organizeTip: "Batch tidy-up with local rules only: drop empty chats, merge duplicates, bulk-tag, archive to topics — nothing leaves this device.",
     conversationCount: "conversations",
     noMessages: "No messages captured yet.",
     loadingMessages: "Loading messages...",
@@ -825,6 +832,9 @@ const DEFAULT_LABELS: DashboardLabels = {
     modeAsk: "Night Talk",
     modeAiti: "AITI",
     modeRoundtable: "Roundtable",
+    modeAskTip: "Night talks with the Listener/Creator owls, answered over your sessions and long-term memories.",
+    modeAitiTip: "A locally computed portrait of your thinking: strengths, focus axes, and long-term investments.",
+    modeRoundtableTip: "Five owls — skeptic, optimist, pragmatist, expert, devil's advocate — debate one question at a time.",
     title: "Your AITI — your thinking strengths",
     subtitle: "Computed locally from your own conversations. A reflection of your strengths, not a verdict.",
     insufficient: "Your imagery has not taken shape yet — it needs at least 5 conversation summaries as signal. Generate summaries below, or keep chatting with your AI and it will emerge.",
@@ -876,6 +886,7 @@ const DEFAULT_LABELS: DashboardLabels = {
   },
   learn: {
     modeLearn: "Learn",
+    modeLearnTip: "Your AI conversations organized into a personal curriculum: domains, glossary, and open loops — computed locally.",
     title: "What you've been learning",
     subtitle: "Your conversations, organized as a personal curriculum. Computed locally.",
     intro: "This is your learning map: it automatically reads the summaries of your AI conversations and lays out what you've been studying, how deep it went, and what is still open.",
@@ -1628,26 +1639,45 @@ export function VestiDashboard({
             <div className={`h-full ${activeTab === "explore" ? "flex flex-col" : "hidden"}`}>
               {/* Explore = the reflective-AI hub: 问答 / AITI 画像 / 学习 / 圆桌 */}
               <div className="flex items-center gap-1 border-b border-border-subtle px-4 py-2">
-                {(["ask", "aiti", "learn", "roundtable"] as const).map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    onClick={() => setExploreMode(mode)}
-                    className={`rounded-full px-3 py-1 text-[12px] font-medium transition-colors ${
-                      exploreMode === mode
-                        ? "bg-accent-primary-light text-accent-primary"
-                        : "text-text-tertiary hover:text-text-secondary"
-                    }`}
-                  >
-                    {mode === "ask"
+                {(["ask", "aiti", "learn", "roundtable"] as const).map((mode) => {
+                  const modeLabel =
+                    mode === "ask"
                       ? labels.aiti.modeAsk
                       : mode === "aiti"
                         ? labels.aiti.modeAiti
                         : mode === "learn"
                           ? labels.learn.modeLearn
-                          : labels.aiti.modeRoundtable}
-                  </button>
-                ))}
+                          : labels.aiti.modeRoundtable;
+                  const modeTip =
+                    mode === "ask"
+                      ? labels.aiti.modeAskTip
+                      : mode === "aiti"
+                        ? labels.aiti.modeAitiTip
+                        : mode === "learn"
+                          ? labels.learn.modeLearnTip
+                          : labels.aiti.modeRoundtableTip;
+                  const button = (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => setExploreMode(mode)}
+                      className={`rounded-full px-3 py-1 text-[12px] font-medium transition-colors ${
+                        exploreMode === mode
+                          ? "bg-accent-primary-light text-accent-primary"
+                          : "text-text-tertiary hover:text-text-secondary"
+                      }`}
+                    >
+                      {modeLabel}
+                    </button>
+                  );
+                  return modeTip ? (
+                    <InfoTip key={mode} title={modeLabel} description={modeTip}>
+                      {button}
+                    </InfoTip>
+                  ) : (
+                    button
+                  );
+                })}
               </div>
               <div className={`min-h-0 flex-1 ${exploreMode === "ask" ? "block" : "hidden"}`}>
                 <ExploreTab

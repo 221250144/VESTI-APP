@@ -41,6 +41,26 @@ describe("MEMORY_SPACE_COPY", () => {
       expect(copy.entryCount).toContain("{count}");
     }
   });
+
+  it("ships the grouping/collapse chrome copy in all four locales", () => {
+    for (const locale of ["en", "zh", "ja", "ko"] as const) {
+      const copy = MEMORY_SPACE_COPY[locale];
+      expect(copy.unlinkedProject.length).toBeGreaterThan(0);
+      expect(copy.expandSection.length).toBeGreaterThan(0);
+      expect(copy.collapseSection.length).toBeGreaterThan(0);
+    }
+    expect(MEMORY_SPACE_COPY.zh.unlinkedProject).toBe("未关联");
+  });
+
+  it("ships hover-tooltip intros (tip) for every card in all four locales", () => {
+    for (const locale of ["en", "zh", "ja", "ko"] as const) {
+      const copy = MEMORY_SPACE_COPY[locale];
+      expect(copy.memories.tip.length).toBeGreaterThan(0);
+      expect(copy.dreams.tip.length).toBeGreaterThan(0);
+      expect(copy.daily.tip.length).toBeGreaterThan(0);
+      expect(copy.deposits.tip.length).toBeGreaterThan(0);
+    }
+  });
 });
 
 describe("previewDailyLog", () => {

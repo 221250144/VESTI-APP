@@ -8,9 +8,26 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
-import { BookOpen, ChevronRight, CloudMoon, RefreshCw, Sparkles, X } from "lucide-react";
+import {
+  BookOpen,
+  ChevronDown,
+  ChevronRight,
+  CloudMoon,
+  RefreshCw,
+  Sparkles,
+  X,
+} from "lucide-react";
 import type { MemoryEntryView, StorageApi } from "../../types";
+import { InfoTip } from "../../components/InfoTip";
 import type { MemorySpaceCopy } from "./memorySpaceCopy";
+import {
+  entryDateLabel,
+  groupEntriesByProject,
+  toggleExpandedKey,
+  type SessionProjectMap,
+} from "./memoryProjects";
+
+export { entryDateLabel };
 
 export type MemoryLabelFn = (key: string, fallback: string) => string;
 
@@ -19,6 +36,31 @@ interface SectionProps {
   l: MemoryLabelFn;
   /** Bumped after a dream run completes, so the sections reload. */
   refreshKey: number;
+  /** Component-local card chrome copy (four locales, see memorySpaceCopy). */
+  copy: MemorySpaceCopy;
+  /** session→project map from useSessionProjectMap, hoisted to the tab so the
+   * overview cards and the drilled-in sections share one tree load. */
+  sessionMap: SessionProjectMap;
+}
+
+/** Shared collapse toggle chevron: down when open, rotated sideways while
+ * collapsed (same idiom as LearnCard's compact-domains toggle). Pair it with
+ * aria-expanded on the host button. */
+export function CollapseChevron({
+  open,
+  className = "",
+}: {
+  open: boolean;
+  className?: string;
+}) {
+  return (
+    <ChevronDown
+      strokeWidth={1.75}
+      className={`h-3.5 w-3.5 shrink-0 text-text-tertiary transition-transform ${
+        open ? "" : "-rotate-90"
+      }${className ? ` ${className}` : ""}`}
+    />
+  );
 }
 
 // ---- tags ------------------------------------------------------------------------
@@ -68,10 +110,6 @@ function tagLabel(l: MemoryLabelFn, tag: string): string {
 
 // ---- entry helpers -------------------------------------------------------------------
 
-export function entryDateLabel(entry: MemoryEntryView): string {
-  return entry.entryDate ?? new Date(entry.updatedAt).toLocaleDateString();
-}
-
 /** Card one-liner: the stored summary, else the first plain (non-heading)
  * line of the Markdown body. */
 function entrySummaryLine(entry: MemoryEntryView): string {
@@ -104,12 +142,16 @@ export function MemoryReaderModal({
   l,
   onSave,
   onDelete,
+  sessionMap,
 }: {
   entry: MemoryEntryView;
   onClose: () => void;
   l: MemoryLabelFn;
   onSave?: (next: MemoryEntryView) => Promise<void>;
   onDelete?: (id: string) => Promise<void>;
+  /** session→project map: the header date prefers the time the source
+   * conversations happened over the entry's write time. */
+  sessionMap?: SessionProjectMap;
 }) {
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState(entry.title);
@@ -198,7 +240,7 @@ export function MemoryReaderModal({
                   {tagLabel(l, tag)}
                 </span>
               ))}
-              <span>{entryDateLabel(entry)}</span>
+              <span>{entryDateLabel(entry, sessionMap)}</span>
               <span>
                 v{entry.version}
                 {" · "}
@@ -392,11 +434,14 @@ function SectionState({
 
 // ---- 记忆 (dream memories) -----------------------------------------------------------------
 
-export function DreamMemorySection({ storage, l, refreshKey }: SectionProps) {
+export function DreamMemorySection({ storage, l, refreshKey, copy, sessionMap }: SectionProps) {
   const { entries, loadError, reload } = useMemoryEntries(storage, "dream", refreshKey);
   const [activeTag, setActiveTag] = useState<string>("all");
   const [query, setQuery] = useState("");
   const [reading, setReading] = useState<MemoryEntryView | null>(null);
+  // Expanded project cards, keyed by projectKey ("unlinked" for the 未关联
+  // bucket). Empty set = every project card starts collapsed.
+  const [expandedProjects, setExpandedProjects] = useState<ReadonlySet<string>>(new Set());
 
   const presentTags = useMemo(
     () => KNOWN_TAGS.filter((tag) => (entries ?? []).some((entry) => entry.tags.includes(tag))),
@@ -416,6 +461,10 @@ export function DreamMemorySection({ storage, l, refreshKey }: SectionProps) {
         entry.contentMarkdown.toLowerCase().includes(q),
     );
   }, [entries, activeTag, query]);
+
+  // Filter first (tag chips + search above), then group by the project the
+  // entry's source sessions resolve to. Tag filtering keeps the grouping.
+  const groups = useMemo(() => groupEntriesByProject(filtered, sessionMap), [filtered, sessionMap]);
 
   const showList = !loadError && entries !== null && filtered.length > 0;
 
@@ -473,55 +522,68 @@ export function DreamMemorySection({ storage, l, refreshKey }: SectionProps) {
         ) : null}
 
         {showList ? (
-          <div className="space-y-6">
-            {(activeTag === "all" ? presentTags : [activeTag]).map((tag) => {
-              const group =
-                tag === "all"
-                  ? filtered
-                  : filtered.filter((entry) => entry.tags.includes(tag));
-              if (group.length === 0) return null;
+          <div className="space-y-3">
+            {groups.map((group) => {
+              const groupKey = group.projectKey ?? "unlinked";
+              const open = expandedProjects.has(groupKey);
+              const label = group.projectLabel ?? copy.unlinkedProject;
               return (
-                <section key={tag}>
-                  {activeTag === "all" ? (
-                    <h3 className="mb-2 flex items-center gap-1.5 text-vesti-sm font-sans font-medium uppercase tracking-wide text-text-tertiary">
-                      <span className={`h-1.5 w-1.5 rounded-full ${tagDotClass(tag)}`} />
-                      {tag === "all" ? l("tagAll", "All") : tagLabel(l, tag)}
-                      <span className="text-text-tertiary/60">({group.length})</span>
-                    </h3>
-                  ) : null}
-                  <div className="grid grid-cols-1 gap-2 xl:grid-cols-2">
-                    {group.map((entry) => {
-                      const primaryTag = entry.tags[0] ?? "";
-                      const summary = entrySummaryLine(entry);
-                      return (
-                        <button
-                          key={entry.id}
-                          type="button"
-                          onClick={() => setReading(entry)}
-                          className="flex items-start gap-2.5 rounded-lg border border-border-subtle bg-bg-surface-card px-3 py-2.5 text-left transition-colors hover:bg-bg-surface-card-hover"
-                        >
-                          <span
-                            className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${tagDotClass(primaryTag)}`}
-                          />
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate text-vesti-base font-sans font-medium text-text-primary">
-                              {entry.title || l("untitled", "Untitled")}
-                            </span>
-                            {summary ? (
-                              <span className="mt-0.5 block truncate text-vesti-sm font-sans text-text-tertiary">
-                                {summary}
+                <section
+                  key={groupKey}
+                  className="rounded-xl border border-border-subtle bg-bg-surface-card"
+                >
+                  <button
+                    type="button"
+                    aria-expanded={open}
+                    aria-label={`${open ? copy.collapseSection : copy.expandSection}: ${label}`}
+                    onClick={() =>
+                      setExpandedProjects((current) => toggleExpandedKey(current, groupKey))
+                    }
+                    className="flex w-full items-center gap-2 px-3.5 py-2.5 text-left"
+                  >
+                    <span className="min-w-0 flex-1 truncate text-vesti-base font-sans font-medium text-text-primary">
+                      {label}
+                    </span>
+                    <span className="shrink-0 rounded-full bg-bg-tertiary px-2 py-0.5 text-vesti-sm font-sans text-text-tertiary">
+                      {copy.entryCount.replace("{count}", String(group.entries.length))}
+                    </span>
+                    <CollapseChevron open={open} />
+                  </button>
+                  {open ? (
+                    <div className="grid grid-cols-1 gap-2 px-3 pb-3 xl:grid-cols-2">
+                      {group.entries.map((entry) => {
+                        const primaryTag = entry.tags[0] ?? "";
+                        const summary = entrySummaryLine(entry);
+                        return (
+                          <button
+                            key={entry.id}
+                            type="button"
+                            onClick={() => setReading(entry)}
+                            className="flex items-start gap-2.5 rounded-lg border border-border-subtle bg-bg-surface-card px-3 py-2.5 text-left transition-colors hover:bg-bg-surface-card-hover"
+                          >
+                            <span
+                              className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${tagDotClass(primaryTag)}`}
+                            />
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-vesti-base font-sans font-medium text-text-primary">
+                                {entry.title || l("untitled", "Untitled")}
                               </span>
-                            ) : null}
-                            <span className="mt-1 block text-vesti-sm font-sans text-text-tertiary">
-                              {tagLabel(l, primaryTag)}
-                              {" · "}
-                              {entryDateLabel(entry)}
+                              {summary ? (
+                                <span className="mt-0.5 block truncate text-vesti-sm font-sans text-text-tertiary">
+                                  {summary}
+                                </span>
+                              ) : null}
+                              <span className="mt-1 block text-vesti-sm font-sans text-text-tertiary">
+                                {tagLabel(l, primaryTag)}
+                                {" · "}
+                                {entryDateLabel(entry, sessionMap)}
+                              </span>
                             </span>
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
                 </section>
               );
             })}
@@ -548,6 +610,7 @@ export function DreamMemorySection({ storage, l, refreshKey }: SectionProps) {
           l={l}
           onSave={storage.upsertMemoryEntry ? saveEntry : undefined}
           onDelete={storage.deleteMemoryEntry ? deleteEntry : undefined}
+          sessionMap={sessionMap}
         />
       ) : null}
     </div>
@@ -556,9 +619,11 @@ export function DreamMemorySection({ storage, l, refreshKey }: SectionProps) {
 
 // ---- 梦境日志 (dream run logs) --------------------------------------------------------------
 
-export function DreamLogSection({ storage, l, refreshKey }: SectionProps) {
+export function DreamLogSection({ storage, l, refreshKey, copy, sessionMap }: SectionProps) {
   const { entries, loadError, reload } = useMemoryEntries(storage, "dream-log", refreshKey);
   const [reading, setReading] = useState<MemoryEntryView | null>(null);
+  // Collapsible groups (猫头鹰日记 / 梦境日志); an empty set = both start collapsed.
+  const [expandedGroups, setExpandedGroups] = useState<ReadonlySet<string>>(new Set());
 
   const deleteEntry = async (id: string): Promise<void> => {
     if (!storage.deleteMemoryEntry) return;
@@ -586,6 +651,24 @@ export function DreamLogSection({ storage, l, refreshKey }: SectionProps) {
 
   const showList = !loadError && entries !== null && sorted.length > 0;
 
+  const groupHeader = (key: string, icon: ReactNode, title: string, count: number) => {
+    const open = expandedGroups.has(key);
+    return (
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-label={`${open ? copy.collapseSection : copy.expandSection}: ${title}`}
+        onClick={() => setExpandedGroups((current) => toggleExpandedKey(current, key))}
+        className="mb-2 flex w-full items-center gap-1.5 text-left text-vesti-sm font-sans font-medium uppercase tracking-wide text-text-tertiary"
+      >
+        {icon}
+        {title}
+        <span className="text-text-tertiary/60">({count})</span>
+        <CollapseChevron open={open} className="ml-auto" />
+      </button>
+    );
+  };
+
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-3xl px-6 py-5">
@@ -593,70 +676,78 @@ export function DreamLogSection({ storage, l, refreshKey }: SectionProps) {
           <div className="space-y-5">
             {owlEntries.length > 0 ? (
               <section>
-                <h3 className="mb-2 flex items-center gap-1.5 text-vesti-sm font-sans font-medium uppercase tracking-wide text-text-tertiary">
-                  <BookOpen strokeWidth={1.75} className="h-3.5 w-3.5" />
-                  {l("owlDiaryTitle", "Owl diary")}
-                </h3>
-                <div className="space-y-1.5">
-                  {owlEntries.map((entry) => (
-                    <button
-                      key={entry.id}
-                      type="button"
-                      onClick={() => setReading(entry)}
-                      className="flex w-full items-start gap-2.5 rounded-lg border border-border-subtle bg-bg-surface-card px-3 py-2.5 text-left transition-colors hover:bg-bg-surface-card-hover"
-                    >
-                      <BookOpen
-                        strokeWidth={1.75}
-                        className="mt-0.5 h-4 w-4 shrink-0 text-text-tertiary"
-                      />
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-vesti-base font-sans font-medium text-text-primary">
-                          {entry.title || l("untitled", "Untitled")}
-                        </span>
-                        {entry.summary ? (
-                          <span className="mt-0.5 block truncate text-vesti-sm font-sans text-text-tertiary">
-                            {entry.summary}
+                {groupHeader(
+                  "owl",
+                  <BookOpen strokeWidth={1.75} className="h-3.5 w-3.5" />,
+                  l("owlDiaryTitle", "Owl diary"),
+                  owlEntries.length,
+                )}
+                {expandedGroups.has("owl") ? (
+                  <div className="space-y-1.5">
+                    {owlEntries.map((entry) => (
+                      <button
+                        key={entry.id}
+                        type="button"
+                        onClick={() => setReading(entry)}
+                        className="flex w-full items-start gap-2.5 rounded-lg border border-border-subtle bg-bg-surface-card px-3 py-2.5 text-left transition-colors hover:bg-bg-surface-card-hover"
+                      >
+                        <BookOpen
+                          strokeWidth={1.75}
+                          className="mt-0.5 h-4 w-4 shrink-0 text-text-tertiary"
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-vesti-base font-sans font-medium text-text-primary">
+                            {entry.title || l("untitled", "Untitled")}
                           </span>
-                        ) : null}
-                        <span className="mt-1 block text-vesti-sm font-sans text-text-tertiary">
-                          {entryDateLabel(entry)}
+                          {entry.summary ? (
+                            <span className="mt-0.5 block truncate text-vesti-sm font-sans text-text-tertiary">
+                              {entry.summary}
+                            </span>
+                          ) : null}
+                          <span className="mt-1 block text-vesti-sm font-sans text-text-tertiary">
+                            {entryDateLabel(entry, sessionMap)}
+                          </span>
                         </span>
-                      </span>
-                    </button>
-                  ))}
-                </div>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
               </section>
             ) : null}
             {plainLogs.length > 0 ? (
               <section>
-                <h3 className="mb-2 flex items-center gap-1.5 text-vesti-sm font-sans font-medium uppercase tracking-wide text-text-tertiary">
-                  <CloudMoon strokeWidth={1.75} className="h-3.5 w-3.5" />
-                  {l("dreamLogTitle", "Dream logs")}
-                </h3>
-                <div className="space-y-1.5">
-                  {plainLogs.map((entry) => (
-                    <button
-                      key={entry.id}
-                      type="button"
-                      onClick={() => setReading(entry)}
-                      className="flex w-full items-start gap-2.5 rounded-lg border border-border-subtle bg-bg-surface-card px-3 py-2.5 text-left transition-colors hover:bg-bg-surface-card-hover"
-                    >
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-vesti-base font-sans font-medium text-text-primary">
-                          {entry.title || l("untitled", "Untitled")}
-                        </span>
-                        {entry.summary ? (
-                          <span className="mt-0.5 block truncate text-vesti-sm font-sans text-text-tertiary">
-                            {entry.summary}
+                {groupHeader(
+                  "logs",
+                  <CloudMoon strokeWidth={1.75} className="h-3.5 w-3.5" />,
+                  l("dreamLogTitle", "Dream logs"),
+                  plainLogs.length,
+                )}
+                {expandedGroups.has("logs") ? (
+                  <div className="space-y-1.5">
+                    {plainLogs.map((entry) => (
+                      <button
+                        key={entry.id}
+                        type="button"
+                        onClick={() => setReading(entry)}
+                        className="flex w-full items-start gap-2.5 rounded-lg border border-border-subtle bg-bg-surface-card px-3 py-2.5 text-left transition-colors hover:bg-bg-surface-card-hover"
+                      >
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-vesti-base font-sans font-medium text-text-primary">
+                            {entry.title || l("untitled", "Untitled")}
                           </span>
-                        ) : null}
-                        <span className="mt-1 block text-vesti-sm font-sans text-text-tertiary">
-                          {entryDateLabel(entry)}
+                          {entry.summary ? (
+                            <span className="mt-0.5 block truncate text-vesti-sm font-sans text-text-tertiary">
+                              {entry.summary}
+                            </span>
+                          ) : null}
+                          <span className="mt-1 block text-vesti-sm font-sans text-text-tertiary">
+                            {entryDateLabel(entry, sessionMap)}
+                          </span>
                         </span>
-                      </span>
-                    </button>
-                  ))}
-                </div>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
               </section>
             ) : null}
           </div>
@@ -678,6 +769,7 @@ export function DreamLogSection({ storage, l, refreshKey }: SectionProps) {
           onClose={() => setReading(null)}
           l={l}
           onDelete={storage.deleteMemoryEntry ? deleteEntry : undefined}
+          sessionMap={sessionMap}
         />
       ) : null}
     </div>
@@ -692,7 +784,8 @@ export function DreamLogSection({ storage, l, refreshKey }: SectionProps) {
 // full section.
 
 /** Presentational summary card: icon + title + count badge, one-line
- * description, then 1-2 preview lines (or the empty hint). */
+ * description, then 1-2 preview lines (or the empty hint). When `tip` is
+ * given the card gets a hover tooltip with the longer functional intro. */
 export function MemoryOverviewCard({
   icon,
   title,
@@ -702,6 +795,7 @@ export function MemoryOverviewCard({
   emptyText,
   statusLine,
   entryCountLabel,
+  tip,
   onOpen,
 }: {
   icon: ReactNode;
@@ -714,13 +808,15 @@ export function MemoryOverviewCard({
   /** Optional status row above the previews (e.g. the daily card's today state). */
   statusLine?: ReactNode;
   entryCountLabel: (count: number) => string;
+  /** Longer "what is this module" intro shown in the hover tooltip. */
+  tip?: string;
   onOpen: () => void;
 }) {
-  return (
+  const card = (
     <button
       type="button"
       onClick={onOpen}
-      className="group flex flex-col rounded-xl border border-border-subtle bg-bg-surface-card p-4 text-left transition-colors hover:border-accent-primary/40 hover:bg-bg-surface-card-hover"
+      className="group flex h-full w-full flex-col rounded-xl border border-border-subtle bg-bg-surface-card p-4 text-left transition-colors hover:border-accent-primary/40 hover:bg-bg-surface-card-hover"
     >
       <span className="flex items-center gap-2">
         <span className="shrink-0 text-text-secondary transition-colors group-hover:text-accent-primary">
@@ -758,10 +854,20 @@ export function MemoryOverviewCard({
       </span>
     </button>
   );
+  if (!tip) return card;
+  return (
+    <InfoTip title={title} description={tip} className="flex">
+      {card}
+    </InfoTip>
+  );
 }
 
-function entryPreviewLine(entry: MemoryEntryView, l: MemoryLabelFn): string {
-  return `${entry.title || l("untitled", "Untitled")} · ${entryDateLabel(entry)}`;
+function entryPreviewLine(
+  entry: MemoryEntryView,
+  l: MemoryLabelFn,
+  sessionMap: SessionProjectMap,
+): string {
+  return `${entry.title || l("untitled", "Untitled")} · ${entryDateLabel(entry, sessionMap)}`;
 }
 
 /** 记忆 (dream memories) summary card. */
@@ -770,8 +876,9 @@ export function DreamMemoryCard({
   l,
   refreshKey,
   copy,
+  sessionMap,
   onOpen,
-}: SectionProps & { copy: MemorySpaceCopy; onOpen: () => void }) {
+}: SectionProps & { onOpen: () => void }) {
   const { entries } = useMemoryEntries(storage, "dream", refreshKey);
   const latest = useMemo(
     () => [...(entries ?? [])].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 2),
@@ -783,11 +890,12 @@ export function DreamMemoryCard({
       title={copy.memories.title}
       count={entries === null ? null : entries.length}
       description={copy.memories.desc}
-      previews={latest.map((entry) => entryPreviewLine(entry, l))}
+      previews={latest.map((entry) => entryPreviewLine(entry, l, sessionMap))}
       emptyText={copy.memories.empty}
       entryCountLabel={(count) =>
         copy.entryCount.replace("{count}", String(count))
       }
+      tip={copy.memories.tip}
       onOpen={onOpen}
     />
   );
@@ -799,8 +907,9 @@ export function DreamLogCard({
   l,
   refreshKey,
   copy,
+  sessionMap,
   onOpen,
-}: SectionProps & { copy: MemorySpaceCopy; onOpen: () => void }) {
+}: SectionProps & { onOpen: () => void }) {
   const { entries } = useMemoryEntries(storage, "dream-log", refreshKey);
   const latest = useMemo(
     () =>
@@ -818,11 +927,12 @@ export function DreamLogCard({
       title={copy.dreams.title}
       count={entries === null ? null : entries.length}
       description={copy.dreams.desc}
-      previews={latest.map((entry) => entryPreviewLine(entry, l))}
+      previews={latest.map((entry) => entryPreviewLine(entry, l, sessionMap))}
       emptyText={copy.dreams.empty}
       entryCountLabel={(count) =>
         copy.entryCount.replace("{count}", String(count))
       }
+      tip={copy.dreams.tip}
       onOpen={onOpen}
     />
   );

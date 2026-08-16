@@ -6,9 +6,12 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
  */
 export function DockTooltip({
   label,
+  description,
   children,
 }: {
   label: string;
+  /** Optional 1–2 sentence functional intro shown under the label. */
+  description?: string;
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -39,12 +42,26 @@ export function DockTooltip({
     >
       {children}
       {open ? (
-        <span
-          role="tooltip"
-          className="pointer-events-none absolute left-full top-1/2 z-50 ml-2 -translate-y-1/2 whitespace-nowrap rounded-md border border-border-subtle bg-bg-primary px-2 py-1 text-[12px] font-sans text-text-primary shadow-popover"
-        >
-          {label}
-        </span>
+        description ? (
+          <span
+            role="tooltip"
+            className="pointer-events-none absolute left-full top-1/2 z-50 ml-2 w-56 -translate-y-1/2 rounded-md border border-border-subtle bg-bg-primary px-2.5 py-2 text-left shadow-popover"
+          >
+            <span className="block text-[12px] font-sans font-medium text-text-primary">
+              {label}
+            </span>
+            <span className="mt-0.5 block text-[12px] font-sans leading-snug text-text-secondary">
+              {description}
+            </span>
+          </span>
+        ) : (
+          <span
+            role="tooltip"
+            className="pointer-events-none absolute left-full top-1/2 z-50 ml-2 -translate-y-1/2 whitespace-nowrap rounded-md border border-border-subtle bg-bg-primary px-2 py-1 text-[12px] font-sans text-text-primary shadow-popover"
+          >
+            {label}
+          </span>
+        )
       ) : null}
     </span>
   );

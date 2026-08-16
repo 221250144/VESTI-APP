@@ -1802,6 +1802,14 @@ export interface DashboardLabels {
     notion: string;
     general: string;
     libraryNavigation: string;
+    /** Hover intros for the left-nav modules (the "label explanation" layer).
+     * Optional so extension hosts without them still typecheck. */
+    navAllTip?: string;
+    navStarredTip?: string;
+    navRecentTip?: string;
+    navSourcesTip?: string;
+    navNotesTip?: string;
+    organizeTip?: string;
     conversationCount: string;
     noMessages: string;
     loadingMessages: string;
@@ -2193,6 +2201,10 @@ export interface DashboardLabels {
     modeAsk: string;
     modeAiti: string;
     modeRoundtable: string;
+    /** Hover intros for the explore sub-mode switcher (optional for hosts). */
+    modeAskTip?: string;
+    modeAitiTip?: string;
+    modeRoundtableTip?: string;
     title: string;
     subtitle: string;
     insufficient: string;
@@ -2262,6 +2274,8 @@ export interface DashboardLabels {
   };
   learn: {
     modeLearn: string;
+    /** Hover intro for the learn sub-mode in the explore switcher. */
+    modeLearnTip?: string;
     title: string;
     subtitle: string;
     /** One-sentence "这是什么": what the map is and where it comes from. */

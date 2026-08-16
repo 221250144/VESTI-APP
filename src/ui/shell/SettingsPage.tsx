@@ -14,6 +14,7 @@ import type {
   WslStatusView,
 } from "../../shared/contracts";
 import { useI18n } from "../i18n";
+import { InfoTip } from "@vesti/ui";
 import type { SupportedLocale } from "../i18n/locales";
 import { MembershipAccountCard } from "../membership/MembershipAccountCard";
 import { DataContributionCard } from "../membership/DataContributionCard";
@@ -963,32 +964,42 @@ function Card({
   children: ReactNode;
 }) {
   // Sections default to collapsed to keep the page light; the open state is
-  // session-local (not persisted).
+  // session-local (not persisted). While collapsed, hovering the header shows
+  // the card's description as a tooltip so the intro stays discoverable.
   const [open, setOpen] = useState(false);
+  const header = (
+    <button
+      type="button"
+      aria-expanded={open}
+      onClick={() => setOpen(current => !current)}
+      className="flex min-w-0 flex-1 items-start justify-between gap-3 rounded-lg text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus"
+    >
+      <span className="min-w-0">
+        <span className="block text-[11px] font-sans font-medium uppercase tracking-[0.16em] text-text-tertiary">
+          {eyebrow}
+        </span>
+        <span className="mt-1 block font-serif text-[18px] font-normal text-text-primary">{title}</span>
+      </span>
+      <svg
+        aria-hidden="true"
+        viewBox="0 0 16 16"
+        fill="none"
+        className={`mt-1.5 h-3.5 w-3.5 shrink-0 text-text-tertiary transition-transform [transition-duration:160ms] ${open ? "rotate-180" : ""}`}
+      >
+        <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </button>
+  );
   return (
     <section className="rounded-card border border-border-subtle bg-bg-surface-card p-6">
       <div className={`flex items-start justify-between gap-4 ${open ? "mb-4" : ""}`}>
-        <button
-          type="button"
-          aria-expanded={open}
-          onClick={() => setOpen(current => !current)}
-          className="flex min-w-0 flex-1 items-start justify-between gap-3 rounded-lg text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus"
-        >
-          <span className="min-w-0">
-            <span className="block text-[11px] font-sans font-medium uppercase tracking-[0.16em] text-text-tertiary">
-              {eyebrow}
-            </span>
-            <span className="mt-1 block font-serif text-[18px] font-normal text-text-primary">{title}</span>
-          </span>
-          <svg
-            aria-hidden="true"
-            viewBox="0 0 16 16"
-            fill="none"
-            className={`mt-1.5 h-3.5 w-3.5 shrink-0 text-text-tertiary transition-transform [transition-duration:160ms] ${open ? "rotate-180" : ""}`}
-          >
-            <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </button>
+        {!open && description ? (
+          <InfoTip title={title} description={description} className="min-w-0 flex-1">
+            {header}
+          </InfoTip>
+        ) : (
+          header
+        )}
         {aside}
       </div>
       {open ? (

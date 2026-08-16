@@ -71,6 +71,54 @@ const DOCK_COPY: Record<
   },
 };
 
+// One-sentence functional intro per dock page, shown in the hover tooltip
+// under the page label (the "what is this module" layer of the dock).
+const DOCK_DESC: Record<SupportedLocale, Record<Exclude<ShellPage, "daily">, string>> = {
+  en: {
+    home: "Capture volume, activity trends, and source breakdown at a glance.",
+    library:
+      "Every conversation captured on desktop and the browser extension, browsed by source, project, and topic.",
+    explore:
+      "Reflect over your corpus: grounded Q&A night talks, the AITI self-portrait, learning synthesis, and the roundtable.",
+    network: "Your conversations linked into a graph by project and topic, growing over time.",
+    prompts:
+      "Scan archived sessions to surface the prompts you reuse, and curate them into your library.",
+    deposits:
+      "Dreams distill each day's sessions into long-term memories; deposits keep distilled knowledge documents.",
+    settings: "Model, capture, membership, pairing, and appearance settings.",
+  },
+  zh: {
+    home: "一览捕获总量、活跃趋势与来源分布的仪表盘。",
+    library: "桌面端与浏览器扩展捕获的全部会话，按来源、项目、话题浏览与管理。",
+    explore: "基于你的语料反思：夜话问答、AITI 自我画像、学习综合与圆桌讨论。",
+    network: "会话按项目与话题连成的图谱，随时间生长。",
+    prompts: "扫描本机归档会话，发现你反复使用的提示词并沉淀成库。",
+    deposits: "梦境把每天的会话蒸馏成长期记忆；沉淀保存提炼的知识文档。",
+    settings: "模型、捕获、会员、配对与外观等应用设置。",
+  },
+  ja: {
+    home: "キャプチャ量・活動傾向・ソース内訳を一望するダッシュボード。",
+    library:
+      "デスクトップとブラウザ拡張でキャプチャした全会話を、ソース・プロジェクト・トピックで閲覧・管理。",
+    explore:
+      "語料を振り返る：夜話 Q&A、AITI 自己画像、学習サマリー、円卓ディスカッション。",
+    network: "会話がプロジェクトとトピックでつながるグラフ。時間とともに育ちます。",
+    prompts: "保存済みセッションをスキャンし、よく使うプロンプトを発見してライブラリ化。",
+    deposits:
+      "夢が毎日のセッションを長期記憶に蒸留し、デポジットが蒸留済みナレッジ文書を保管。",
+    settings: "モデル、キャプチャ、メンバーシップ、ペアリング、外観などの設定。",
+  },
+  ko: {
+    home: "캡처량, 활동 추세, 소스 분포를 한눈에 보는 대시보드.",
+    library: "데스크톱과 브라우저 확장에서 캡처한 모든 대화를 소스·프로젝트·토픽별로 탐색·관리.",
+    explore: "코퍼스 성찰: 밤의 대화 Q&A, AITI 자기 초상, 학습 종합, 원탁 토론.",
+    network: "대화가 프로젝트와 토픽으로 연결된 그래프. 시간이 지날수록 자랍니다.",
+    prompts: "보관된 세션을 스캔해 자주 쓰는 프롬프트를 찾아 라이브러리에 정리.",
+    deposits: "꿈이 매일의 세션을 장기 기억으로 증류하고, 디파짓이 증류된 지식 문서를 보관.",
+    settings: "모델, 캡처, 멤버십, 페어링, 외관 등 앱 설정.",
+  },
+};
+
 interface DockItem {
   id: Exclude<ShellPage, "daily">;
   icon: ReactNode;
@@ -94,6 +142,7 @@ interface DockProps {
 export function Dock({ currentPage, onNavigate, themeMode, onToggleTheme }: DockProps) {
   const { t, locale } = useI18n();
   const copy = DOCK_COPY[locale] ?? DOCK_COPY.en;
+  const desc = DOCK_DESC[locale] ?? DOCK_DESC.en;
 
   return (
     <nav
@@ -101,7 +150,7 @@ export function Dock({ currentPage, onNavigate, themeMode, onToggleTheme }: Dock
       className="flex w-[52px] shrink-0 flex-col items-center justify-between border-r border-border-subtle bg-bg-sidebar px-1 py-4"
     >
       <div className="flex flex-col items-center gap-2">
-        <DockTooltip label={copy.home}>
+        <DockTooltip label={copy.home} description={desc.home}>
           <button
             type="button"
             aria-label={copy.home}
@@ -121,6 +170,7 @@ export function Dock({ currentPage, onNavigate, themeMode, onToggleTheme }: Dock
             key={item.id}
             item={item}
             label={copy[item.id]}
+            description={desc[item.id]}
             isActive={currentPage === item.id}
             onClick={() => onNavigate(item.id)}
           />
@@ -145,6 +195,7 @@ export function Dock({ currentPage, onNavigate, themeMode, onToggleTheme }: Dock
         <DockButton
           item={{ id: "settings", icon: <Settings className="h-5 w-5" strokeWidth={1.75} /> }}
           label={copy.settings}
+          description={desc.settings}
           isActive={currentPage === "settings"}
           onClick={() => onNavigate("settings")}
         />
@@ -156,16 +207,18 @@ export function Dock({ currentPage, onNavigate, themeMode, onToggleTheme }: Dock
 function DockButton({
   item,
   label,
+  description,
   isActive,
   onClick,
 }: {
   item: DockItem;
   label: string;
+  description?: string;
   isActive: boolean;
   onClick: () => void;
 }) {
   return (
-    <DockTooltip label={label}>
+    <DockTooltip label={label} description={description}>
       <button
         type="button"
         aria-label={label}

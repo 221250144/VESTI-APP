@@ -37,8 +37,10 @@ import {
   User,
 } from "lucide-react";
 import { SendToMenu } from "../components/SendToMenu";
+import { InfoTip } from "../components/InfoTip";
 import { sanitizeFileBaseName } from "../lib/extractMarkdown";
 import {
+  CollapseChevron,
   DreamLogCard,
   DreamLogSection,
   DreamMemoryCard,
@@ -46,6 +48,7 @@ import {
   MemoryOverviewCard,
 } from "./deposits/memorySections";
 import { DailyLogCard, DailyLogSection } from "./deposits/dailyLogSection";
+import { useSessionProjectMap } from "./deposits/memoryProjects";
 import {
   MEMORY_SPACE_COPY,
   detectMemorySpaceLocale,
@@ -244,6 +247,12 @@ export function DepositsTab({ storage, labels, sendToLabels, dreamLocked = false
   /** null until probed; false drives the "first dream is a full pass" hint. */
   const [hasDreamLog, setHasDreamLog] = useState<boolean | null>(null);
   const [memoryRefreshKey, setMemoryRefreshKey] = useState(0);
+  // session→project map for memory grouping + event-time date labels; one
+  // tree load shared by the overview cards and the drilled-in sections.
+  const sessionMap = useSessionProjectMap(storage, memoryRefreshKey);
+  // The "New deposit" template list is a secondary control (the one-click
+  // sweep above stays always visible) — collapsed by default.
+  const [newDepositOpen, setNewDepositOpen] = useState(false);
 
   const available = Boolean(
     storage.listDeposits && storage.generateDeposit && storage.listMemoryEntries,
@@ -732,6 +741,13 @@ export function DepositsTab({ storage, labels, sendToLabels, dreamLocked = false
     deposits: copy.deposits.title,
   };
 
+  const sectionTip: Record<Exclude<MemorySection, "overview">, string> = {
+    memories: copy.memories.tip,
+    dreamLogs: copy.dreams.tip,
+    daily: copy.daily.tip,
+    deposits: copy.deposits.tip,
+  };
+
   return (
     <div className="flex h-full flex-col overflow-hidden bg-bg-app">
       {/* Header: title + dream pipeline controls */}
@@ -865,7 +881,9 @@ export function DepositsTab({ storage, labels, sendToLabels, dreamLocked = false
             {copy.backToOverview}
           </button>
           <span className="text-vesti-sm font-sans font-medium text-text-secondary">
-            {sectionTitle[section]}
+            <InfoTip title={sectionTitle[section]} description={sectionTip[section]}>
+              <span>{sectionTitle[section]}</span>
+            </InfoTip>
           </span>
         </nav>
       ) : null}
@@ -879,6 +897,7 @@ export function DepositsTab({ storage, labels, sendToLabels, dreamLocked = false
                 l={l}
                 refreshKey={memoryRefreshKey}
                 copy={copy}
+                sessionMap={sessionMap}
                 onOpen={() => setSection("memories")}
               />
               <DreamLogCard
@@ -886,6 +905,7 @@ export function DepositsTab({ storage, labels, sendToLabels, dreamLocked = false
                 l={l}
                 refreshKey={memoryRefreshKey}
                 copy={copy}
+                sessionMap={sessionMap}
                 onOpen={() => setSection("dreamLogs")}
               />
               {storage.listDailyLogs ? (
@@ -910,14 +930,27 @@ export function DepositsTab({ storage, labels, sendToLabels, dreamLocked = false
                 entryCountLabel={(count) =>
                   copy.entryCount.replace("{count}", String(count))
                 }
+                tip={copy.deposits.tip}
                 onOpen={() => setSection("deposits")}
               />
             </div>
           </div>
         ) : section === "memories" ? (
-          <DreamMemorySection storage={storage} l={l} refreshKey={memoryRefreshKey} />
+          <DreamMemorySection
+            storage={storage}
+            l={l}
+            refreshKey={memoryRefreshKey}
+            copy={copy}
+            sessionMap={sessionMap}
+          />
         ) : section === "dreamLogs" ? (
-          <DreamLogSection storage={storage} l={l} refreshKey={memoryRefreshKey} />
+          <DreamLogSection
+            storage={storage}
+            l={l}
+            refreshKey={memoryRefreshKey}
+            copy={copy}
+            sessionMap={sessionMap}
+          />
         ) : section === "daily" ? (
           <DailyLogSection storage={storage} copy={copy} />
         ) : (
@@ -992,9 +1025,18 @@ export function DepositsTab({ storage, labels, sendToLabels, dreamLocked = false
           </section>
 
           <section>
-            <h2 className="mb-1.5 px-1 text-vesti-sm font-sans font-medium uppercase tracking-wide text-text-tertiary">
+            <button
+              type="button"
+              aria-expanded={newDepositOpen}
+              aria-label={`${newDepositOpen ? copy.collapseSection : copy.expandSection}: ${l("newDeposit", "New deposit")}`}
+              onClick={() => setNewDepositOpen((open) => !open)}
+              className="mb-1.5 flex w-full items-center gap-1.5 px-1 text-left text-vesti-sm font-sans font-medium uppercase tracking-wide text-text-tertiary"
+            >
               {l("newDeposit", "New deposit")}
-            </h2>
+              <span className="text-text-tertiary/60">({TEMPLATE_ORDER.length})</span>
+              <CollapseChevron open={newDepositOpen} className="ml-auto" />
+            </button>
+            {newDepositOpen ? (
             <div className="space-y-1.5">
               {TEMPLATE_ORDER.map((template) => {
                 const [nameKey, descKey] = TEMPLATE_LABEL_KEYS[template];
@@ -1025,6 +1067,7 @@ export function DepositsTab({ storage, labels, sendToLabels, dreamLocked = false
                 );
               })}
             </div>
+            ) : null}
           </section>
 
           <section>

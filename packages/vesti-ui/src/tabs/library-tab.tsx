@@ -66,6 +66,7 @@ import type {
 import { useLibraryData } from "../contexts/library-data";
 import { getPlatformBadgeStyle, getPlatformLabel } from "../constants/platform";
 import { MarkdownNoteEditor } from "../components/MarkdownNoteEditor";
+import { InfoTip } from "../components/InfoTip";
 import { ResizablePanelDivider } from "../components/ResizablePanelDivider";
 import { StructuredSummaryCard } from "../components/StructuredSummaryCard";
 import { SummaryPipelineProgress } from "../components/SummaryPipelineProgress";
@@ -82,7 +83,7 @@ import { useNoteDraft, type NoteSaveStatus } from "../hooks/use-note-draft";
 import { buildMessagePreviewText } from "../lib/messagePackage";
 import { buildReaderTimestampFooterModel } from "../lib/reader-timestamps";
 import { serializeSelectionFragmentToMarkdown } from "../lib/selection-markdown";
-import { SourceTreeNav } from "./library/SourceTreeNav";
+import { SourceTreeNav, type FolderItem } from "./library/SourceTreeNav";
 import { ExtractPanel } from "./library/ExtractPanel";
 import { MaintainOpsBadge } from "./deposits-tab";
 import { OrganizePanel } from "./library/OrganizePanel";
@@ -101,7 +102,6 @@ import {
 } from "./library/sourceTree";
 
 type ViewMode = "conversations" | "notes";
-type FolderItem = { name: string; isCustom: boolean; isTag: boolean };
 type FolderMeta = { customFolders: string[] };
 type WorkspaceMode = "single" | "split";
 type PendingExcerpt = {
@@ -715,9 +715,6 @@ export function LibraryTab({
   const [openConversationMenuId, setOpenConversationMenuId] = useState<
     number | null
   >(null);
-  const [openFolderMenuName, setOpenFolderMenuName] = useState<string | null>(
-    null,
-  );
   // Detail-pane meta chips (tags / key files / decisions / subagent
   // highlights) fold behind a quiet toggle to keep the reader calm.
   const [detailMetaOpen, setDetailMetaOpen] = useState(false);
@@ -1170,14 +1167,13 @@ export function LibraryTab({
   }, []);
 
   useEffect(() => {
-    if (!openConversationMenuId && !openFolderMenuName) return;
+    if (!openConversationMenuId) return;
     const handleClick = () => {
       setOpenConversationMenuId(null);
-      setOpenFolderMenuName(null);
     };
     document.addEventListener("click", handleClick);
     return () => document.removeEventListener("click", handleClick);
-  }, [openConversationMenuId, openFolderMenuName]);
+  }, [openConversationMenuId]);
 
   useEffect(() => {
     if (conversations.length > 0 && selectedConversationId === null) {
@@ -2425,6 +2421,19 @@ export function LibraryTab({
     setIsSplitNavigationOpen(false);
   };
 
+  // Custom folders live inside the source tree's browser node now; picking
+  // one keeps the old folder-row contract (tag filter + reset of the other
+  // nav filters).
+  const handleSelectFolder = (name: string) => {
+    void flushPendingNoteSave();
+    setViewMode("conversations");
+    setListFilter("all");
+    setSelectedTag(name);
+    setSourceSelection(null);
+    setSelectedConversationId(null);
+    setIsSplitNavigationOpen(false);
+  };
+
   const handleSourceTreeNotes = () => {
     setSourceSelection(null);
     void openNotesView();
@@ -3571,6 +3580,14 @@ export function LibraryTab({
               style={{ width: `${sidebarPane.width}px` }}
             >
               <div className="px-2 pt-3 pb-2">
+                <InfoTip
+                  title={labels.allConversations ?? "All Conversations"}
+                  description={
+                    labels.navAllTip ??
+                    "Every conversation captured on desktop and the browser extension."
+                  }
+                  className="flex w-full"
+                >
                 <button
                   onClick={() => {
                     void flushPendingNoteSave();
@@ -3602,6 +3619,14 @@ export function LibraryTab({
                     {conversations.length}
                   </span>
                 </button>
+                </InfoTip>
+                <InfoTip
+                  title={labels.starred ?? "Starred"}
+                  description={
+                    labels.navStarredTip ?? "Conversations you starred, for quick revisits."
+                  }
+                  className="flex w-full"
+                >
                 <button
                   onClick={() => {
                     void flushPendingNoteSave();
@@ -3635,6 +3660,14 @@ export function LibraryTab({
                     {starredCount}
                   </span>
                 </button>
+                </InfoTip>
+                <InfoTip
+                  title={labels.recent ?? "Recent"}
+                  description={
+                    labels.navRecentTip ?? "Recently active conversations, newest first."
+                  }
+                  className="flex w-full"
+                >
                 <button
                   onClick={() => {
                     void flushPendingNoteSave();
@@ -3668,6 +3701,7 @@ export function LibraryTab({
                     {recentConversations.length}
                   </span>
                 </button>
+                </InfoTip>
               </div>
 
               <div className="flex-1 overflow-y-auto px-2">
@@ -3683,6 +3717,14 @@ export function LibraryTab({
                       ? openProjectBrief
                       : undefined
                   }
+                  folders={folderItems}
+                  selectedFolder={
+                    viewMode === "conversations" ? selectedTag : null
+                  }
+                  onSelectFolder={handleSelectFolder}
+                  onCreateFolder={handleCreateFolder}
+                  onRenameFolder={(folder) => void handleRenameFolder(folder)}
+                  onDeleteFolder={(folder) => void handleDeleteFolder(folder)}
                   labels={{
                     sectionLabel:
                       (labels.sourceTree?.sectionLabel as string) ?? "Sources",
@@ -3699,114 +3741,22 @@ export function LibraryTab({
                     openQuestions:
                       (labels.sourceTree?.openQuestions as string) ??
                       "Open questions",
+                    folders: (labels.folders as string) ?? "FOLDERS",
+                    createNewFolder:
+                      (labels.createNewFolder as string) ??
+                      "Create new folder",
+                    newFolder: (labels.newFolder as string) ?? "New folder",
+                    folderActions:
+                      (labels.folderActions as string) ?? "Folder actions",
+                    rename: (labels.rename as string) ?? "Rename",
+                    delete: (labels.delete as string) ?? "Delete",
+                    sectionTip:
+                      labels.navSourcesTip ??
+                      "Browse by source — browser / agent platforms → project → topic; custom folders live under the browser node.",
+                    notesTip:
+                      labels.navNotesTip ?? "Local Markdown notes, exportable to Obsidian.",
                   }}
                 />
-                <div className="flex items-center justify-between px-2 py-2">
-                  <span className="text-[10px] font-sans font-semibold text-text-tertiary uppercase tracking-wider">
-                    {labels.folders ?? "FOLDERS"}
-                  </span>
-                  <button
-                    onClick={handleCreateFolder}
-                    className="w-5 h-5 rounded-md flex items-center justify-center text-text-tertiary hover:text-text-secondary hover:bg-bg-surface-card transition-colors"
-                    aria-label={labels.createNewFolder ?? "Create new folder"}
-                    title={labels.newFolder ?? "New folder"}
-                  >
-                    +
-                  </button>
-                </div>
-                {folderItems.length > 0 && (
-                  <div className="flex flex-col">
-                    {folderItems.map((folder) => {
-                      const isSelected = selectedTag === folder.name;
-                      return (
-                        <div
-                          key={folder.name}
-                          role="button"
-                          tabIndex={0}
-                          onClick={() => {
-                            void flushPendingNoteSave();
-                            setViewMode("conversations");
-                            setListFilter("all");
-                            setSelectedTag(folder.name);
-                            setSourceSelection(null);
-                            setSelectedConversationId(null);
-                            setIsSplitNavigationOpen(false);
-                          }}
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter" || event.key === " ") {
-                              event.preventDefault();
-                              void flushPendingNoteSave();
-                              setViewMode("conversations");
-                              setListFilter("all");
-                              setSelectedTag(folder.name);
-                              setSourceSelection(null);
-                              setSelectedConversationId(null);
-                              setIsSplitNavigationOpen(false);
-                            }
-                          }}
-                          className={`w-full flex items-center gap-2 px-3 py-2 text-left transition-colors duration-200 my-1 rounded-lg group cursor-pointer relative ${
-                            isSelected && viewMode === "conversations"
-                              ? "bg-bg-surface-card-active"
-                              : "hover:bg-bg-surface-card"
-                          }`}
-                        >
-                          <span className="flex-1 text-sm font-sans text-text-primary truncate">
-                            {folder.name}
-                          </span>
-                          <div className="ml-2 flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
-                            <button
-                              type="button"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                setOpenFolderMenuName((prev) =>
-                                  prev === folder.name ? null : folder.name,
-                                );
-                              }}
-                              className="w-5 h-5 rounded-md flex items-center justify-center text-text-tertiary hover:text-text-secondary hover:bg-bg-surface-card"
-                              title={labels.folderActions ?? "Folder actions"}
-                              aria-label={`Folder actions for ${folder.name}`}
-                            >
-                              <MoreHorizontal
-                                strokeWidth={1.5}
-                                className="w-3.5 h-3.5"
-                              />
-                            </button>
-                          </div>
-                          {openFolderMenuName === folder.name && (
-                            <div
-                              className="absolute right-2 top-9 z-30 w-44 rounded-md border border-border-subtle bg-bg-primary shadow-[0_8px_24px_rgba(0,0,0,0.08)] py-1"
-                              onClick={(event) => event.stopPropagation()}
-                            >
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  void handleRenameFolder(folder);
-                                  setOpenFolderMenuName(null);
-                                }}
-                                className="w-full flex items-center gap-2 px-3 py-2 text-[13px] font-sans text-text-primary hover:bg-bg-surface-card transition-colors"
-                              >
-                                <Pencil strokeWidth={1.5} className="w-4 h-4" />
-                                <span>{labels.rename ?? "Rename"}</span>
-                              </button>
-                              <div className="my-1 h-px bg-border-subtle" />
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  void handleDeleteFolder(folder);
-                                  setOpenFolderMenuName(null);
-                                }}
-                                className="w-full flex items-center gap-2 px-3 py-2 text-[13px] font-sans text-danger hover:bg-bg-surface-card transition-colors"
-                              >
-                                <Trash2 strokeWidth={1.5} className="w-4 h-4" />
-                                <span>{labels.delete ?? "Delete"}</span>
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
               </div>
             </aside>
 
@@ -3871,15 +3821,22 @@ export function LibraryTab({
                             <Package strokeWidth={1.75} className="h-4 w-4" />
                           </button>
                         ) : null}
+                        <InfoTip
+                          title={(labels.organize?.button as string) ?? "Organize"}
+                          description={
+                            labels.organizeTip ??
+                            "Batch tidy-up with local rules only: drop empty chats, merge duplicates, bulk-tag, archive to topics — nothing leaves this device."
+                          }
+                        >
                         <button
                           type="button"
                           onClick={() => setOrganizeOpen(true)}
                           className="flex h-6 w-6 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-bg-surface-card hover:text-text-secondary"
                           aria-label={(labels.organize?.button as string) ?? "Organize"}
-                          title={(labels.organize?.button as string) ?? "Organize"}
                         >
                           <Sparkles strokeWidth={1.75} className="h-4 w-4" />
                         </button>
+                        </InfoTip>
                       </div>
                     </div>
                   </div>
