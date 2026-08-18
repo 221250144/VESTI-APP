@@ -9,6 +9,85 @@ import type { ParsedSession, ParsedMessage } from '../src/types/agent.js';
 
 describe('MessageConverter', () => {
   describe('MessageSource Classification', () => {
+    it('drops shared system envelopes before creating messages, turns and counts', () => {
+      const session: ParsedSession = {
+        sessionId: 'sanitized-session',
+        platform: 'claude-code',
+        projectPath: '/test',
+        messages: [
+          {
+            uuid: 'system-only',
+            type: 'user',
+            role: 'user',
+            timestamp: 900,
+            contentText: '<environment_context>generated</environment_context>',
+            isToolResult: false,
+            depth: 0,
+          },
+          {
+            uuid: 'real-user',
+            type: 'user',
+            role: 'user',
+            timestamp: 1000,
+            contentText: '<user_instructions>generated</user_instructions>\n\n这是一个真实问题',
+            isToolResult: false,
+            depth: 0,
+          },
+        ],
+        toolExecutions: [],
+        subagents: [],
+        subagentOf: {
+          parentSessionId: 'claude-code:parent',
+          agentId: 'child-1',
+        },
+        tokenUsage: {
+          totalInputTokens: 0,
+          totalOutputTokens: 0,
+          totalCacheCreationTokens: 0,
+          totalCacheReadTokens: 0,
+          models: new Set(),
+        },
+        startTime: 900,
+      };
+
+      const result = MessageConverter.convertV2(session);
+
+      expect(result.messages.map(message => message.contentText)).toEqual(['这是一个真实问题']);
+      expect(result.turns).toHaveLength(1);
+      expect(result.session).toMatchObject({
+        title: '这是一个真实问题',
+        messageCount: 1,
+        userInputCount: 1,
+        turnCount: 1,
+      });
+      expect(result.subagentLinks).toHaveLength(1);
+      expect(result.subagentLinks[0].messageCount).toBe(1);
+    });
+
+    it('sanitizes the metadata first-prompt fallback before creating a title', () => {
+      const session: ParsedSession = {
+        sessionId: 'sanitized-metadata-title',
+        platform: 'claude-code',
+        projectPath: '/test',
+        messages: [],
+        toolExecutions: [],
+        subagents: [],
+        tokenUsage: {
+          totalInputTokens: 0,
+          totalOutputTokens: 0,
+          totalCacheCreationTokens: 0,
+          totalCacheReadTokens: 0,
+          models: new Set(),
+        },
+        startTime: 900,
+        meta: {
+          first_prompt: '<recommended_plugins>generated</recommended_plugins>\n\n真实标题',
+        },
+      };
+
+      expect(MessageConverter.convertV2(session).session.title).toBe('真实标题');
+    });
+
     it('should classify real user input', () => {
       const session: ParsedSession = {
         sessionId: 'test-1',

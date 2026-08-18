@@ -10,6 +10,11 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./injected-blocks": {
+      "import": "./dist/injectedBlocks.js",
+      "types": "./dist/injectedBlocks.d.ts",
+      "default": "./dist/injectedBlocks.js"
     }
   },
   "scripts": {

@@ -15,6 +15,7 @@ import type { ExportEngine } from '../export/ExportEngine.js';
 import {
   workSessionToVestiConversation,
   sessionMessagesToVestiMessages,
+  firstVisibleUserSnippet,
   resolveCliId,
   cliIdToNumeric,
   registerCliId,
@@ -235,11 +236,20 @@ export class APIServer {
         });
 
         const conversations = sessions.map(ws => {
-          // Get snippet from first user message
           const messages = this.db.getSessionMessages(ws.id);
-          const firstUser = messages.find(m => m.source === 'user_input' && m.contentText);
-          const snippet = firstUser?.contentText?.slice(0, 100) || '';
-          return workSessionToVestiConversation(ws, snippet);
+          const visibleMessages = sessionMessagesToVestiMessages(
+            messages,
+            cliIdToNumeric(ws.id),
+            ws.platform,
+          );
+          return workSessionToVestiConversation(
+            ws,
+            firstVisibleUserSnippet(messages, 100, ws.platform),
+            {
+              messageCount: visibleMessages.length,
+              turnCount: visibleMessages.filter(message => message.role === 'user').length,
+            },
+          );
         });
 
         res.json({ conversations });
@@ -260,9 +270,18 @@ export class APIServer {
           return res.status(404).json({ error: 'Not found' });
         }
         const messages = this.db.getSessionMessages(ws.id);
-        const firstUser = messages.find(m => m.source === 'user_input' && m.contentText);
-        const snippet = firstUser?.contentText?.slice(0, 100) || '';
-        res.json({ conversation: workSessionToVestiConversation(ws, snippet) });
+        const visibleMessages = sessionMessagesToVestiMessages(
+          messages,
+          cliIdToNumeric(ws.id),
+          ws.platform,
+        );
+        const snippet = firstVisibleUserSnippet(messages, 100, ws.platform);
+        res.json({
+          conversation: workSessionToVestiConversation(ws, snippet, {
+            messageCount: visibleMessages.length,
+            turnCount: visibleMessages.filter(message => message.role === 'user').length,
+          }),
+        });
       } catch (err) {
         res.status(500).json({ error: (err as Error).message });
       }
@@ -277,7 +296,8 @@ export class APIServer {
         }
         const numericId = cliIdToNumeric(cliId);
         const messages = this.db.getSessionMessages(cliId);
-        const vestiMessages = sessionMessagesToVestiMessages(messages, numericId);
+        const platform = this.db.getWorkSession(cliId)?.platform;
+        const vestiMessages = sessionMessagesToVestiMessages(messages, numericId, platform);
         res.json({ messages: vestiMessages });
       } catch (err) {
         res.status(500).json({ error: (err as Error).message });

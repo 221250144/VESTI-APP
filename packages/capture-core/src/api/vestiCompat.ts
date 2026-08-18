@@ -12,6 +12,22 @@
  */
 
 import type { WorkSession, SessionMessage } from '../types/unified.js';
+import {
+  looksLikeInjectedContextPrefix,
+  stripInjectedContextBlocks,
+} from '../utils/injectedBlocks.js';
+import {
+  looksLikeCodexInjectedPrefix,
+  sanitizeCodexUserText,
+} from '../utils/codexUserText.js';
+
+type CapturePlatform = WorkSession['platform'];
+
+function sanitizePlatformUserText(text: string, platform?: CapturePlatform): string {
+  return platform === 'codex'
+    ? sanitizeCodexUserText(text)
+    : stripInjectedContextBlocks(text);
+}
 
 // ==================== ID Conversion ====================
 
@@ -159,23 +175,32 @@ export interface VestiMessageCompat {
 export function workSessionToVestiConversation(
   ws: WorkSession,
   snippet?: string,
+  visibleCounts?: { messageCount: number; turnCount: number },
 ): VestiConversationCompat {
   const numericId = registerCliId(ws.id);
+  const sanitizedTitle = sanitizePlatformUserText(ws.title, ws.platform);
+  const visibleSnippet = sanitizePlatformUserText(snippet ?? '', ws.platform);
+  const hasInjectedTitle = looksLikeInjectedContextPrefix(sanitizedTitle)
+    || (ws.platform === 'codex' && looksLikeCodexInjectedPrefix(sanitizedTitle));
+  const title = hasInjectedTitle
+    ? ''
+    : sanitizedTitle;
+  const snippetTitle = visibleSnippet.split(/\r?\n/, 1)[0].slice(0, 80);
 
   return {
     id: numericId,
     uuid: ws.sessionId,
     platform: mapPlatform(ws.platform),
-    title: ws.title,
-    snippet: snippet || '',
+    title: title || snippetTitle || 'Untitled',
+    snippet: visibleSnippet,
     url: ws.projectPath ? `file://${ws.projectPath}` : '',
     source_created_at: ws.startedAt,
     first_captured_at: ws.startedAt,
     last_captured_at: ws.endedAt || ws.startedAt,
     created_at: ws.startedAt,
     updated_at: ws.endedAt || ws.startedAt,
-    message_count: ws.messageCount,
-    turn_count: ws.turnCount,
+    message_count: visibleCounts?.messageCount ?? ws.messageCount,
+    turn_count: visibleCounts?.turnCount ?? ws.turnCount,
     is_archived: ws.status === 'archived',
     is_trash: false,
     tags: ws.tags || [],
@@ -197,6 +222,7 @@ export function workSessionToVestiConversation(
 export function sessionMessagesToVestiMessages(
   messages: SessionMessage[],
   conversationNumericId: number,
+  platform?: CapturePlatform,
 ): VestiMessageCompat[] {
   return messages
     .filter(m =>
@@ -204,15 +230,19 @@ export function sessionMessagesToVestiMessages(
       m.source === 'assistant_text' ||
       m.source === 'assistant_think'
     )
-    .map(m => {
+    .flatMap(m => {
       const msgNumericId = cliIdToNumeric(m.id);
 
       // Merge thinking into content for assistant_think messages
-      const contentText = m.source === 'assistant_think'
+      const rawContentText = m.source === 'assistant_think'
         ? (m.contentThinking || '')
         : (m.contentText || '');
+      const contentText = m.source === 'user_input'
+        ? sanitizePlatformUserText(rawContentText, platform)
+        : rawContentText;
+      if (m.source === 'user_input' && !contentText) return [];
 
-      return {
+      return [{
         id: msgNumericId,
         conversation_id: conversationNumericId,
         role: (m.role === 'user' ? 'user' : 'ai') as 'user' | 'ai',
@@ -231,6 +261,20 @@ export function sessionMessagesToVestiMessages(
         _tool_input: m.contentToolInput || undefined,
         _tool_output: m.contentToolOutput || undefined,
         _message_source: m.source,
-      };
+      }];
     });
+}
+
+/** Return the first displayable user message, skipping legacy system rows. */
+export function firstVisibleUserSnippet(
+  messages: SessionMessage[],
+  maxLength = 200,
+  platform?: CapturePlatform,
+): string {
+  for (const message of messages) {
+    if (message.source !== 'user_input' || !message.contentText) continue;
+    const visibleText = sanitizePlatformUserText(message.contentText, platform);
+    if (visibleText) return visibleText.slice(0, maxLength);
+  }
+  return '';
 }

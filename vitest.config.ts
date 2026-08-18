@@ -5,6 +5,7 @@ export default defineConfig({
   resolve: {
     alias: {
       // Mirror vite.renderer.config.ts so renderer modules resolve identically in tests.
+      '@vesti/capture-core/injected-blocks': path.resolve(__dirname, 'packages/capture-core/src/injectedBlocks.ts'),
       '@vesti/ui': path.resolve(__dirname, 'packages/vesti-ui/src/index.ts'),
       '@vesti/content-package': path.resolve(__dirname, 'packages/vesti-content-package/src/index.ts'),
     },

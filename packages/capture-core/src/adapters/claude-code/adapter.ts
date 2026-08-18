@@ -14,6 +14,7 @@ import type { ClaudeSessionMeta } from './types.js';
 export class ClaudeCodeAdapter implements AgentAdapter {
   readonly platform = 'claude-code' as const;
   readonly name = 'Claude Code';
+  readonly parserVersion = 1;
 
   private parser = new ClaudeCodeParser();
   private homes: HomeRoot[] = [nativeHomeRoot()];

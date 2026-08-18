@@ -10,6 +10,7 @@ import { CodexParser } from './parser.js';
 export class CodexAdapter implements AgentAdapter {
   readonly platform = 'codex' as const;
   readonly name = 'Codex';
+  readonly parserVersion = 1;
 
   private readonly parser = new CodexParser();
   private homes: HomeRoot[] = [nativeHomeRoot()];

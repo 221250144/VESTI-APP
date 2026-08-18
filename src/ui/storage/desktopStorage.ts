@@ -32,6 +32,7 @@ import type {
   StorageApi,
   WeeklyReport,
 } from "@vesti/ui";
+import { stripInjectedContextBlocks } from "@vesti/capture-core/injected-blocks";
 import { mapThinkingMapSemanticSnapshot } from "./thinkingMapSemantics";
 import { computeSummaryCoverage, learnRouteFingerprint, serializeRelayPackMarkdown } from "@vesti/ui";
 import { askCompanion } from "../companion/companionService";
@@ -499,7 +500,7 @@ async function buildWebSummaryTranscript(
   const messages = await listMessages(conversationId).catch(() => []);
   const lines: string[] = [];
   for (const message of messages) {
-    const text = (message.content_text ?? "").trim();
+    const text = stripInjectedContextBlocks(message.content_text ?? "");
     if (!text) continue;
     const role = message.role === "user" ? "用户" : "AI";
     lines.push(`${role}: ${text.length > 1200 ? `${text.slice(0, 1200)}…` : text}`);
@@ -765,7 +766,13 @@ async function gatherRelayContexts(
       snippet: record.snippet ?? null,
       messages: messages
         .slice(-RELAY_MESSAGE_FETCH_LIMIT)
-        .map((message) => ({ role: message.role, content: message.content_text })),
+        .map((message) => ({
+          role: message.role,
+          content: message.role === "user"
+            ? stripInjectedContextBlocks(message.content_text ?? "")
+            : message.content_text,
+        }))
+        .filter((message) => message.content.trim().length > 0),
       ...(cliId && subagentsByCliId.has(cliId)
         ? { subagents: subagentsByCliId.get(cliId) }
         : {}),

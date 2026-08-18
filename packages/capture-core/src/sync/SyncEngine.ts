@@ -123,6 +123,7 @@ export class SyncEngine {
   async syncFile(platform: AgentPlatform, filePath: string): Promise<SyncFileResult | null> {
     const syncState = this.db.getSyncState(filePath);
     const parserVersion = this.adapters.getAdapter(platform)?.parserVersion ?? 0;
+    const isParserUpgrade = Boolean(syncState && syncState.parserVersion < parserVersion);
 
     // Skip only when the file is unchanged AND it was last parsed by a
     // parser at least as capable as the current one — an adapter upgrade
@@ -163,7 +164,11 @@ export class SyncEngine {
       // Some agents can report a completed model invocation even when no
       // displayable text message was persisted (for example a tool-only or
       // interrupted turn). Keep those usage events in the time series.
-      if (session.messages.length === 0 && (session.tokenUsageEvents?.length ?? 0) === 0) continue;
+      if (
+        !isParserUpgrade
+        && session.messages.length === 0
+        && (session.tokenUsageEvents?.length ?? 0) === 0
+      ) continue;
 
       // Load supplemental session-meta for Claude Code.
       if (platform === 'claude-code') {
@@ -185,18 +190,26 @@ export class SyncEngine {
       }
 
       const converted = MessageConverter.convertV2(session);
+      if (session.meta?.capture_usage_only === true) {
+        sourceTokenUsageEvents.push(...converted.tokenUsageEvents);
+        continue;
+      }
       const previousMessageCount = this.db.getSessionMessageCount(converted.session.id);
       const previousToolCount = this.db.getUnifiedToolExecutions(converted.session.id).length;
       const previousTurnCount = this.db.getTurns(converted.session.id).length;
 
-      // Store everything (Layer 2). These operations are idempotent upserts so
-      // streaming updates with stable message IDs are refreshed correctly.
-      this.db.upsertWorkSession(converted.session);
-      this.db.insertSessionMessages(converted.messages);
-      this.db.insertUnifiedToolExecutions(converted.toolExecutions);
-      this.db.insertTurns(converted.turns);
-      this.db.insertSystemEvents(converted.systemEvents);
-      this.db.insertContextCompactions(converted.contextCompactions);
+      if (isParserUpgrade) {
+        this.db.replaceSessionSnapshot(converted);
+      } else {
+        // Streaming updates use stable IDs and remain monotonic between parser
+        // versions; exact deletion is reserved for a known full re-parse.
+        this.db.upsertWorkSession(converted.session);
+        this.db.insertSessionMessages(converted.messages);
+        this.db.insertUnifiedToolExecutions(converted.toolExecutions);
+        this.db.insertTurns(converted.turns);
+        this.db.insertSystemEvents(converted.systemEvents);
+        this.db.insertContextCompactions(converted.contextCompactions);
+      }
       sourceTokenUsageEvents.push(...converted.tokenUsageEvents);
 
       for (const link of converted.subagentLinks) {

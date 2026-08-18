@@ -10,35 +10,69 @@
  *   `<system_reminder>` blocks, and wrap the actual prompt in
  *   `<user_query>…</user_query>` (the wrapper tags go, the content stays)
  *
- * These blocks must stay in the stored message record, but they are not the
- * user's own words — titles, summaries and first-prompt extraction should
- * look past them.
+ * Only complete blocks at message boundaries are removed. This keeps literal
+ * XML examples in ordinary prose/code intact while filtering the envelopes
+ * agents add before or after the user's words.
  */
 
-const INJECTED_BLOCK_PATTERNS: RegExp[] = [
-  /<environment_context\b[^>]*>[\s\S]*?<\/environment_context>/g,
-  /<user_instructions\b[^>]*>[\s\S]*?<\/user_instructions>/g,
-  /<git-context\b[^>]*\/>/g,
-  /<git-context\b[^>]*>[\s\S]*?<\/git-context>/g,
-  /<timestamp>[\s\S]*?<\/timestamp>/g,
-  /<user_info>[\s\S]*?<\/user_info>/g,
-  /<system_notification>[\s\S]*?<\/system_notification>/g,
-  /<system_reminder>[\s\S]*?<\/system_reminder>/g,
+const PAIRED_INJECTED_TAGS = [
+  'recommended_plugins',
+  'environment_context',
+  'user_instructions',
+  'git-context',
+  'timestamp',
+  'user_info',
+  'system_notification',
+  'system_reminder',
+  'turn_aborted',
+  'ide_opened_file',
+] as const;
+
+const SELF_CLOSING_INJECTED_TAGS = [
+  'git-context',
+  'turn_aborted',
+  'ide_opened_file',
+] as const;
+
+const INJECTED_BLOCK_SOURCES = [
+  ...PAIRED_INJECTED_TAGS.map(tag => `<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`),
+  ...SELF_CLOSING_INJECTED_TAGS.map(tag => `<${tag}\\b[^>]*\\/>`),
 ];
 
-/** Wrapper tags whose content IS the user's words — drop tags, keep content. */
-const UNWRAP_TAG_PATTERNS: RegExp[] = [
-  /<\/?user_query>/g,
-];
+const INJECTED_PREFIX_TAGS = [...PAIRED_INJECTED_TAGS, 'user_query'] as const;
+const INJECTED_PREFIX_PATTERN = new RegExp(
+  `^\\s*<(?:${INJECTED_PREFIX_TAGS.join('|')})\\b`,
+  'i',
+);
 
-/** Remove injected context blocks and trim; the real user text remains. */
-export function stripInjectedContextBlocks(text: string): string {
+function removeBoundaryBlocks(text: string): string {
   let result = text;
-  for (const pattern of INJECTED_BLOCK_PATTERNS) {
-    result = result.replace(pattern, ' ');
-  }
-  for (const pattern of UNWRAP_TAG_PATTERNS) {
-    result = result.replace(pattern, ' ');
-  }
-  return result.replace(/\s+/g, ' ').trim();
+  let previous: string;
+  do {
+    previous = result;
+    for (const source of INJECTED_BLOCK_SOURCES) {
+      result = result
+        .replace(new RegExp(`^\\s*(?:${source})`, 'i'), '')
+        .replace(new RegExp(`(?:${source})\\s*$`, 'i'), '');
+    }
+  } while (result !== previous);
+  return result;
+}
+
+/** Remove system envelopes while preserving the user's whitespace/Markdown. */
+export function sanitizeCapturedText(text: string): string {
+  let result = removeBoundaryBlocks(text);
+  const userQuery = result.match(/^\s*<user_query\b[^>]*>([\s\S]*?)<\/user_query>\s*$/i);
+  if (userQuery) result = userQuery[1];
+  return result.trim();
+}
+
+/** Detect an injected tag whose stored title was truncated before its close tag. */
+export function looksLikeInjectedContextPrefix(text: string): boolean {
+  return INJECTED_PREFIX_PATTERN.test(text);
+}
+
+/** Backward-compatible name used by title, summary and renderer call sites. */
+export function stripInjectedContextBlocks(text: string): string {
+  return sanitizeCapturedText(text);
 }

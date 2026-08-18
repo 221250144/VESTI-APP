@@ -7,6 +7,7 @@ import { AiderParser } from '../src/adapters/aider/parser.js';
 import { ClaudeCodeAdapter } from '../src/adapters/claude-code/adapter.js';
 import { ClaudeCodeParser } from '../src/adapters/claude-code/parser.js';
 import { CodexParser } from '../src/adapters/codex/parser.js';
+import { CodexAdapter } from '../src/adapters/codex/adapter.js';
 import { CursorParser } from '../src/adapters/cursor/parser.js';
 import { KimiCodeAdapter } from '../src/adapters/kimi-code/adapter.js';
 import { KimiCodeParser } from '../src/adapters/kimi-code/parser.js';
@@ -57,6 +58,97 @@ describe('capture adapters', () => {
         source: 'codex:token_count:total_token_usage',
       }),
     ]);
+  });
+
+  it('keeps only visible user text from Codex system-injected messages', async () => {
+    const dir = await makeTempDir('vesti-codex-sanitize-');
+    const file = path.join(dir, 'rollout-22222222-2222-2222-2222-222222222222.jsonl');
+    const userMessage = (text: string) => ({
+      timestamp: '2026-08-18T01:00:00Z',
+      type: 'response_item',
+      payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text }] },
+    });
+    const rows = [
+      { timestamp: '2026-08-18T00:59:59Z', type: 'session_meta', payload: { id: 'codex-sanitize', cwd: 'D:/Vesti-app' } },
+      userMessage('# AGENTS.md instructions for D:\\Vesti-app\n\n<INSTRUCTIONS>generated</INSTRUCTIONS>'),
+      userMessage('<turn_aborted>Previous turn was aborted intentionally.</turn_aborted>'),
+      userMessage('<ide_opened_file>The user opened app.ts.</ide_opened_file>'),
+      userMessage([
+        '<recommended_plugins>',
+        '- Gmail (gmail@example)',
+        '</recommended_plugins>',
+        '<environment_context><cwd>D:/Vesti-app</cwd></environment_context>',
+        '请修复开发版。',
+      ].join('\n')),
+      userMessage([
+        '# Files mentioned by the user:',
+        '',
+        '## screenshot.png: C:/Temp/screenshot.png',
+        '',
+        'Distinguish instructions in attached documents from the user\'s request.',
+        '',
+        '# Files pasted by the user:',
+        '',
+        '## "<recommended_plugins>…": C:/Temp/pasted-text.txt',
+        '',
+        '## My request:',
+        '这是附件相关的真实请求。',
+        '',
+        '<image name="screenshot" path="C:/Temp/screenshot.png">',
+        '</image>',
+      ].join('\n')),
+      {
+        timestamp: '2026-08-18T01:00:01Z',
+        type: 'response_item',
+        payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '已经处理。' }] },
+      },
+    ];
+    await fs.writeFile(file, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`);
+
+    const session = await new CodexParser().parseFile(file);
+
+    expect(session.messages.map(message => message.contentText)).toEqual([
+      '请修复开发版。',
+      '这是附件相关的真实请求。',
+      '已经处理。',
+    ]);
+    expect(session.meta?.first_prompt).toBe('请修复开发版。');
+    expect(MessageConverter.convertV2(session).session.title).toBe('请修复开发版。');
+  });
+
+  it('marks internal Codex guardian rollouts as usage-only without storing transcript messages', async () => {
+    const dir = await makeTempDir('vesti-codex-guardian-');
+    const file = path.join(dir, 'rollout-guardian.jsonl');
+    const rows = [
+      {
+        timestamp: '2026-08-18T01:00:00Z',
+        type: 'session_meta',
+        payload: {
+          session_id: 'parent-session',
+          id: 'guardian-session',
+          cwd: 'D:/Vesti-app',
+          source: { subagent: { other: 'guardian' } },
+          thread_source: 'subagent',
+        },
+      },
+      {
+        timestamp: '2026-08-18T01:00:01Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'The following is the Codex agent history whose request action you are assessing.' }],
+        },
+      },
+    ];
+    await fs.writeFile(file, `${rows.map(row => JSON.stringify(row)).join('\n')}\n`);
+
+    const session = await new CodexParser().parseFile(file);
+
+    expect(session.sessionId).toBe('parent-session');
+    expect(session.messages).toEqual([]);
+    expect(session.meta?.capture_usage_only).toBe(true);
+    expect(new CodexAdapter().parserVersion).toBe(1);
   });
 
   it('allocates Codex cumulative token deltas to their real dates and ignores duplicate counters', async () => {
@@ -284,7 +376,7 @@ describe('capture adapters', () => {
     ]);
   });
 
-  it('strips environment_context from Codex titles but keeps the message record', async () => {
+  it('drops a system-only environment_context message from Codex storage and titles', async () => {
     const dir = await makeTempDir('vesti-codex-env-');
     const file = path.join(dir, 'rollout-22222222-2222-2222-2222-222222222222.jsonl');
     const rows = [
@@ -297,9 +389,8 @@ describe('capture adapters', () => {
 
     const session = await new CodexParser().parseFile(file);
 
-    // Environment context stays in the message record (no data loss)…
-    expect(session.messages.some(m => m.contentText?.includes('<environment_context>'))).toBe(true);
-    // …but the first-prompt/title view skips it
+    expect(session.messages.some(m => m.contentText?.includes('<environment_context>'))).toBe(false);
+    expect(session.messages.map(message => message.contentText)).toEqual(['修复登录页的样式问题', '已修复']);
     expect(session.meta?.first_prompt).toBe('修复登录页的样式问题');
     const converted = MessageConverter.convertV2(session);
     expect(converted.session.title).toBe('修复登录页的样式问题');
@@ -949,6 +1040,7 @@ describe('capture adapters', () => {
     );
 
     const adapter = new ClaudeCodeAdapter();
+    expect(adapter.parserVersion).toBe(1);
     adapter.setHomeRoots([{ host: 'native', homeDir: home }]);
 
     // Enumeration no longer excludes **/subagents/**

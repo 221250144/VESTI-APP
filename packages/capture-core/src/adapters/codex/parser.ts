@@ -15,7 +15,11 @@ import type {
   ToolResultBlock,
 } from '../../types/agent.js';
 import type { ToolExecution } from '../../types/index.js';
-import { stripInjectedContextBlocks } from '../../utils/injectedBlocks.js';
+import { sanitizeCodexUserText } from '../../utils/codexUserText.js';
+
+function visibleCodexUserText(text: string): string {
+  return sanitizeCodexUserText(text);
+}
 
 interface RolloutRow {
   timestamp?: string | number;
@@ -172,9 +176,10 @@ export class CodexParser {
     const meta = asRecord(metaRow?.payload);
     const fallbackId = path.basename(filePath, '.jsonl').match(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/i)?.[0]
       ?? path.basename(filePath, '.jsonl');
-    const sessionId = String(meta.session_id ?? meta.id ?? fallbackId);
     const sourceMeta = asRecord(meta.source);
     const subagentSource = asRecord(sourceMeta.subagent);
+    const isGuardianSession = subagentSource.other === 'guardian';
+    const sessionId = String(meta.session_id ?? meta.id ?? fallbackId);
     const threadSpawnSource = asRecord(subagentSource.thread_spawn);
     const isSpawnedThread = Object.keys(threadSpawnSource).length > 0
       || (typeof meta.forked_from_id === 'string' && meta.forked_from_id.length > 0);
@@ -269,6 +274,7 @@ export class CodexParser {
       }
 
       if (row.type === 'compacted') {
+        if (isGuardianSession) continue;
         contextCompactions.push({
           sequence: contextCompactions.length + 1,
           compactedAt: ts,
@@ -278,18 +284,17 @@ export class CodexParser {
       }
 
       if (row.type === 'response_item') {
+        if (isGuardianSession) continue;
         const itemType = String(payload.type ?? '');
         if (itemType === 'message') {
           const role = String(payload.role ?? '');
           if (role !== 'user' && role !== 'assistant') continue;
-          const text = messageContent(payload);
+          const rawText = messageContent(payload);
+          const text = role === 'user' ? visibleCodexUserText(rawText) : rawText;
           if (!text) continue;
           const uuid = newId('message', payload.id);
-          // <environment_context> / <user_instructions> blocks stay in the
-          // stored message, but the first-prompt/title view skips them.
           if (role === 'user' && !firstPrompt) {
-            const realText = stripInjectedContextBlocks(text);
-            if (realText) firstPrompt = realText;
+            firstPrompt = text;
           }
           messages.push({
             uuid,
@@ -425,6 +430,8 @@ export class CodexParser {
           continue;
         }
 
+        if (isGuardianSession) continue;
+
         if (/Begin$/i.test(eventType) && typeof payload.call_id === 'string') {
           const callId = payload.call_id;
           if (activeTools.has(callId)) continue;
@@ -518,6 +525,7 @@ export class CodexParser {
           (sum, event) => sum + (event.reasoningTokens ?? 0),
           0,
         ),
+        capture_usage_only: isGuardianSession || undefined,
       },
     };
   }
