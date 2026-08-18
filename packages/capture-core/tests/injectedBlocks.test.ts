@@ -51,17 +51,17 @@ describe('captured-text sanitizer', () => {
     expect(sanitizeCapturedText('<recommended_plugins>plugins</recommended_plugins>')).toBe('');
   });
 
-  it('preserves Codex-shaped control records in the cross-platform sanitizer', () => {
+  it('removes boundary XML control records but preserves Codex Markdown metadata', () => {
     const agents = '# AGENTS.md instructions for D:\\work\nGenerated rules';
     const aborted = '<turn_aborted reason="interrupted" />';
-    const openedFile = '<ide_opened_file>C:\\work\\app.ts</ide_opened_file>';
+    const openedFile = '<ide_opened_file>C:\\work\\app.ts</ide_opened_file>\n\n真实问题';
 
     expect(sanitizeCapturedText(agents)).toBe(agents);
-    expect(sanitizeCapturedText(aborted)).toBe(aborted);
-    expect(sanitizeCapturedText(openedFile)).toBe(openedFile);
+    expect(sanitizeCapturedText(aborted)).toBe('');
+    expect(sanitizeCapturedText(openedFile)).toBe('真实问题');
     expect(sanitizeCodexUserText(agents)).toBe('');
     expect(sanitizeCodexUserText(aborted)).toBe('');
-    expect(sanitizeCodexUserText(openedFile)).toBe('');
+    expect(sanitizeCodexUserText(openedFile)).toBe('真实问题');
   });
 
   it('preserves a Codex pasted-file envelope for non-Codex callers', () => {

@@ -1040,6 +1040,7 @@ describe('capture adapters', () => {
     );
 
     const adapter = new ClaudeCodeAdapter();
+    expect(adapter.parserVersion).toBe(1);
     adapter.setHomeRoots([{ host: 'native', homeDir: home }]);
 
     // Enumeration no longer excludes **/subagents/**

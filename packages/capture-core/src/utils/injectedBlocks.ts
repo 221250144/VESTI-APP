@@ -24,11 +24,19 @@ const PAIRED_INJECTED_TAGS = [
   'user_info',
   'system_notification',
   'system_reminder',
+  'turn_aborted',
+  'ide_opened_file',
+] as const;
+
+const SELF_CLOSING_INJECTED_TAGS = [
+  'git-context',
+  'turn_aborted',
+  'ide_opened_file',
 ] as const;
 
 const INJECTED_BLOCK_SOURCES = [
   ...PAIRED_INJECTED_TAGS.map(tag => `<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`),
-  '<git-context\\b[^>]*\\/>',
+  ...SELF_CLOSING_INJECTED_TAGS.map(tag => `<${tag}\\b[^>]*\\/>`),
 ];
 
 const INJECTED_PREFIX_TAGS = [...PAIRED_INJECTED_TAGS, 'user_query'] as const;
