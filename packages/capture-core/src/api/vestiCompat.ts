@@ -12,6 +12,7 @@
  */
 
 import type { WorkSession, SessionMessage } from '../types/unified.js';
+import { stripInjectedContextBlocks } from '../utils/injectedBlocks.js';
 
 // ==================== ID Conversion ====================
 
@@ -208,9 +209,10 @@ export function sessionMessagesToVestiMessages(
       const msgNumericId = cliIdToNumeric(m.id);
 
       // Merge thinking into content for assistant_think messages
-      const contentText = m.source === 'assistant_think'
+      const rawContentText = m.source === 'assistant_think'
         ? (m.contentThinking || '')
         : (m.contentText || '');
+      const contentText = stripInjectedContextBlocks(rawContentText);
 
       return {
         id: msgNumericId,

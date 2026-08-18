@@ -20,6 +20,7 @@ import {
   registerCliId,
   reverseMapPlatform,
 } from './vestiCompat.js';
+import { stripInjectedContextBlocks } from '../utils/injectedBlocks.js';
 
 export class APIServer {
   private app: express.Application;
@@ -238,7 +239,7 @@ export class APIServer {
           // Get snippet from first user message
           const messages = this.db.getSessionMessages(ws.id);
           const firstUser = messages.find(m => m.source === 'user_input' && m.contentText);
-          const snippet = firstUser?.contentText?.slice(0, 100) || '';
+          const snippet = stripInjectedContextBlocks(firstUser?.contentText ?? '').slice(0, 100);
           return workSessionToVestiConversation(ws, snippet);
         });
 
@@ -261,7 +262,7 @@ export class APIServer {
         }
         const messages = this.db.getSessionMessages(ws.id);
         const firstUser = messages.find(m => m.source === 'user_input' && m.contentText);
-        const snippet = firstUser?.contentText?.slice(0, 100) || '';
+        const snippet = stripInjectedContextBlocks(firstUser?.contentText ?? '').slice(0, 100);
         res.json({ conversation: workSessionToVestiConversation(ws, snippet) });
       } catch (err) {
         res.status(500).json({ error: (err as Error).message });

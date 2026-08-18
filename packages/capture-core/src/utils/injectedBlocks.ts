@@ -32,6 +32,10 @@ const UNWRAP_TAG_PATTERNS: RegExp[] = [
 ];
 
 /** Remove injected context blocks and trim; the real user text remains. */
+export function sanitizeCapturedText(text: string): string {
+  return stripInjectedContextBlocks(text);
+}
+
 export function stripInjectedContextBlocks(text: string): string {
   let result = text;
   for (const pattern of INJECTED_BLOCK_PATTERNS) {

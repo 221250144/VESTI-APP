@@ -26,6 +26,7 @@ import os from 'os';
 import type { ParsedMessage, ParsedSession, SessionTokenUsage, SubagentRef } from '../../types/agent.js';
 import type { ToolExecution } from '../../types/index.js';
 import { estimateTokensFromText } from './estimate.js';
+import { sanitizeCapturedText } from '../../utils/injectedBlocks.js';
 
 type JsonObject = Record<string, unknown>;
 
@@ -176,6 +177,7 @@ export class CursorTranscriptParser {
         .join('\n')
         .trim();
       const toolUses = parts.filter(part => part.type === 'tool_use');
+      const sanitizedText = sanitizeCapturedText(text);
 
       // User lines embed wall-clock anchors; everything between anchors keeps
       // ordering via +1ms steps.
@@ -186,15 +188,14 @@ export class CursorTranscriptParser {
       if (role === 'user') {
         if (text) {
           if (!firstPrompt) {
-            const query = /<user_query>\s*([\s\S]*?)\s*<\/user_query>/.exec(text);
-            firstPrompt = (query?.[1] ?? text).slice(0, 500);
+            firstPrompt = sanitizedText.slice(0, 500);
           }
           messages.push({
             uuid: `cursor-tr-${agentId}-${index}`,
             type: 'user',
             role: 'user',
             timestamp: ts,
-            contentText: text,
+            contentText: sanitizedText,
             isToolResult: false,
             depth: 0,
           });
@@ -212,7 +213,7 @@ export class CursorTranscriptParser {
             type: 'assistant',
             role: 'assistant',
             timestamp: ts,
-            contentText: text || undefined,
+            contentText: sanitizedText || undefined,
             toolCalls: toolCalls.length ? toolCalls : undefined,
             isToolResult: false,
             depth: 0,
