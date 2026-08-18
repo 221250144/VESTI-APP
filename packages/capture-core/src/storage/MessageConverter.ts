@@ -30,12 +30,21 @@ export class MessageConverter {
   static convertV2(session: ParsedSession): ConvertedSession {
     const now = Date.now();
     const sessionId = `${session.platform}:${session.sessionId}`;
+    const normalizedSession: ParsedSession = {
+      ...session,
+      messages: session.messages.flatMap(message => {
+        if (message.role !== 'user' || message.isToolResult) return [message];
+        const contentText = stripInjectedContextBlocks(message.contentText ?? '');
+        if (!contentText && !message.toolCalls?.length && !message.toolResults?.length) return [];
+        return [{ ...message, contentText: contentText || undefined }];
+      }),
+    };
 
     // Classify messages and build turns
-    const { turns, messages, systemEvents } = MessageConverter.buildTurnsAndMessages(session, sessionId, now);
+    const { turns, messages, systemEvents } = MessageConverter.buildTurnsAndMessages(normalizedSession, sessionId, now);
 
     // Build tool executions with turn assignment and category
-    const toolExecutions = MessageConverter.buildToolExecutions(session, sessionId, turns, messages);
+    const toolExecutions = MessageConverter.buildToolExecutions(normalizedSession, sessionId, turns, messages);
 
     // Build subagent links
     const subagentLinks: SubagentLink[] = session.subagents.map(sub => ({
@@ -62,7 +71,7 @@ export class MessageConverter {
         agentRole: session.subagentOf.agentRole,
         slug: session.subagentOf.agentRole,
         filePath: typeof session.meta?.source_database === 'string' ? session.meta.source_database : '',
-        messageCount: session.messages.length,
+        messageCount: messages.length,
       });
     }
 
@@ -71,8 +80,8 @@ export class MessageConverter {
     const assistantMessages = messages.filter(m => m.source === 'assistant_text' || m.source === 'tool_request');
     const thinkingMessages = messages.filter(m => m.contentThinking);
     const fileSnapshotMessages = messages.filter(m => m.source === 'file_snapshot');
-    const toolCallCount = session.messages.reduce((sum, m) => sum + (m.toolCalls?.length || 0), 0);
-    const codeBlockCount = MessageConverter.countCodeBlocks(session.messages);
+    const toolCallCount = normalizedSession.messages.reduce((sum, m) => sum + (m.toolCalls?.length || 0), 0);
+    const codeBlockCount = MessageConverter.countCodeBlocks(normalizedSession.messages);
 
     // Classify session type
     const hasRealContent = userInputMessages.length > 0 || assistantMessages.length > 0;
@@ -118,8 +127,9 @@ export class MessageConverter {
     }
     if (title === 'Untitled' && session.meta) {
       const firstPrompt = (session.meta as Record<string, unknown>).first_prompt;
-      if (typeof firstPrompt === 'string' && firstPrompt.trim().length > 0) {
-        title = firstPrompt.trim().split('\n')[0].slice(0, 80);
+      if (typeof firstPrompt === 'string') {
+        const visibleFirstPrompt = stripInjectedContextBlocks(firstPrompt);
+        if (visibleFirstPrompt) title = visibleFirstPrompt.split('\n')[0].slice(0, 80);
       }
     }
     if (title === 'Untitled' && sessionType === 'file_snapshot') {

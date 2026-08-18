@@ -12,6 +12,7 @@
  */
 
 import type { WorkSession, SessionMessage } from '../types/unified.js';
+import { stripInjectedContextBlocks } from '../utils/injectedBlocks.js';
 
 // ==================== ID Conversion ====================
 
@@ -161,13 +162,15 @@ export function workSessionToVestiConversation(
   snippet?: string,
 ): VestiConversationCompat {
   const numericId = registerCliId(ws.id);
+  const title = stripInjectedContextBlocks(ws.title);
+  const visibleSnippet = stripInjectedContextBlocks(snippet ?? '');
 
   return {
     id: numericId,
     uuid: ws.sessionId,
     platform: mapPlatform(ws.platform),
-    title: ws.title,
-    snippet: snippet || '',
+    title: title || 'Untitled',
+    snippet: visibleSnippet,
     url: ws.projectPath ? `file://${ws.projectPath}` : '',
     source_created_at: ws.startedAt,
     first_captured_at: ws.startedAt,
@@ -204,15 +207,19 @@ export function sessionMessagesToVestiMessages(
       m.source === 'assistant_text' ||
       m.source === 'assistant_think'
     )
-    .map(m => {
+    .flatMap(m => {
       const msgNumericId = cliIdToNumeric(m.id);
 
       // Merge thinking into content for assistant_think messages
-      const contentText = m.source === 'assistant_think'
+      const rawContentText = m.source === 'assistant_think'
         ? (m.contentThinking || '')
         : (m.contentText || '');
+      const contentText = m.source === 'user_input'
+        ? stripInjectedContextBlocks(rawContentText)
+        : rawContentText;
+      if (m.source === 'user_input' && !contentText) return [];
 
-      return {
+      return [{
         id: msgNumericId,
         conversation_id: conversationNumericId,
         role: (m.role === 'user' ? 'user' : 'ai') as 'user' | 'ai',
@@ -231,6 +238,6 @@ export function sessionMessagesToVestiMessages(
         _tool_input: m.contentToolInput || undefined,
         _tool_output: m.contentToolOutput || undefined,
         _message_source: m.source,
-      };
+      }];
     });
 }

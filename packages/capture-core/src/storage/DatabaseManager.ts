@@ -38,6 +38,7 @@ import type {
   FileTimelineEvent,
   TokenUsageEvent,
   MemoryEntry,
+  ConvertedSession,
 } from '../types/unified.js';
 
 type Database = import('better-sqlite3').Database;
@@ -569,6 +570,71 @@ export class DatabaseManager {
       updatedAt: s.updatedAt,
     });
     this.upsertProjectForSession(s);
+  }
+
+  /**
+   * Replace parser-derived rows after a parser-version upgrade. Ordinary
+   * streaming sync remains monotonic; an upgraded full-file parser needs an
+   * exact snapshot so rows it intentionally omitted do not survive forever.
+   */
+  replaceSessionSnapshot(snapshot: ConvertedSession): void {
+    const db = this.getDb();
+    db.transaction(() => {
+      const sessionId = snapshot.session.id;
+      for (const table of ['messages', 'tool_executions', 'turns', 'system_events', 'context_compactions']) {
+        db.prepare(`DELETE FROM ${table} WHERE session_id = ?`).run(sessionId);
+      }
+      // Embeddings cascade from this row. A clean transcript must receive a
+      // fresh digest instead of retaining content derived from removed text.
+      const deletedDigest = db.prepare('DELETE FROM session_digests WHERE session_id = ?').run(sessionId);
+      if (deletedDigest.changes > 0) {
+        db.prepare(
+          'UPDATE embedding_index_state SET revision = revision + 1 WHERE singleton = 1',
+        ).run();
+      }
+
+      this.upsertWorkSession(snapshot.session);
+      db.prepare(`
+        UPDATE work_sessions SET
+          title = @title,
+          started_at = @startedAt,
+          ended_at = @endedAt,
+          last_activity_at = @lastActivityAt,
+          duration_ms = @durationMs,
+          message_count = @messageCount,
+          user_input_count = @userInputCount,
+          assistant_message_count = @assistantMessageCount,
+          thinking_count = @thinkingCount,
+          tool_call_count = @toolCallCount,
+          code_block_count = @codeBlockCount,
+          turn_count = @turnCount,
+          session_type = @sessionType,
+          updated_at = @updatedAt
+        WHERE id = @id
+      `).run({
+        id: snapshot.session.id,
+        title: snapshot.session.title,
+        startedAt: snapshot.session.startedAt,
+        endedAt: snapshot.session.endedAt ?? null,
+        lastActivityAt: snapshot.session.lastActivityAt,
+        durationMs: snapshot.session.durationMs,
+        messageCount: snapshot.session.messageCount,
+        userInputCount: snapshot.session.userInputCount,
+        assistantMessageCount: snapshot.session.assistantMessageCount,
+        thinkingCount: snapshot.session.thinkingCount,
+        toolCallCount: snapshot.session.toolCallCount,
+        codeBlockCount: snapshot.session.codeBlockCount,
+        turnCount: snapshot.session.turnCount,
+        sessionType: snapshot.session.sessionType,
+        updatedAt: snapshot.session.updatedAt,
+      });
+
+      this.insertSessionMessages(snapshot.messages);
+      this.insertUnifiedToolExecutions(snapshot.toolExecutions);
+      this.insertTurns(snapshot.turns);
+      this.insertSystemEvents(snapshot.systemEvents);
+      this.insertContextCompactions(snapshot.contextCompactions);
+    })();
   }
 
   /**
