@@ -5,7 +5,9 @@ import {
   VaultManager,
   VestiConfig,
   WslDetector,
+  cliIdToNumeric,
   hostFromPath,
+  firstVisibleUserSnippet,
   sessionMessagesToVestiMessages,
   workSessionToVestiConversation,
   type ConversationTree,
@@ -386,8 +388,19 @@ export class CaptureService {
     for (const session of sessions) {
       sessionIds.push(session.id);
       const messages = this.db.getSessionMessages(session.id);
-      const firstUserMessage = messages.find(message => message.source === 'user_input');
-      const conversation = workSessionToVestiConversation(session, firstUserMessage?.contentText?.slice(0, 200));
+      const visibleMessages = sessionMessagesToVestiMessages(
+        messages,
+        cliIdToNumeric(session.id),
+        session.platform,
+      );
+      const conversation = workSessionToVestiConversation(
+        session,
+        firstVisibleUserSnippet(messages, 200, session.platform),
+        {
+          messageCount: visibleMessages.length,
+          turnCount: visibleMessages.filter(message => message.role === 'user').length,
+        },
+      );
       const link = lineage.get(session.id);
       if (link) {
         conversation._subagent_of = link.parentSessionId;
@@ -395,7 +408,7 @@ export class CaptureService {
       }
       all.push({
         conversation,
-        messages: sessionMessagesToVestiMessages(messages, conversation.id),
+        messages: visibleMessages,
       });
     }
     return { all, sessionIds };

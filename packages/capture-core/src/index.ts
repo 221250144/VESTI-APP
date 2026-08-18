@@ -102,6 +102,7 @@ export { APIServer } from './api/APIServer.js';
 export {
   workSessionToVestiConversation,
   sessionMessagesToVestiMessages,
+  firstVisibleUserSnippet,
   cliIdToNumeric,
   resolveCliId,
   mapPlatform,

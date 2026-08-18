@@ -31,13 +31,11 @@ const INJECTED_BLOCK_SOURCES = [
   '<git-context\\b[^>]*\\/>',
 ];
 
-const SYSTEM_ONLY_MESSAGE_PATTERNS: RegExp[] = [
-  /^# AGENTS\.md instructions for\b[\s\S]*$/i,
-  /^<turn_aborted\b[^>]*>[\s\S]*?<\/turn_aborted>$/i,
-  /^<turn_aborted\b[^>]*\/>$/i,
-  /^<ide_opened_file\b[^>]*>[\s\S]*?<\/ide_opened_file>$/i,
-  /^<ide_opened_file\b[^>]*\/>$/i,
-];
+const INJECTED_PREFIX_TAGS = [...PAIRED_INJECTED_TAGS, 'user_query'] as const;
+const INJECTED_PREFIX_PATTERN = new RegExp(
+  `^\\s*<(?:${INJECTED_PREFIX_TAGS.join('|')})\\b`,
+  'i',
+);
 
 function removeBoundaryBlocks(text: string): string {
   let result = text;
@@ -58,8 +56,12 @@ export function sanitizeCapturedText(text: string): string {
   let result = removeBoundaryBlocks(text);
   const userQuery = result.match(/^\s*<user_query\b[^>]*>([\s\S]*?)<\/user_query>\s*$/i);
   if (userQuery) result = userQuery[1];
-  result = result.trim();
-  return SYSTEM_ONLY_MESSAGE_PATTERNS.some(pattern => pattern.test(result)) ? '' : result;
+  return result.trim();
+}
+
+/** Detect an injected tag whose stored title was truncated before its close tag. */
+export function looksLikeInjectedContextPrefix(text: string): boolean {
+  return INJECTED_PREFIX_PATTERN.test(text);
 }
 
 /** Backward-compatible name used by title, summary and renderer call sites. */

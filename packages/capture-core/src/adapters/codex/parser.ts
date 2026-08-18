@@ -15,31 +15,10 @@ import type {
   ToolResultBlock,
 } from '../../types/agent.js';
 import type { ToolExecution } from '../../types/index.js';
-import { stripInjectedContextBlocks } from '../../utils/injectedBlocks.js';
-
-const CODEX_SYSTEM_ONLY_USER_MESSAGES: RegExp[] = [
-  /^# AGENTS\.md instructions for\b[\s\S]*$/i,
-  /^<turn_aborted\b[^>]*>[\s\S]*?<\/turn_aborted>$/i,
-  /^<turn_aborted\b[^>]*\/>$/i,
-  /^<ide_opened_file\b[^>]*>[\s\S]*?<\/ide_opened_file>$/i,
-  /^<ide_opened_file\b[^>]*\/>$/i,
-];
+import { sanitizeCodexUserText } from '../../utils/codexUserText.js';
 
 function visibleCodexUserText(text: string): string {
-  let sanitized = stripInjectedContextBlocks(text);
-  if (/^# Files (?:mentioned|pasted) by the user:/i.test(sanitized)) {
-    const request = sanitized.match(
-      /(?:^|\r?\n)## My request(?: for Codex)?:\s*\r?\n([\s\S]*)$/i,
-    );
-    if (request) sanitized = request[1].trim();
-  }
-  sanitized = sanitized
-    .replace(/\s*<image\b[^>]*>[\s\S]*?<\/image>\s*$/i, '')
-    .replace(/\s*<image\b[^>]*\/>\s*$/i, '')
-    .trim();
-  return CODEX_SYSTEM_ONLY_USER_MESSAGES.some(pattern => pattern.test(sanitized))
-    ? ''
-    : sanitized;
+  return sanitizeCodexUserText(text);
 }
 
 interface RolloutRow {

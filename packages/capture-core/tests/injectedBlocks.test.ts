@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { sanitizeCapturedText, stripInjectedContextBlocks } from '../src/injectedBlocks.js';
+import { sanitizeCodexUserText } from '../src/utils/codexUserText.js';
 
 describe('captured-text sanitizer', () => {
   it('removes consecutive leading Codex envelopes and preserves the real request', () => {
@@ -50,9 +51,30 @@ describe('captured-text sanitizer', () => {
     expect(sanitizeCapturedText('<recommended_plugins>plugins</recommended_plugins>')).toBe('');
   });
 
-  it('drops known whole-message control records used as user messages', () => {
-    expect(sanitizeCapturedText('# AGENTS.md instructions for D:\\work\nGenerated rules')).toBe('');
-    expect(sanitizeCapturedText('<turn_aborted reason="interrupted" />')).toBe('');
-    expect(sanitizeCapturedText('<ide_opened_file>C:\\work\\app.ts</ide_opened_file>')).toBe('');
+  it('preserves Codex-shaped control records in the cross-platform sanitizer', () => {
+    const agents = '# AGENTS.md instructions for D:\\work\nGenerated rules';
+    const aborted = '<turn_aborted reason="interrupted" />';
+    const openedFile = '<ide_opened_file>C:\\work\\app.ts</ide_opened_file>';
+
+    expect(sanitizeCapturedText(agents)).toBe(agents);
+    expect(sanitizeCapturedText(aborted)).toBe(aborted);
+    expect(sanitizeCapturedText(openedFile)).toBe(openedFile);
+    expect(sanitizeCodexUserText(agents)).toBe('');
+    expect(sanitizeCodexUserText(aborted)).toBe('');
+    expect(sanitizeCodexUserText(openedFile)).toBe('');
+  });
+
+  it('preserves a Codex pasted-file envelope for non-Codex callers', () => {
+    const input = [
+      '# Files pasted by the user:',
+      '',
+      '## "<recommended_plugins> Here is a list…": C:\\Users\\scott\\pasted-text.txt',
+      '',
+      '## My request:',
+      '还是这个样子啊',
+    ].join('\n');
+
+    expect(sanitizeCapturedText(input)).toBe(input);
+    expect(sanitizeCodexUserText(input)).toBe('还是这个样子啊');
   });
 });

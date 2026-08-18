@@ -43,7 +43,35 @@ describe('workSessionToVestiConversation', () => {
       '<environment_context>generated</environment_context>\n\n可见摘要',
     );
 
-    expect(conversation.title).toBe('Untitled');
+    expect(conversation.title).toBe('可见摘要');
     expect(conversation.snippet).toBe('可见摘要');
+  });
+
+  it('uses the visible snippet when a legacy title is a truncated system block', () => {
+    const conversation = workSessionToVestiConversation(
+      workSession({
+        title: '<recommended_plugins> Here is a list of plugins that are available but not insta',
+      }),
+      '还是这个样子啊',
+    );
+
+    expect(conversation.title).toBe('还是这个样子啊');
+    expect(conversation.snippet).toBe('还是这个样子啊');
+  });
+
+  it.each([
+    '<git-context branch="main"',
+    '<timestamp>2026-08-18',
+    '<user_info>generated',
+    '<system_notification>generated',
+    '<system_reminder>generated',
+    '<user_query>truncated wrapper',
+  ])('replaces a truncated shared-system title: %s', title => {
+    const conversation = workSessionToVestiConversation(
+      workSession({ platform: 'claude-code', title }),
+      '可见问题',
+    );
+
+    expect(conversation.title).toBe('可见问题');
   });
 });
