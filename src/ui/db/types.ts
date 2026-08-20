@@ -366,6 +366,12 @@ export interface MessageAttachment {
   occurrenceRole: MessageAttachmentOccurrenceRole
 }
 
+export interface TurnMessageSegment {
+  id: number
+  content_text: string
+  created_at: number
+}
+
 export interface Message {
   id: number
   conversation_id: number
@@ -379,6 +385,13 @@ export interface Message {
   artifacts?: MessageArtifact[]
   normalized_html_snapshot?: string | null
   created_at: number
+  _turn_id?: string
+  _turn_sequence?: number
+  _message_kind?: "turn_prompt" | "turn_response"
+  _followups?: TurnMessageSegment[]
+  _progress_segments?: TurnMessageSegment[]
+  _thinking_segments?: TurnMessageSegment[]
+  _member_message_ids?: number[]
 }
 
 // ============================================================

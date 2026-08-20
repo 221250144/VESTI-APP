@@ -298,4 +298,27 @@ describe("serializeConversationMarkdown", () => {
     expect(doc).toContain("```bash\necho hi\n```");
     expect(doc).not.toContain("plain fallback");
   });
+
+  it("serializes every supplemental segment of an aggregated turn exactly once", () => {
+    const doc = serializeConversationMarkdown({
+      conversation: conversation(),
+      messages: [
+        message({
+          role: "ai",
+          content_text: "最终答案",
+          _followups: [{ id: 11, content_text: "跟进内容", created_at: 2 }],
+          _progress_segments: [{ id: 12, content_text: "进度内容", created_at: 3 }],
+          _thinking_segments: [{ id: 13, content_text: "思考内容", created_at: 4 }],
+        }),
+      ],
+      sourceLabel: "Codex",
+      projectLabel: "vesti-app",
+    });
+
+    for (const value of ["跟进内容", "进度内容", "思考内容"]) {
+      expect(doc.split(value)).toHaveLength(2);
+    }
+    expect(doc).toContain("#### 跟进 1");
+    expect(doc).toContain("<summary>过程</summary>");
+  });
 });

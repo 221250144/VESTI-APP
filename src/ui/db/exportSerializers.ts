@@ -17,6 +17,7 @@ import {
   getConversationSourceCreatedAt,
 } from "./timestamps";
 import { resolveMessageExportBodyText } from "./utils/messageExportPackage";
+import { getTurnMessageSupplementSections } from "./utils/turnMessageText";
 
 export interface ExportDataset {
   conversations: Conversation[];
@@ -92,7 +93,9 @@ function buildTimestampTag(): string {
 
 function getMeta() {
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-  const appVersion = chrome?.runtime?.getManifest?.().version ?? "unknown";
+  const appVersion = typeof chrome !== "undefined"
+    ? chrome.runtime?.getManifest?.().version ?? "unknown"
+    : "unknown";
   return {
     exportedAtIso: new Date().toISOString(),
     timezone,
@@ -397,6 +400,17 @@ export function buildExportTxtV1(dataset: ExportDataset): ExportPayload {
       if (bodyText) {
         lines.push(bodyText);
       }
+      for (const section of getTurnMessageSupplementSections(message)) {
+        if (section.kind === "followup") {
+          section.items.forEach((item, itemIndex) => {
+            lines.push(`跟进 ${itemIndex + 1}:`);
+            lines.push(item.content_text);
+          });
+        } else {
+          lines.push(`过程 · ${section.title}:`);
+          lines.push(...section.items.map(item => item.content_text));
+        }
+      }
       if ((message.citations ?? []).length > 0) {
         lines.push("Sources:");
         lines.push(...formatExportCitationLines(message.citations ?? [], "txt"));
@@ -491,6 +505,24 @@ export function buildExportMdV1(dataset: ExportDataset): ExportPayload {
       const bodyText = resolveMessageExportBodyText(message);
       if (bodyText) {
         lines.push(bodyText);
+      }
+      const supplementSections = getTurnMessageSupplementSections(message);
+      for (const section of supplementSections.filter(item => item.kind === "followup")) {
+        section.items.forEach((item, itemIndex) => {
+          lines.push("");
+          lines.push(`#### 跟进 ${itemIndex + 1}`);
+          lines.push("");
+          lines.push(item.content_text);
+        });
+      }
+      const processSections = supplementSections.filter(item => item.kind !== "followup");
+      if (processSections.length) {
+        lines.push("", "<details>", "<summary>过程</summary>", "");
+        for (const section of processSections) {
+          lines.push(`#### ${section.title}`, "");
+          section.items.forEach(item => lines.push(item.content_text, ""));
+        }
+        lines.push("</details>");
       }
       if ((message.citations ?? []).length > 0) {
         lines.push("");

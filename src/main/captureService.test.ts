@@ -115,6 +115,37 @@ describe("exportConversations (incremental)", () => {
     expect(result.bundles[0].messages).toHaveLength(1);
   });
 
+  it("hides legacy system rows before exporting a parser-version-0 conversation", () => {
+    const sessions = [makeSession("legacy", {
+      platform: "codex",
+      title: "<recommended_plugins> Here is a list of plugins that are available but not insta",
+      messageCount: 2,
+      turnCount: 2,
+    })];
+    const pastedRequest = [
+      "# Files pasted by the user:",
+      "",
+      '## "<recommended_plugins> Here is a list…": C:\\Users\\scott\\pasted-text.txt',
+      "",
+      "## My request:",
+      "还是这个样子啊",
+    ].join("\n");
+    const messages = new Map([
+      ["legacy", [
+        makeMessage("1", "legacy", "<recommended_plugins>generated</recommended_plugins>"),
+        makeMessage("2", "legacy", pastedRequest),
+      ]],
+    ]);
+
+    const [bundle] = makeExportService(sessions, messages).exportConversations().bundles;
+
+    expect(bundle.conversation.title).toBe("还是这个样子啊");
+    expect(bundle.conversation.snippet).toBe("还是这个样子啊");
+    expect(bundle.conversation.message_count).toBe(1);
+    expect(bundle.conversation.turn_count).toBe(1);
+    expect(bundle.messages.map(message => message.content_text)).toEqual(["还是这个样子啊"]);
+  });
+
   it("returns empty bundles but the full id list when nothing changed", () => {
     const sessions = [makeSession("s1"), makeSession("s2")];
     const messages = new Map([

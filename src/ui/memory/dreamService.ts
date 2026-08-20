@@ -20,6 +20,7 @@ import {
 import { db } from "../db/schema";
 import type { ConversationRecord } from "../db/schema";
 import { listMessages } from "../db/repository";
+import { getTurnMessageAnalysisText } from "../db/utils/turnMessageText";
 import { pad2, toLocalDateString, todayDateString } from "../daily/dailyActivity";
 import {
   OWL_DIARY_QUESTION,
@@ -624,7 +625,7 @@ async function listDexieDreamMessages(
   const messages = await listMessages(session.id).catch(() => []);
   return messages.map((message) => ({
     role: message.role === "user" ? "user" : "ai",
-    contentText: message.content_text ?? "",
+    contentText: getTurnMessageAnalysisText(message),
     toolName:
       typeof (message as { _tool_name?: unknown })._tool_name === "string"
         ? ((message as { _tool_name?: string })._tool_name as string)

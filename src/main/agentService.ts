@@ -2,6 +2,10 @@ import { net, session } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import {
+  projectSessionTurnsToVesti,
+  type SessionMessage as CaptureSessionMessage,
+} from '@vesti/capture-core';
 import type {
   AgentResult,
   AgentRunRequest,
@@ -17,6 +21,75 @@ import type { RuntimeAgentSettings, RuntimeLlmSettings, SettingsService } from '
 import { fetchDemoProxy, type ProxyAttemptMetadata } from './proxyFetch';
 
 const MAX_TRANSCRIPT_CHARACTERS = 80_000;
+
+export function buildProjectedSessionTranscript(
+  detail: SessionDetail,
+  preferences: RuntimeAgentSettings,
+): string {
+  const projection = projectSessionTurnsToVesti(
+    detail.messages as CaptureSessionMessage[],
+    0,
+    detail.session.platform,
+  );
+  const rawByTurn = new Map<string, SessionMessage[]>();
+  for (const message of detail.messages) {
+    if (!message.turnId) continue;
+    const group = rawByTurn.get(message.turnId) ?? [];
+    group.push(message);
+    rawByTurn.set(message.turnId, group);
+  }
+
+  const projectedResponseTurnIds = new Set(
+    projection.messages.flatMap(message => (
+      message.role === 'ai' && message._turn_id ? [message._turn_id] : []
+    )),
+  );
+  const toolLinesForTurn = (turnId: string | undefined): string[] => {
+    if (!preferences.includeToolDetails || !turnId) return [];
+    const lines = (rawByTurn.get(turnId) ?? []).flatMap(raw => [
+      raw.contentToolName ? `工具：${raw.contentToolName}` : undefined,
+      raw.contentToolInput ? `工具输入：${raw.contentToolInput}` : undefined,
+      raw.contentToolOutput ? `工具输出：${raw.contentToolOutput}` : undefined,
+      raw.contentToolError ? `工具错误：${raw.contentToolError}` : undefined,
+    ].filter((value): value is string => Boolean(value?.trim())));
+    return [...new Set(lines)];
+  };
+
+  return projection.messages.flatMap(message => {
+    const turn = message._turn_sequence ?? 0;
+    const values: string[] = [];
+    if (message.content_text.trim()) values.push(message.content_text.trim());
+    if (message.role === 'user') {
+      (message._followups ?? []).forEach((followup, index) => {
+        values.push(`跟进 ${index + 1}：${followup.content_text}`);
+      });
+    } else {
+      if (preferences.includeThinking && message._progress_segments?.length) {
+        values.push(`[进度]\n${message._progress_segments.map(item => item.content_text).join('\n\n')}`);
+      }
+      if (preferences.includeThinking && message._thinking_segments?.length) {
+        values.push(`[思考]\n${message._thinking_segments.map(item => item.content_text).join('\n\n')}`);
+      }
+      if (message._turn_id) {
+        const toolLines = toolLinesForTurn(message._turn_id);
+        if (toolLines.length) values.push(`[工具]\n${toolLines.join('\n')}`);
+      }
+    }
+    if (!values.length) return [];
+    const output = [`[轮次 ${turn}] ${message.role === 'user' ? '用户' : 'AI'}\n${values.join('\n\n')}`];
+    if (
+      message.role === 'user'
+      && message._turn_id
+      && !projectedResponseTurnIds.has(message._turn_id)
+    ) {
+      const toolLines = toolLinesForTurn(message._turn_id);
+      if (toolLines.length) {
+        output.push(`[轮次 ${turn}] AI\n[工具]\n${toolLines.join('\n')}`);
+      }
+    }
+    return output;
+  }).join('\n\n');
+}
 /** Settings upper bound for max_tokens (mirrors settingsService's 0–16_384
  * range, where 0 means "don't send max_tokens"); per-kind floors below can
  * never push past it. */
@@ -251,10 +324,7 @@ export class AgentService {
   }
 
   private buildTranscript(detail: SessionDetail, preferences: RuntimeAgentSettings): string {
-    const parts = detail.messages
-      .map((message, index) => this.formatMessage(message, index + 1, preferences))
-      .filter(Boolean);
-    let transcript = parts.join('\n\n');
+    let transcript = buildProjectedSessionTranscript(detail, preferences);
     if (transcript.length > MAX_TRANSCRIPT_CHARACTERS) {
       transcript = `${transcript.slice(0, 30_000)}\n\n[中间内容因长度限制已省略]\n\n${transcript.slice(-50_000)}`;
     }
@@ -276,20 +346,6 @@ export class AgentService {
       return `- ${role}${title}（${brief.messageCount} 条消息）${oneLiner}`;
     });
     return `[子代理工作摘要]\n本会话曾派生 ${briefs.length} 个子代理执行子任务：\n${lines.join('\n')}`;
-  }
-
-  private formatMessage(message: SessionMessage, turn: number, preferences: RuntimeAgentSettings): string {
-    const values = [
-      message.contentText,
-      preferences.includeThinking ? message.contentThinking : undefined,
-      preferences.includeToolDetails && message.contentToolName ? `工具：${message.contentToolName}` : undefined,
-      preferences.includeToolDetails && message.contentToolInput ? `工具输入：${message.contentToolInput}` : undefined,
-      preferences.includeToolDetails && message.contentToolOutput ? `工具输出：${message.contentToolOutput}` : undefined,
-      preferences.includeToolDetails && message.contentToolError ? `工具错误：${message.contentToolError}` : undefined,
-    ].filter((value): value is string => Boolean(value?.trim()));
-    if (!values.length) return '';
-    const role = message.role === 'user' ? '用户' : message.role === 'assistant' ? 'AI' : '系统';
-    return `[${turn}] ${role} / ${message.source}\n${values.join('\n')}`;
   }
 
   private async complete(

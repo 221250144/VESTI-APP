@@ -29,6 +29,7 @@ export function computeBundleFingerprint(
   };
   mix(conversation.updated_at);
   mix(conversation.message_count);
+  mix(conversation.turn_count);
   mix(conversation.first_captured_at);
   mix(conversation.snippet?.length ?? 0);
   const title = conversation.title ?? "";
@@ -47,6 +48,15 @@ export function computeBundleFingerprint(
     mix(message.created_at);
     mix(message.content_text?.length ?? 0);
     mix(message.role === "user" ? 1 : 2);
+    for (const segment of [
+      ...(message._followups ?? []),
+      ...(message._progress_segments ?? []),
+      ...(message._thinking_segments ?? []),
+    ]) {
+      mix(segment.id);
+      mix(segment.created_at);
+      mix(segment.content_text.length);
+    }
   }
   return hash >>> 0;
 }
