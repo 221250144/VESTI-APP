@@ -5,6 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  buildAnnotationMessageRemap,
   computeBundleFingerprint,
   planImport,
 } from "./captureSync";
@@ -308,5 +309,24 @@ describe("planImport", () => {
     expect(plan.changedIds).toEqual([]);
     expect(plan.changedMessages).toEqual([]);
     expect(plan.staleIds).toEqual([]);
+  });
+});
+
+describe("buildAnnotationMessageRemap", () => {
+  it("maps old split message ids to their new role-appropriate turn bubble", () => {
+    const prompt = {
+      ...makeMessage(100, 1, "主提示"),
+      _member_message_ids: [100, 101],
+    };
+    const response = {
+      ...makeMessage(200, 1, "最终答案", "ai"),
+      _member_message_ids: [150, 151, 200],
+    };
+
+    const remap = buildAnnotationMessageRemap([prompt, response] as never);
+
+    expect(remap.get(101)).toBe(100);
+    expect(remap.get(150)).toBe(200);
+    expect(remap.get(200)).toBe(200);
   });
 });

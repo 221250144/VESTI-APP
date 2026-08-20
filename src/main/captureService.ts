@@ -8,7 +8,7 @@ import {
   cliIdToNumeric,
   hostFromPath,
   firstVisibleUserSnippet,
-  sessionMessagesToVestiMessages,
+  projectSessionTurnsToVesti,
   workSessionToVestiConversation,
   type ConversationTree,
   type FileTimelineEvent,
@@ -388,7 +388,7 @@ export class CaptureService {
     for (const session of sessions) {
       sessionIds.push(session.id);
       const messages = this.db.getSessionMessages(session.id);
-      const visibleMessages = sessionMessagesToVestiMessages(
+      const projection = projectSessionTurnsToVesti(
         messages,
         cliIdToNumeric(session.id),
         session.platform,
@@ -397,8 +397,8 @@ export class CaptureService {
         session,
         firstVisibleUserSnippet(messages, 200, session.platform),
         {
-          messageCount: visibleMessages.length,
-          turnCount: visibleMessages.filter(message => message.role === 'user').length,
+          messageCount: projection.messages.length,
+          turnCount: projection.turnCount,
         },
       );
       const link = lineage.get(session.id);
@@ -408,7 +408,7 @@ export class CaptureService {
       }
       all.push({
         conversation,
-        messages: visibleMessages,
+        messages: projection.messages,
       });
     }
     return { all, sessionIds };

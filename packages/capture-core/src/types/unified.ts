@@ -11,6 +11,7 @@ export type MessageSource =
   | 'user_input'       // Real user input (~1.7%)
   | 'tool_result'      // Tool execution result (~97.7%)
   | 'assistant_text'   // Agent text response
+  | 'assistant_commentary' // Assistant progress update within a task
   | 'assistant_think'  // Agent thinking process
   | 'tool_request'     // Agent requesting tool call
   | 'progress'         // Tool execution intermediate output

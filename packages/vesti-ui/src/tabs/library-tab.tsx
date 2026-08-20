@@ -100,6 +100,13 @@ import {
   isSubagentConversation,
   type SourceSelection,
 } from "./library/sourceTree";
+import {
+  buildFollowupsByTurn,
+  FOLLOWUP_PLACEMENT_PREFERENCE_KEY,
+  getConversationTurnCount,
+  shouldRenderFollowupsUnderPrompt,
+  type FollowupPlacement,
+} from "./library/turnView";
 
 type ViewMode = "conversations" | "notes";
 type FolderMeta = { customFolders: string[] };
@@ -666,6 +673,11 @@ export function LibraryTab({
   const [loadedMessagesConversationId, setLoadedMessagesConversationId] =
     useState<number | null>(null);
   const [messagesError, setMessagesError] = useState<string | null>(null);
+  const [followupPlacement, setFollowupPlacement] =
+    useState<FollowupPlacement>("under_prompt");
+  const [expandedTurnProcess, setExpandedTurnProcess] = useState<
+    Record<number, boolean>
+  >({});
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [annotationDrafts, setAnnotationDrafts] = useState<
     Record<number, string>
@@ -796,6 +808,22 @@ export function LibraryTab({
     () => notes.find((note) => note.id === selectedNoteId) ?? null,
     [notes, selectedNoteId],
   );
+
+  useEffect(() => {
+    let active = true;
+    if (!storage.getUiPreference) return () => { active = false; };
+    void storage.getUiPreference(FOLLOWUP_PLACEMENT_PREFERENCE_KEY).then(value => {
+      if (active && (value === "under_prompt" || value === "inside_response")) {
+        setFollowupPlacement(value);
+      }
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [storage]);
+
+  const updateFollowupPlacement = useCallback((value: FollowupPlacement) => {
+    setFollowupPlacement(value);
+    void storage.setUiPreference?.(FOLLOWUP_PLACEMENT_PREFERENCE_KEY, value);
+  }, [storage]);
 
   const persistNoteDraft = async (
     noteId: number,
@@ -1504,6 +1532,18 @@ export function LibraryTab({
       renameNoteTrimmed !== renameNoteTarget.title,
   );
   const messageCount = messages.length;
+  const turnCount = getConversationTurnCount(selectedConversation, messages);
+  const followupsByTurn = useMemo(
+    () => buildFollowupsByTurn(messages),
+    [messages],
+  );
+  const responseTurnIds = useMemo(
+    () => new Set(messages.flatMap(message => (
+      message.role === "ai" && message._turn_id ? [message._turn_id] : []
+    ))),
+    [messages],
+  );
+  const hasTurnFollowups = followupsByTurn.size > 0;
   const timestampFooter = useMemo(
     () =>
       selectedConversation
@@ -4501,7 +4541,7 @@ export function LibraryTab({
                           <span>·</span>
                           <span>{formatDate(messageDate)}</span>
                           <span>·</span>
-                          <span>{messageCount} messages</span>
+                          <span>{turnCount} {labels.turnCountLabel ?? "turns"}</span>
                           {selectedConversation.url && (
                             <>
                               <span>·</span>
@@ -5028,6 +5068,32 @@ export function LibraryTab({
                     {labels.originalConversation ?? "Original Conversation"}
                   </DetailSectionEyebrow>
                   <DetailSectionCard className="mb-8">
+                    {hasTurnFollowups ? (
+                      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border-subtle px-5 py-3">
+                        <span className="text-[11px] font-sans uppercase tracking-[0.12em] text-text-tertiary">
+                          {labels.followupPlacement ?? "Follow-up placement"}
+                        </span>
+                        <div className="inline-flex rounded-full border border-border-subtle bg-bg-secondary/60 p-0.5">
+                          {([
+                            ["under_prompt", labels.followupsUnderPrompt ?? "Under prompt"],
+                            ["inside_response", labels.followupsInsideResponse ?? "Inside response"],
+                          ] as const).map(([value, label]) => (
+                            <button
+                              key={value}
+                              type="button"
+                              onClick={() => updateFollowupPlacement(value)}
+                              className={`rounded-full px-3 py-1 text-[11px] font-sans transition-colors ${
+                                followupPlacement === value
+                                  ? "bg-bg-primary text-text-primary shadow-sm"
+                                  : "text-text-tertiary hover:text-text-secondary"
+                              }`}
+                            >
+                              {label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
                     {/* 默认预览条 - 折叠时显示 */}
                     {!isReaderConversationExpanded && (
                       <div className="space-y-4 p-5">
@@ -5038,7 +5104,7 @@ export function LibraryTab({
                               className="h-1 w-1 rounded-full bg-border-default/80"
                               aria-hidden="true"
                             />
-                            <span>{messageCount} {labels.messageCountLabel ?? "messages"}</span>
+                            <span>{turnCount} {labels.turnCountLabel ?? "turns"}</span>
                           </div>
                           <p
                             className={`mt-3 max-w-[60ch] break-words font-sans text-[14px] leading-[1.75] ${
@@ -5061,7 +5127,7 @@ export function LibraryTab({
                                 }
                                 className="inline-flex items-center rounded-full bg-bg-primary px-3.5 py-1.5 text-[12px] font-sans text-text-secondary transition-colors hover:bg-bg-surface-hover hover:text-text-primary"
                               >
-                                {labels.showOriginalMessages ?? "Show original messages"} ({messageCount})
+                                {labels.showTaskTurns ?? "Show task turns"} ({turnCount})
                               </button>
                             </div>
                           )}
@@ -5105,7 +5171,7 @@ export function LibraryTab({
                               onClick={() => setIsConversationExpanded(false)}
                               className="inline-flex items-center rounded-full border border-border-subtle bg-bg-primary px-3.5 py-1.5 text-[12px] font-sans text-text-secondary transition-colors whitespace-nowrap hover:bg-bg-secondary hover:text-text-primary"
                             >
-                              {labels.hideOriginalMessages ?? "Hide original messages"}
+                              {labels.hideTaskTurns ?? "Hide task turns"}
                             </button>
                           </div>
                         )}
@@ -5123,6 +5189,17 @@ export function LibraryTab({
                             )}
                             {messages.map((message, messageIndex) => {
                               const isUser = message.role === "user";
+                              const followups = isUser
+                                ? (message._followups ?? [])
+                                : (message._turn_id
+                                    ? followupsByTurn.get(message._turn_id) ?? []
+                                    : []);
+                              const progressSegments = message._progress_segments ?? [];
+                              const thinkingSegments = message._thinking_segments ?? [];
+                              const processSegmentCount =
+                                progressSegments.length + thinkingSegments.length;
+                              const isProcessExpanded =
+                                expandedTurnProcess[message.id] === true;
                               const messageAnnotations =
                                 getAnnotationsForMessage(message.id);
                               const latestAnnotation =
@@ -5256,7 +5333,112 @@ export function LibraryTab({
                                           }, 0);
                                         }}
                                       >
-                                        <RichMessageContent message={message} />
+                                        {message.content_text ? (
+                                          <RichMessageContent message={message} />
+                                        ) : !isUser ? (
+                                          <span className="text-sm font-normal text-text-tertiary">
+                                            {labels.noFinalAnswerYet ?? "No final answer yet"}
+                                          </span>
+                                        ) : null}
+
+                                        {followups.length > 0 && (
+                                          (isUser && shouldRenderFollowupsUnderPrompt(
+                                            message,
+                                            followupPlacement,
+                                            responseTurnIds,
+                                          ))
+                                          || (!isUser && followupPlacement === "inside_response")
+                                        ) ? (
+                                          <div className="mt-4 space-y-2 border-t border-border-subtle/70 pt-3">
+                                            {followups.map((followup, index) => (
+                                              <div
+                                                key={followup.id}
+                                                className="rounded-xl border border-border-subtle bg-bg-primary/70 px-3 py-2.5"
+                                              >
+                                                <div className="mb-1.5 text-[10px] font-sans font-medium uppercase tracking-[0.1em] text-text-tertiary">
+                                                  {labels.followup ?? "Follow-up"} {index + 1}
+                                                </div>
+                                                <div className="font-sans text-sm font-normal text-text-secondary">
+                                                  <RichMessageContent
+                                                    message={{
+                                                      id: followup.id,
+                                                      conversation_id: message.conversation_id,
+                                                      role: "user",
+                                                      content_text: followup.content_text,
+                                                      created_at: followup.created_at,
+                                                    }}
+                                                  />
+                                                </div>
+                                              </div>
+                                            ))}
+                                          </div>
+                                        ) : null}
+
+                                        {!isUser && processSegmentCount > 0 ? (
+                                          <div className="mt-4 border-t border-border-subtle/70 pt-3 font-sans font-normal">
+                                            <button
+                                              type="button"
+                                              onClick={() => setExpandedTurnProcess(prev => ({
+                                                ...prev,
+                                                [message.id]: !prev[message.id],
+                                              }))}
+                                              aria-expanded={isProcessExpanded}
+                                              className="inline-flex items-center gap-1.5 text-[12px] text-text-tertiary transition-colors hover:text-text-secondary"
+                                            >
+                                              <ChevronDown
+                                                strokeWidth={1.6}
+                                                className={`h-3.5 w-3.5 transition-transform ${
+                                                  isProcessExpanded ? "" : "-rotate-90"
+                                                }`}
+                                              />
+                                              {labels.turnProcess ?? "Process"} · {processSegmentCount}
+                                            </button>
+                                            {isProcessExpanded ? (
+                                              <div className="mt-3 space-y-4 rounded-xl bg-bg-secondary/55 p-3">
+                                                {progressSegments.length > 0 ? (
+                                                  <div className="space-y-2">
+                                                    <div className="text-[10px] uppercase tracking-[0.12em] text-text-tertiary">
+                                                      {labels.progressSegments ?? "Progress"}
+                                                    </div>
+                                                    {progressSegments.map(item => (
+                                                      <div key={item.id} className="rounded-lg bg-bg-primary/70 px-3 py-2 text-sm text-text-secondary">
+                                                        <RichMessageContent
+                                                          message={{
+                                                            id: item.id,
+                                                            conversation_id: message.conversation_id,
+                                                            role: "ai",
+                                                            content_text: item.content_text,
+                                                            created_at: item.created_at,
+                                                          }}
+                                                        />
+                                                      </div>
+                                                    ))}
+                                                  </div>
+                                                ) : null}
+                                                {thinkingSegments.length > 0 ? (
+                                                  <div className="space-y-2">
+                                                    <div className="text-[10px] uppercase tracking-[0.12em] text-text-tertiary">
+                                                      {labels.thinkingSegments ?? "Thinking"}
+                                                    </div>
+                                                    {thinkingSegments.map(item => (
+                                                      <div key={item.id} className="rounded-lg border border-border-subtle/70 px-3 py-2 text-sm text-text-tertiary">
+                                                        <RichMessageContent
+                                                          message={{
+                                                            id: item.id,
+                                                            conversation_id: message.conversation_id,
+                                                            role: "ai",
+                                                            content_text: item.content_text,
+                                                            created_at: item.created_at,
+                                                          }}
+                                                        />
+                                                      </div>
+                                                    ))}
+                                                  </div>
+                                                ) : null}
+                                              </div>
+                                            ) : null}
+                                          </div>
+                                        ) : null}
                                       </div>
                                     </div>
                                   </div>

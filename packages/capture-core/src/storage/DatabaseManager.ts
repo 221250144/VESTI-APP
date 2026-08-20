@@ -1562,6 +1562,33 @@ export class DatabaseManager {
     return { lastPosition: row.last_position, lastModified: row.last_modified, conversationId: row.conversation_id, parserVersion: row.parser_version ?? 0 };
   }
 
+  getSyncFilesForConversation(conversationId: string): Array<{
+    filePath: string;
+    lastPosition: number;
+    lastModified: number;
+    parserVersion: number;
+  }> {
+    return (this.getDb().prepare(`
+      SELECT file_path, last_position, last_modified, parser_version
+      FROM sync_state
+      WHERE conversation_id = ?
+    `).all(conversationId) as Array<{
+      file_path: string;
+      last_position: number;
+      last_modified: number;
+      parser_version: number | null;
+    }>).map(row => ({
+      filePath: row.file_path,
+      lastPosition: row.last_position,
+      lastModified: row.last_modified,
+      parserVersion: row.parser_version ?? 0,
+    }));
+  }
+
+  deleteSyncState(filePath: string): void {
+    this.getDb().prepare('DELETE FROM sync_state WHERE file_path = ?').run(filePath);
+  }
+
   setSyncState(filePath: string, platform: string, position: number, modified: number, sessionId?: string, conversationId?: string, parserVersion = 0): void {
     this.getDb().prepare(`
       INSERT INTO sync_state (file_path, platform, last_position, last_modified, session_id, conversation_id, parser_version)

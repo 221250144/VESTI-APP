@@ -14,6 +14,7 @@ import type { SearchEngine } from '../search/SearchEngine.js';
 import type { ExportEngine } from '../export/ExportEngine.js';
 import {
   workSessionToVestiConversation,
+  projectSessionTurnsToVesti,
   sessionMessagesToVestiMessages,
   firstVisibleUserSnippet,
   resolveCliId,
@@ -237,7 +238,7 @@ export class APIServer {
 
         const conversations = sessions.map(ws => {
           const messages = this.db.getSessionMessages(ws.id);
-          const visibleMessages = sessionMessagesToVestiMessages(
+          const projection = projectSessionTurnsToVesti(
             messages,
             cliIdToNumeric(ws.id),
             ws.platform,
@@ -246,8 +247,8 @@ export class APIServer {
             ws,
             firstVisibleUserSnippet(messages, 100, ws.platform),
             {
-              messageCount: visibleMessages.length,
-              turnCount: visibleMessages.filter(message => message.role === 'user').length,
+              messageCount: projection.messages.length,
+              turnCount: projection.turnCount,
             },
           );
         });
@@ -270,7 +271,7 @@ export class APIServer {
           return res.status(404).json({ error: 'Not found' });
         }
         const messages = this.db.getSessionMessages(ws.id);
-        const visibleMessages = sessionMessagesToVestiMessages(
+        const projection = projectSessionTurnsToVesti(
           messages,
           cliIdToNumeric(ws.id),
           ws.platform,
@@ -278,8 +279,8 @@ export class APIServer {
         const snippet = firstVisibleUserSnippet(messages, 100, ws.platform);
         res.json({
           conversation: workSessionToVestiConversation(ws, snippet, {
-            messageCount: visibleMessages.length,
-            turnCount: visibleMessages.filter(message => message.role === 'user').length,
+            messageCount: projection.messages.length,
+            turnCount: projection.turnCount,
           }),
         });
       } catch (err) {

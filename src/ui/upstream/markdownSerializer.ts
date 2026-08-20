@@ -13,6 +13,7 @@ import {
   buildMessageExportSections,
   resolveMessageExportBodyText,
 } from "../db/utils/messageExportPackage";
+import { getTurnMessageSupplementSections } from "../db/utils/turnMessageText";
 
 /** Conversation shape plus the capture provenance fields stamped at sync time. */
 export type UpstreamConversation = Conversation & {
@@ -210,6 +211,7 @@ export function buildFrontmatter(input: ConversationMarkdownInput): string {
     `created: ${yamlScalar(toIsoWithOffset(originAt))}`,
     `updated: ${yamlScalar(toIsoWithOffset(conversation.updated_at))}`,
     `message_count: ${input.messages.length}`,
+    `turn_count: ${conversation.turn_count ?? input.messages.filter(message => message.role === "user").length}`,
     "---",
   );
   return lines.join("\n");
@@ -367,6 +369,21 @@ function messageToMarkdown(message: UpstreamMessage): string {
   const lines: string[] = [`### ${roleLabel} · ${toLocalDateTime(message.created_at)}`, ""];
   const body = messageBodyToMarkdown(message);
   if (body) lines.push(body);
+  const supplementSections = getTurnMessageSupplementSections(message);
+  for (const section of supplementSections.filter(item => item.kind === "followup")) {
+    section.items.forEach((followup, index) => {
+      lines.push("", `#### 跟进 ${index + 1}`, "", followup.content_text);
+    });
+  }
+  const processSections = supplementSections.filter(item => item.kind !== "followup");
+  if (processSections.length > 0) {
+    lines.push("", "<details>", "<summary>过程</summary>", "");
+    for (const section of processSections) {
+      lines.push(`#### ${section.title}`, "");
+      section.items.forEach((item) => lines.push(item.content_text, ""));
+    }
+    lines.push("</details>");
+  }
   pushToolCallLines(lines, message);
   for (const section of buildMessageExportSections(message, "md")) {
     lines.push("");

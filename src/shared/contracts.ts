@@ -31,6 +31,8 @@ export interface SessionMessage {
   id: string;
   sessionId: string;
   source: string;
+  turnId?: string;
+  sequence?: number;
   role: 'user' | 'assistant' | 'system';
   contentText?: string;
   contentThinking?: string;
@@ -1029,6 +1031,19 @@ export interface VestiMessageRecord {
   _tool_input?: string;
   _tool_output?: string;
   _message_source?: string;
+  _turn_id?: string;
+  _turn_sequence?: number;
+  _message_kind?: 'turn_prompt' | 'turn_response';
+  _followups?: VestiTurnSegmentRecord[];
+  _progress_segments?: VestiTurnSegmentRecord[];
+  _thinking_segments?: VestiTurnSegmentRecord[];
+  _member_message_ids?: number[];
+}
+
+export interface VestiTurnSegmentRecord {
+  id: number;
+  content_text: string;
+  created_at: number;
 }
 
 export interface ConversationExportBundle {

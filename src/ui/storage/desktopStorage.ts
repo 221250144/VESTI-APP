@@ -43,6 +43,8 @@ import type {
 } from "../../shared/contracts";
 import { db } from "../db/schema";
 import type { ConversationRecord } from "../db/schema";
+import type { Message } from "../db/types";
+import { getTurnMessageAnalysisText } from "../db/utils/turnMessageText";
 import { loadConversationTree } from "../sync/conversationTree";
 import { listConversationDigests } from "../sync/conversationDigests";
 import {
@@ -500,7 +502,7 @@ async function buildWebSummaryTranscript(
   const messages = await listMessages(conversationId).catch(() => []);
   const lines: string[] = [];
   for (const message of messages) {
-    const text = stripInjectedContextBlocks(message.content_text ?? "");
+    const text = stripInjectedContextBlocks(getTurnMessageAnalysisText(message));
     if (!text) continue;
     const role = message.role === "user" ? "用户" : "AI";
     lines.push(`${role}: ${text.length > 1200 ? `${text.slice(0, 1200)}…` : text}`);
@@ -769,8 +771,8 @@ async function gatherRelayContexts(
         .map((message) => ({
           role: message.role,
           content: message.role === "user"
-            ? stripInjectedContextBlocks(message.content_text ?? "")
-            : message.content_text,
+            ? stripInjectedContextBlocks(getTurnMessageAnalysisText(message))
+            : getTurnMessageAnalysisText(message),
         }))
         .filter((message) => message.content.trim().length > 0),
       ...(cliId && subagentsByCliId.has(cliId)
@@ -1265,7 +1267,7 @@ async function collectBrowserScanInputs(
       .toArray();
     for (const message of messages) {
       if (message.role !== "user") continue;
-      const text = (message.content_text ?? "").trim();
+      const text = getTurnMessageAnalysisText(message as Message).trim();
       if (!text) continue;
       inputs.push({
         origin: "browser",
@@ -1299,10 +1301,23 @@ async function collectAgentScanInputs(
     );
     for (const detail of details) {
       if (!detail) continue;
+      const prompts = new Map<string, string[]>();
+      let fallbackSequence = 0;
       for (const message of detail.messages) {
-        if (message.role !== "user") continue;
-        const text = (message.contentText ?? "").trim();
+        if (message.source !== "user_input" || message.role !== "user") continue;
+        const text = stripInjectedContextBlocks(message.contentText ?? "").trim();
         if (!text) continue;
+        const key = message.turnId ?? `fallback:${fallbackSequence++}`;
+        const parts = prompts.get(key) ?? [];
+        parts.push(text);
+        prompts.set(key, parts);
+      }
+      for (const parts of prompts.values()) {
+        const [primary, ...followups] = parts;
+        const text = [
+          primary,
+          ...followups.map((followup, index) => `跟进 ${index + 1}：${followup}`),
+        ].join("\n\n");
         inputs.push({
           origin: "agent",
           conversationId: detail.session.id,
