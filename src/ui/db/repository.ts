@@ -1755,7 +1755,8 @@ export async function searchConversationMatchesByText(
       content_ast: record.content_ast,
       citations: record.citations,
       attachments: record.attachments,
-      artifacts: record.artifacts
+      artifacts: record.artifacts,
+      _followups: record._followups,
     })
       .map((entry) => ({ entry, score: scoreText(entry.text, parsedQuery) }))
       .filter((scored) => scored.score > 0)

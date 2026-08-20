@@ -96,6 +96,19 @@ export type ImportPlan = {
   staleIds: number[];
 };
 
+export function buildAnnotationMessageRemap(
+  messages: readonly MessageRecord[],
+): Map<number, number> {
+  const result = new Map<number, number>();
+  for (const message of messages) {
+    if (typeof message.id !== "number") continue;
+    for (const memberId of message._member_message_ids ?? [message.id]) {
+      result.set(memberId, message.id);
+    }
+  }
+  return result;
+}
+
 /**
  * Diff an export against the current conversations table (pure). `bundles`
  * carries only new/changed sessions (the main process pre-diffs by content
@@ -233,7 +246,7 @@ async function importBundles(
   sessionIds: readonly string[]
 ): Promise<{ changed: boolean }> {
   let changed = false;
-  await db.transaction("rw", db.conversations, db.messages, async () => {
+  await db.transaction("rw", db.conversations, db.messages, db.annotations, async () => {
     // One full sequential scan replaces the previous anyOf(ids) lookup:
     // at thousands of ids a single table scan is cheaper than a giant
     // indexedDB key-set query, and the same array feeds the stale reconcile.
@@ -247,6 +260,20 @@ async function importBundles(
       await db.conversations.bulkPut(plan.toPut);
     }
     if (plan.changedIds.length > 0) {
+      const remap = buildAnnotationMessageRemap(plan.changedMessages);
+      const annotations = await db.annotations
+        .where("conversation_id")
+        .anyOf(plan.changedIds)
+        .toArray();
+      const migratedAnnotations = annotations.flatMap(annotation => {
+        const nextMessageId = remap.get(annotation.message_id);
+        return nextMessageId !== undefined && nextMessageId !== annotation.message_id
+          ? [{ ...annotation, message_id: nextMessageId }]
+          : [];
+      });
+      if (migratedAnnotations.length > 0) {
+        await db.annotations.bulkPut(migratedAnnotations);
+      }
       // Replace each changed conversation's messages wholesale. bulkPut (not
       // bulkAdd) so a numeric-id collision in the source export overwrites
       // instead of aborting the whole sync.

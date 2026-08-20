@@ -55,6 +55,8 @@ function makeAdapters(session: ParsedSession): AdapterManager {
 function makeDatabase(order: string[]): DatabaseManager {
   return {
     getSyncState: vi.fn().mockReturnValue(null),
+    getSyncFilesForConversation: vi.fn().mockReturnValue([]),
+    getWorkSession: vi.fn().mockReturnValue(null),
     getSessionMessageCount: vi.fn().mockReturnValue(0),
     getUnifiedToolExecutions: vi.fn().mockReturnValue([]),
     getTurns: vi.fn().mockReturnValue([]),
@@ -64,6 +66,7 @@ function makeDatabase(order: string[]): DatabaseManager {
     insertTurns: vi.fn(() => { order.push('turns'); }),
     insertSystemEvents: vi.fn(() => { order.push('events'); }),
     insertContextCompactions: vi.fn(() => { order.push('compactions'); }),
+    replaceSessionSnapshot: vi.fn(() => { order.push('session'); }),
     replaceTokenUsageEvents: vi.fn(() => { order.push('token-events'); }),
     insertSubagentLink: vi.fn(),
     setSyncState: vi.fn(() => { order.push('sync-state'); }),
@@ -104,7 +107,7 @@ describe('SyncEngine vault scheduling', () => {
     const source = await makeSource();
     const order: string[] = [];
     const db = makeDatabase(order);
-    vi.mocked(db.upsertWorkSession).mockImplementation(() => {
+    vi.mocked(db.replaceSessionSnapshot).mockImplementation(() => {
       throw new Error('database failed');
     });
     const backup = vi.fn().mockResolvedValue('unused');

@@ -167,6 +167,24 @@ export interface VestiMessageCompat {
   _tool_input?: string;
   _tool_output?: string;
   _message_source?: string;
+  _turn_id?: string;
+  _turn_sequence?: number;
+  _message_kind?: 'turn_prompt' | 'turn_response';
+  _followups?: VestiTurnSegmentCompat[];
+  _progress_segments?: VestiTurnSegmentCompat[];
+  _thinking_segments?: VestiTurnSegmentCompat[];
+  _member_message_ids?: number[];
+}
+
+export interface VestiTurnSegmentCompat {
+  id: number;
+  content_text: string;
+  created_at: number;
+}
+
+export interface VestiTurnProjection {
+  messages: VestiMessageCompat[];
+  turnCount: number;
 }
 
 /**
@@ -215,54 +233,184 @@ export function workSessionToVestiConversation(
   };
 }
 
+function baseVestiMessage(
+  source: SessionMessage,
+  conversationNumericId: number,
+  role: 'user' | 'ai',
+  contentText: string,
+): VestiMessageCompat {
+  return {
+    id: cliIdToNumeric(source.id),
+    conversation_id: conversationNumericId,
+    role,
+    content_text: contentText,
+    content_ast: null,
+    content_ast_version: null,
+    degraded_nodes_count: 0,
+    citations: [],
+    attachments: [],
+    artifacts: [],
+    normalized_html_snapshot: null,
+    created_at: source.timestamp,
+    _source: 'local_terminal',
+    _thinking: source.contentThinking || undefined,
+    _tool_name: source.contentToolName || undefined,
+    _tool_input: source.contentToolInput || undefined,
+    _tool_output: source.contentToolOutput || undefined,
+    _message_source: source.source,
+  };
+}
+
+function segment(message: SessionMessage, contentText: string): VestiTurnSegmentCompat {
+  return {
+    id: cliIdToNumeric(message.id),
+    content_text: contentText,
+    created_at: message.timestamp,
+  };
+}
+
+function uniqueSegments(
+  messages: SessionMessage[],
+  content: (message: SessionMessage) => string,
+  excludedContent?: string,
+): VestiTurnSegmentCompat[] {
+  const seen = new Set<string>();
+  const result: VestiTurnSegmentCompat[] = [];
+  for (const message of messages) {
+    const value = content(message).trim();
+    if (!value || value === excludedContent || seen.has(value)) continue;
+    seen.add(value);
+    result.push(segment(message, value));
+  }
+  return result;
+}
+
 /**
- * Convert SessionMessages to VESTI mainline Message format
- * Only includes user_input and assistant_text (excludes tool_result, progress, system_event)
+ * Build the canonical user-facing task projection. Raw SessionMessages remain
+ * untouched in SQLite; consumers receive at most a prompt and a response per
+ * task, with follow-ups and process segments attached as metadata.
  */
+export function projectSessionTurnsToVesti(
+  messages: SessionMessage[],
+  conversationNumericId: number,
+  platform?: CapturePlatform,
+): VestiTurnProjection {
+  const sorted = [...messages].sort((a, b) => a.timestamp - b.timestamp || a.sequence - b.sequence);
+  const visibleUserTurnIds = new Set(sorted.flatMap(message => {
+    if (message.source !== 'user_input' || !message.turnId) return [];
+    return sanitizePlatformUserText(message.contentText ?? '', platform)
+      ? [message.turnId]
+      : [];
+  }));
+  const groups = new Map<string, SessionMessage[]>();
+  let activeFallbackTurnId: string | undefined;
+  for (const message of sorted) {
+    let key: string | undefined;
+    if (message.source === 'user_input') {
+      const contentText = sanitizePlatformUserText(message.contentText ?? '', platform);
+      if (!contentText) {
+        activeFallbackTurnId = undefined;
+        continue;
+      }
+      key = message.turnId ?? `${message.sessionId}:projected:${message.id}`;
+      activeFallbackTurnId = key;
+    } else if (message.turnId && visibleUserTurnIds.has(message.turnId)) {
+      key = message.turnId;
+    } else if (!message.turnId) {
+      // Legacy/non-native adapters can lack stored turn ids. Preserve their
+      // user-input boundary fallback without guessing for an explicit but
+      // unmatched native child id.
+      key = activeFallbackTurnId;
+    }
+    if (!key) continue;
+    const group = groups.get(key);
+    if (group) group.push(message);
+    else groups.set(key, [message]);
+  }
+
+  const projected: VestiMessageCompat[] = [];
+  let turnCount = 0;
+  const orderedGroups = [...groups.entries()].sort(([, left], [, right]) => {
+    const leftUserAt = left.find(message => message.source === 'user_input')?.timestamp ?? Number.MAX_SAFE_INTEGER;
+    const rightUserAt = right.find(message => message.source === 'user_input')?.timestamp ?? Number.MAX_SAFE_INTEGER;
+    return leftUserAt - rightUserAt;
+  });
+  for (const [turnId, members] of orderedGroups) {
+    const visibleUsers = members.flatMap(message => {
+      if (message.source !== 'user_input') return [];
+      const contentText = sanitizePlatformUserText(message.contentText ?? '', platform);
+      return contentText ? [{ message, contentText }] : [];
+    });
+    const assistantTexts = members.filter(message => message.source === 'assistant_text' && message.contentText?.trim());
+    const commentaryTexts = members.filter(message => message.source === 'assistant_commentary' && message.contentText?.trim());
+    const finalMessage = assistantTexts.at(-1) ?? commentaryTexts.at(-1);
+    const finalText = finalMessage?.contentText?.trim() ?? '';
+    const progressMessages = members.filter(message =>
+      message.source === 'assistant_commentary'
+      || message.source === 'progress'
+      || (message.source === 'assistant_text' && message.id !== finalMessage?.id)
+    ).filter(message => message.id !== finalMessage?.id);
+    const thinkingMessages = members.filter(message => message.source === 'assistant_think');
+    const progressSegments = uniqueSegments(
+      progressMessages,
+      message => message.contentText ?? '',
+      finalText,
+    );
+    const thinkingSegments = uniqueSegments(
+      thinkingMessages,
+      message => message.contentThinking ?? message.contentText ?? '',
+    );
+    const hasAssistantProjection = Boolean(finalMessage || progressSegments.length || thinkingSegments.length);
+    if (!visibleUsers.length) continue;
+
+    turnCount++;
+    const projectionTurnId = turnId;
+    const userMemberIds = members
+      .filter(message => message.source === 'user_input')
+      .map(message => cliIdToNumeric(message.id));
+    const assistantMemberIds = members
+      .filter(message => message.source !== 'user_input')
+      .map(message => cliIdToNumeric(message.id));
+
+    if (visibleUsers.length) {
+      const [primary, ...followups] = visibleUsers;
+      projected.push({
+        ...baseVestiMessage(primary.message, conversationNumericId, 'user', primary.contentText),
+        _turn_id: projectionTurnId,
+        _turn_sequence: turnCount,
+        _message_kind: 'turn_prompt',
+        _followups: followups.map(item => segment(item.message, item.contentText)),
+        _member_message_ids: userMemberIds,
+      });
+    }
+
+    if (hasAssistantProjection) {
+      const host = finalMessage
+        ?? progressMessages.at(-1)
+        ?? thinkingMessages.at(-1)!;
+      projected.push({
+        ...baseVestiMessage(host, conversationNumericId, 'ai', finalText),
+        _turn_id: projectionTurnId,
+        _turn_sequence: turnCount,
+        _message_kind: 'turn_response',
+        _progress_segments: progressSegments,
+        _thinking_segments: thinkingSegments,
+        _member_message_ids: assistantMemberIds,
+        _thinking: thinkingSegments.map(item => item.content_text).join('\n\n') || undefined,
+      });
+    }
+  }
+
+  return { messages: projected, turnCount };
+}
+
+/** Convert raw stored messages into the canonical task-turn view. */
 export function sessionMessagesToVestiMessages(
   messages: SessionMessage[],
   conversationNumericId: number,
   platform?: CapturePlatform,
 ): VestiMessageCompat[] {
-  return messages
-    .filter(m =>
-      m.source === 'user_input' ||
-      m.source === 'assistant_text' ||
-      m.source === 'assistant_think'
-    )
-    .flatMap(m => {
-      const msgNumericId = cliIdToNumeric(m.id);
-
-      // Merge thinking into content for assistant_think messages
-      const rawContentText = m.source === 'assistant_think'
-        ? (m.contentThinking || '')
-        : (m.contentText || '');
-      const contentText = m.source === 'user_input'
-        ? sanitizePlatformUserText(rawContentText, platform)
-        : rawContentText;
-      if (m.source === 'user_input' && !contentText) return [];
-
-      return [{
-        id: msgNumericId,
-        conversation_id: conversationNumericId,
-        role: (m.role === 'user' ? 'user' : 'ai') as 'user' | 'ai',
-        content_text: contentText,
-        content_ast: null,
-        content_ast_version: null,
-        degraded_nodes_count: 0,
-        citations: [] as never[],
-        attachments: [] as never[],
-        artifacts: [] as never[],
-        normalized_html_snapshot: null,
-        created_at: m.timestamp,
-        _source: 'local_terminal' as const,
-        _thinking: m.contentThinking || undefined,
-        _tool_name: m.contentToolName || undefined,
-        _tool_input: m.contentToolInput || undefined,
-        _tool_output: m.contentToolOutput || undefined,
-        _message_source: m.source,
-      }];
-    });
+  return projectSessionTurnsToVesti(messages, conversationNumericId, platform).messages;
 }
 
 /** Return the first displayable user message, skipping legacy system rows. */

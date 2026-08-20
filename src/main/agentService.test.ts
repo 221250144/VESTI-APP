@@ -1,6 +1,7 @@
 import { net } from 'electron';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { AgentService } from './agentService';
+import { AgentService, buildProjectedSessionTranscript } from './agentService';
+import type { SessionDetail } from '../shared/contracts';
 import type { CaptureService } from './captureService';
 import type { RuntimeLlmSettings, SettingsService } from './settingsService';
 
@@ -51,6 +52,76 @@ const request = {
   question: 'What matters?',
   transcriptOverride: 'User: hello\nAI: hello',
 };
+
+describe('buildProjectedSessionTranscript', () => {
+  const detail: SessionDetail = {
+    session: {
+      id: 'codex:test',
+      sessionId: 'test',
+      platform: 'codex',
+      projectPath: 'D:/work',
+      title: 'Task',
+      status: 'active',
+      startedAt: 1,
+      lastActivityAt: 6,
+      messageCount: 6,
+      turnCount: 1,
+      toolCallCount: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+    },
+    messages: [
+      { id: 'u1', sessionId: 'codex:test', turnId: 'turn-1', sequence: 0, source: 'user_input', role: 'user', contentText: '主提示', timestamp: 1 },
+      { id: 'p1', sessionId: 'codex:test', turnId: 'turn-1', sequence: 1, source: 'assistant_commentary', role: 'assistant', contentText: '进度', timestamp: 2 },
+      { id: 'u2', sessionId: 'codex:test', turnId: 'turn-1', sequence: 2, source: 'user_input', role: 'user', contentText: '跟进', timestamp: 3 },
+      { id: 't1', sessionId: 'codex:test', turnId: 'turn-1', sequence: 3, source: 'assistant_think', role: 'assistant', contentThinking: '思考', timestamp: 4 },
+      { id: 'a1', sessionId: 'codex:test', turnId: 'turn-1', sequence: 4, source: 'assistant_text', role: 'assistant', contentText: '最终答案', timestamp: 5 },
+    ],
+  };
+
+  it('uses prompt, follow-ups and final answer by default, adding process only when enabled', () => {
+    const base = {
+      outputLanguage: 'zh-CN',
+      includeThinking: false,
+      includeToolDetails: false,
+      customInstructions: '',
+    } satisfies ReturnType<SettingsService['getRuntimeAgent']>;
+
+    const compact = buildProjectedSessionTranscript(detail, base);
+    expect(compact).toContain('主提示');
+    expect(compact).toContain('跟进 1：跟进');
+    expect(compact).toContain('最终答案');
+    expect(compact).not.toContain('进度');
+    expect(compact).not.toContain('思考');
+
+    const complete = buildProjectedSessionTranscript(detail, { ...base, includeThinking: true });
+    expect(complete).toContain('[进度]');
+    expect(complete).toContain('[思考]');
+  });
+
+  it('keeps tool activity from an unfinished turn when tool details are enabled', () => {
+    const toolOnly: SessionDetail = {
+      ...detail,
+      messages: [
+        { id: 'u1', sessionId: 'codex:test', turnId: 'turn-1', sequence: 0, source: 'user_input', role: 'user', contentText: '检查文件', timestamp: 1 },
+        { id: 'tool-1', sessionId: 'codex:test', turnId: 'turn-1', sequence: 1, source: 'tool_request', role: 'assistant', contentToolName: 'read_file', contentToolInput: 'src/a.ts', timestamp: 2 },
+        { id: 'tool-2', sessionId: 'codex:test', turnId: 'turn-1', sequence: 2, source: 'tool_result', role: 'assistant', contentToolName: 'read_file', contentToolOutput: 'file body', timestamp: 3 },
+      ],
+    };
+    const transcript = buildProjectedSessionTranscript(toolOnly, {
+      outputLanguage: 'zh-CN',
+      includeThinking: false,
+      includeToolDetails: true,
+      customInstructions: '',
+    });
+
+    expect(transcript).toContain('检查文件');
+    expect(transcript).toContain('[工具]');
+    expect(transcript).toContain('工具：read_file');
+    expect(transcript).toContain('工具输入：src/a.ts');
+    expect(transcript).toContain('工具输出：file body');
+  });
+});
 
 describe('AgentService Demo proxy contract', () => {
   beforeEach(() => {

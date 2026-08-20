@@ -77,7 +77,11 @@ export class MessageConverter {
 
     // Count stats
     const userInputMessages = messages.filter(m => m.source === 'user_input');
-    const assistantMessages = messages.filter(m => m.source === 'assistant_text' || m.source === 'tool_request');
+    const assistantMessages = messages.filter(m =>
+      m.source === 'assistant_text'
+      || m.source === 'assistant_commentary'
+      || m.source === 'tool_request'
+    );
     const thinkingMessages = messages.filter(m => m.contentThinking);
     const fileSnapshotMessages = messages.filter(m => m.source === 'file_snapshot');
     const toolCallCount = normalizedSession.messages.reduce((sum, m) => sum + (m.toolCalls?.length || 0), 0);
@@ -305,11 +309,36 @@ export class MessageConverter {
     const systemEvents: SystemEvent[] = [];
 
     let currentTurn: Turn | null = null;
+    let currentSourceTurnId: string | undefined;
+    const strictNativeTurns = session.meta?.capture_strict_native_turns === true;
+    const nativeTurnBySourceId = new Map<string, Turn>();
+    const assignedTurn = (message: ParsedMessage): Turn | undefined => {
+      if (!strictNativeTurns) return currentTurn ?? undefined;
+      return message.sourceTurnId
+        ? nativeTurnBySourceId.get(message.sourceTurnId)
+        : undefined;
+    };
     let turnSequence = 0;
     let msgSequence = 0;
 
     for (const m of session.messages) {
       const source = MessageConverter.classifySource(m);
+
+      const startTurn = (): Turn => {
+        turnSequence++;
+        return {
+          id: `${sessionId}:turn:${turnSequence}`,
+          sessionId,
+          sequence: turnSequence,
+          messageCount: 0,
+          toolExecutionCount: 0,
+          thinkingTokens: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          startedAt: m.timestamp,
+          durationMs: 0,
+        };
+      };
 
       // System events go to separate table
       if (source === 'system_event') {
@@ -321,7 +350,7 @@ export class MessageConverter {
         systemEvents.push({
           id: `${sessionId}:evt:${m.uuid}`,
           sessionId,
-          turnId: currentTurn?.id,
+          turnId: assignedTurn(m)?.id,
           eventType,
           message: m.contentText,
           metadata: m.errorDetails || undefined,
@@ -332,59 +361,63 @@ export class MessageConverter {
 
       // File snapshots stored as messages but don't start turns
       if (source === 'file_snapshot') {
-        messages.push(MessageConverter.toSessionMessage(m, sessionId, currentTurn?.id, source, msgSequence++, now));
+        messages.push(MessageConverter.toSessionMessage(m, sessionId, assignedTurn(m)?.id, source, msgSequence++, now));
         continue;
       }
 
       // Progress messages attach to current turn
       if (source === 'progress') {
-        messages.push(MessageConverter.toSessionMessage(m, sessionId, currentTurn?.id, source, msgSequence++, now));
+        messages.push(MessageConverter.toSessionMessage(m, sessionId, assignedTurn(m)?.id, source, msgSequence++, now));
         continue;
       }
 
       // New turn starts on real user input
       if (source === 'user_input') {
-        // Close previous turn
-        if (currentTurn) {
-          MessageConverter.closeTurn(currentTurn, messages);
-          turns.push(currentTurn);
+        if (!m.sourceTurnId) {
+          if (currentTurn) {
+            MessageConverter.closeTurn(currentTurn, messages);
+            turns.push(currentTurn);
+          }
+          currentTurn = startTurn();
+          currentSourceTurnId = undefined;
+        } else if (!currentTurn || currentSourceTurnId !== m.sourceTurnId) {
+          if (currentTurn) {
+            MessageConverter.closeTurn(currentTurn, messages);
+            if (!turns.includes(currentTurn)) turns.push(currentTurn);
+          }
+          currentTurn = nativeTurnBySourceId.get(m.sourceTurnId) ?? startTurn();
+          currentSourceTurnId = m.sourceTurnId;
+          nativeTurnBySourceId.set(m.sourceTurnId, currentTurn);
         }
-
-        turnSequence++;
-        const turnId = `${sessionId}:turn:${turnSequence}`;
-        currentTurn = {
-          id: turnId,
-          sessionId,
-          sequence: turnSequence,
-          userInput: m.contentText?.slice(0, 500),
-          userInputMessageId: m.uuid,
-          messageCount: 0,
-          toolExecutionCount: 0,
-          thinkingTokens: 0,
-          inputTokens: 0,
-          outputTokens: 0,
-          startedAt: m.timestamp,
-          durationMs: 0,
-        };
+        // The first real user message is the task prompt. Later user messages
+        // sharing the native id remain members of this turn as follow-ups.
+        // Native ids seen only on assistant/tool events represent continuations
+        // or child-agent runs, not new user tasks, so they stay in the active
+        // task (or remain unassigned in an assistant-only rollout).
+        if (currentTurn && !currentTurn.userInputMessageId) {
+          currentTurn.userInput = m.contentText?.slice(0, 500);
+          currentTurn.userInputMessageId = m.uuid;
+        }
       }
 
       // Create the message
-      const sm = MessageConverter.toSessionMessage(m, sessionId, currentTurn?.id, source, msgSequence++, now);
+      const messageTurn = source === 'user_input' ? currentTurn : assignedTurn(m);
+      const sm = MessageConverter.toSessionMessage(m, sessionId, messageTurn?.id, source, msgSequence++, now);
       messages.push(sm);
 
       // Update turn stats
-      if (currentTurn) {
-        currentTurn.messageCount++;
-        if (sm.tokenInput) currentTurn.inputTokens += sm.tokenInput;
-        if (sm.tokenOutput) currentTurn.outputTokens += sm.tokenOutput;
+      if (messageTurn) {
+        messageTurn.messageCount++;
+        if (sm.tokenInput) messageTurn.inputTokens += sm.tokenInput;
+        if (sm.tokenOutput) messageTurn.outputTokens += sm.tokenOutput;
 
         // Track last assistant text as the response
         if (source === 'assistant_text' && sm.contentText) {
-          currentTurn.assistantResponse = sm.contentText.slice(0, 500);
-          currentTurn.assistantResponseMessageId = sm.id;
+          messageTurn.assistantResponse = sm.contentText.slice(0, 500);
+          messageTurn.assistantResponseMessageId = sm.id;
         }
         if (source === 'tool_request') {
-          currentTurn.toolExecutionCount += (m.toolCalls?.length || 0);
+          messageTurn.toolExecutionCount += (m.toolCalls?.length || 0);
         }
       }
     }
@@ -392,8 +425,9 @@ export class MessageConverter {
     // Close final turn
     if (currentTurn) {
       MessageConverter.closeTurn(currentTurn, messages);
-      turns.push(currentTurn);
+      if (!turns.includes(currentTurn)) turns.push(currentTurn);
     }
+    for (const turn of turns) MessageConverter.closeTurn(turn, messages);
 
     return { turns, messages, systemEvents };
   }
@@ -404,6 +438,18 @@ export class MessageConverter {
       const lastTs = Math.max(...turnMsgs.map(m => m.timestamp));
       turn.endedAt = lastTs;
       turn.durationMs = lastTs - turn.startedAt;
+      const response = turnMsgs.filter(message =>
+        (message.source === 'assistant_text' || message.source === 'assistant_commentary')
+        && message.contentText,
+      ).at(-1);
+      const explicitResponse = turnMsgs.filter(message =>
+        message.source === 'assistant_text' && message.contentText,
+      ).at(-1);
+      const selectedResponse = explicitResponse ?? response;
+      if (selectedResponse?.contentText) {
+        turn.assistantResponse = selectedResponse.contentText.slice(0, 500);
+        turn.assistantResponseMessageId = selectedResponse.id;
+      }
     }
   }
 
@@ -430,6 +476,7 @@ export class MessageConverter {
       if (m.isApiError) return 'system_event';
       if (m.toolCalls && m.toolCalls.length > 0) return 'tool_request';
       if (m.contentThinking && !m.contentText) return 'assistant_think';
+      if (m.assistantPhase === 'commentary') return 'assistant_commentary';
       return 'assistant_text';
     }
 

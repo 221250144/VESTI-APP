@@ -868,7 +868,10 @@ export function NetworkTab({
 
               <div className="mb-6 rounded-lg bg-bg-surface-card p-3">
                 <div className="mb-2 flex flex-wrap items-center gap-3 text-[11px] font-sans text-text-secondary">
-                  <span>{selectedConversation.message_count ?? 0} {labels.messages ?? "messages"}</span>
+                  <span>
+                    {selectedConversation.turn_count ?? selectedConversation.message_count ?? 0}{" "}
+                    {labels.turns ?? "turns"}
+                  </span>
                 </div>
                 <p className="text-xs font-sans text-text-secondary">
                   {digestByConversationId.get(selectedConversation.id)?.oneLiner?.trim() ||

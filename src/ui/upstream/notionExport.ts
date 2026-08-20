@@ -11,6 +11,7 @@ import type { AstNode } from "../db/ast";
 import { db } from "../db/schema";
 import { astNodeToPlainText, isAstRoot } from "../db/utils/astText";
 import { resolveMessageExportBodyText } from "../db/utils/messageExportPackage";
+import { getTurnMessageSupplementSections } from "../db/utils/turnMessageText";
 import { runBatchExport, type BatchExportProgress, type BatchExportResult } from "./exportRunner";
 import {
   formatLocalDateTime,
@@ -335,10 +336,23 @@ export function plainTextToNotionBlocks(text: string): NotionBlock[] {
 }
 
 function messageBodyToBlocks(message: UpstreamMessage): NotionBlock[] {
-  if (isAstRoot(message.content_ast)) {
-    return astChildrenToBlocks(message.content_ast.children);
+  const blocks = isAstRoot(message.content_ast)
+    ? astChildrenToBlocks(message.content_ast.children)
+    : plainTextToNotionBlocks(resolveMessageExportBodyText(message).trim());
+  for (const section of getTurnMessageSupplementSections(message)) {
+    if (section.kind === "followup") {
+      section.items.forEach((followup, index) => {
+        blocks.push(heading(3, `跟进 ${index + 1}`));
+        blocks.push(...plainTextToNotionBlocks(followup.content_text));
+      });
+      continue;
+    }
+    blocks.push(heading(3, `过程 · ${section.title}`));
+    section.items.forEach(item => {
+      blocks.push(...plainTextToNotionBlocks(item.content_text));
+    });
   }
-  return plainTextToNotionBlocks(resolveMessageExportBodyText(message).trim());
+  return blocks;
 }
 
 // ---------------------------------------------------------------------------

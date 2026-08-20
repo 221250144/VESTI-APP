@@ -57,6 +57,27 @@ class FixtureAdapter implements AgentAdapter {
   }
 }
 
+class CodexFixtureAdapter implements AgentAdapter {
+  readonly platform = 'codex' as const;
+  readonly name = 'Codex fixture';
+  parserVersion = 0;
+  parseCount = 0;
+  constructor(private dir: string) {}
+  async detect(): Promise<AgentDetectResult> { return { installed: true }; }
+  async parseSession(filePath: string): Promise<ParsedSession> {
+    this.parseCount++;
+    const raw = await fs.readJSON(filePath) as ParsedSession;
+    raw.platform = 'codex';
+    raw.tokenUsage = { ...raw.tokenUsage, models: new Set() };
+    return raw;
+  }
+  async getSessionFiles(): Promise<string[]> {
+    const entries = await fs.readdir(this.dir);
+    return entries.filter(name => name.endsWith('.json')).map(name => path.join(this.dir, name));
+  }
+  getWatchPatterns(): string[] { return []; }
+}
+
 function fixtureSession(sessionId: string, overrides: Partial<ParsedSession> = {}): ParsedSession {
   return {
     sessionId,
@@ -94,6 +115,19 @@ async function setup() {
   await db.initialize();
   const adapters = new AdapterManager();
   const adapter = new FixtureAdapter(sessionsDir);
+  adapters.register(adapter);
+  const engine = new SyncEngine(adapters, db);
+  return { sessionsDir, db, engine, adapter };
+}
+
+async function setupCodex() {
+  const dir = await makeTempDir('vesti-syncengine-codex-');
+  const sessionsDir = path.join(dir, 'sessions');
+  await fs.ensureDir(sessionsDir);
+  const db = new DatabaseManager(path.join(dir, 'vesti.db'));
+  await db.initialize();
+  const adapters = new AdapterManager();
+  const adapter = new CodexFixtureAdapter(sessionsDir);
   adapters.register(adapter);
   const engine = new SyncEngine(adapters, db);
   return { sessionsDir, db, engine, adapter };
@@ -270,6 +304,178 @@ describe('SyncEngine parser-version re-parse', () => {
     expect(db.listDigestEmbeddingSessionIds('fixture-index-v1')).not.toContain('claude-code:snapshot-1');
     expect(db.getEmbeddingIndexState().revision).toBe(revisionBeforeReplacement + 1);
     expect(db.getSyncState(filePath)?.parserVersion).toBe(1);
+    await db.close();
+  });
+
+  it('replaces the root snapshot before appending child-rollout rows on an upgrade', async () => {
+    const { sessionsDir, db, engine, adapter } = await setup();
+    const rootPath = path.join(sessionsDir, '01-root.json');
+    const childPath = path.join(sessionsDir, '02-child.json');
+    await fs.writeJSON(rootPath, fixtureSession('shared-upgrade', {
+      messages: [{
+        uuid: 'root-message',
+        type: 'user',
+        role: 'user',
+        timestamp: 1_000,
+        contentText: 'root prompt',
+        isToolResult: false,
+        depth: 0,
+      }],
+    }));
+    await fs.writeJSON(childPath, fixtureSession('shared-upgrade', {
+      messages: [{
+        uuid: 'child-message',
+        type: 'assistant',
+        role: 'assistant',
+        timestamp: 1_100,
+        contentText: 'child report',
+        isToolResult: false,
+        depth: 0,
+      }],
+      meta: { capture_append_only: true },
+    }));
+
+    await engine.syncPlatform('claude-code', [childPath, rootPath]);
+    expect(db.getSessionMessages('claude-code:shared-upgrade').map(item => item.id).sort())
+      .toEqual(['child-message', 'root-message']);
+
+    adapter.parserVersion = 1;
+    await engine.syncPlatform('claude-code', [childPath, rootPath]);
+
+    expect(db.getSessionMessages('claude-code:shared-upgrade').map(item => item.id).sort())
+      .toEqual(['child-message', 'root-message']);
+    expect(db.getSyncState(rootPath)?.parserVersion).toBe(1);
+    expect(db.getSyncState(childPath)?.parserVersion).toBe(1);
+    await db.close();
+  });
+
+  it('atomically rebuilds one Codex logical session and maps child runs to parent tasks', async () => {
+    const { sessionsDir, db, engine, adapter } = await setupCodex();
+    const rootPath = path.join(sessionsDir, 'z-root.json');
+    const childPath = path.join(sessionsDir, 'a-child.json');
+    await fs.writeJSON(rootPath, fixtureSession('shared-codex', {
+      platform: 'codex',
+      messages: [
+        {
+          uuid: 'root-user', type: 'user', role: 'user', timestamp: 1_000,
+          contentText: '主任务标题内容', sourceTurnId: 'parent-task', isToolResult: false, depth: 0,
+        },
+        {
+          uuid: 'root-final', type: 'assistant', role: 'assistant', timestamp: 1_300,
+          contentText: '主任务结论', sourceTurnId: 'parent-task', assistantPhase: 'final_answer',
+          isToolResult: false, depth: 0,
+        },
+      ],
+      meta: {
+        codex_rollout_id: 'root-thread',
+        capture_strict_native_turns: true,
+        codex_child_activities: [{
+          childThreadId: 'child-thread', parentSourceTurnId: 'parent-task', timestamp: 1_050, callId: 'spawn',
+        }],
+      },
+    }));
+    await fs.writeJSON(childPath, fixtureSession('shared-codex', {
+      platform: 'codex',
+      messages: [{
+        uuid: 'child-final', type: 'assistant', role: 'assistant', timestamp: 1_200,
+        contentText: '子代理结论', sourceTurnId: 'child-run', assistantPhase: 'final_answer',
+        isToolResult: false, depth: 0,
+      }],
+      meta: {
+        capture_append_only: true,
+        capture_strict_native_turns: true,
+        codex_rollout_id: 'child-thread',
+        codex_child_task_runs: [{ sourceTurnId: 'child-run', timestamp: 1_100 }],
+      },
+    }));
+
+    // Deliberately supply the child first: ordering must not affect replacement.
+    await engine.syncPlatform('codex', [childPath, rootPath]);
+    expect(db.getWorkSession('codex:shared-codex')).toMatchObject({
+      title: '主任务标题内容', messageCount: 3, userInputCount: 1, assistantMessageCount: 2, turnCount: 1,
+    });
+    const messages = db.getSessionMessages('codex:shared-codex');
+    expect(messages.map(message => message.id).sort()).toEqual(['child-final', 'root-final', 'root-user']);
+    expect(new Set(messages.map(message => message.turnId)).size).toBe(1);
+
+    // Mixed upgrade state: even when the changed child is already current,
+    // its stale root sibling must force one complete logical-session rebuild.
+    adapter.parserVersion = 1;
+    const childStat = await fs.stat(childPath);
+    db.setSyncState(childPath, 'codex', childStat.size, childStat.mtimeMs, 'shared-codex', 'codex:shared-codex', 1);
+    expect(db.getSyncState(rootPath)?.parserVersion).toBe(0);
+    await engine.syncFile('codex', childPath);
+
+    expect(db.getSyncState(rootPath)?.parserVersion).toBe(1);
+    expect(db.getSyncState(childPath)?.parserVersion).toBe(1);
+    expect(db.getWorkSession('codex:shared-codex')).toMatchObject({
+      title: '主任务标题内容', messageCount: 3, turnCount: 1,
+    });
+    await db.close();
+  });
+
+  it('isolates a failed Codex rollout and continues unrelated logical sessions', async () => {
+    const { sessionsDir, db, engine, adapter } = await setupCodex();
+    const healthyPath = path.join(sessionsDir, 'healthy.json');
+    const blockedRootPath = path.join(sessionsDir, 'blocked-root.json');
+    const brokenChildPath = path.join(sessionsDir, 'blocked-child.json');
+    await fs.writeJSON(healthyPath, fixtureSession('healthy', { platform: 'codex' }));
+    await fs.writeJSON(blockedRootPath, fixtureSession('blocked', { platform: 'codex' }));
+    await fs.writeFile(brokenChildPath, '{ invalid fixture');
+    const brokenStat = await fs.stat(brokenChildPath);
+    db.setSyncState(
+      brokenChildPath,
+      'codex',
+      brokenStat.size,
+      brokenStat.mtimeMs,
+      'blocked',
+      'codex:blocked',
+      0,
+    );
+    adapter.parserVersion = 1;
+
+    const result = await engine.syncPlatform('codex', [healthyPath, blockedRootPath, brokenChildPath]);
+
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain(brokenChildPath);
+    expect(db.getWorkSession('codex:healthy')).not.toBeNull();
+    expect(db.getSyncState(healthyPath)?.parserVersion).toBe(1);
+    expect(db.getWorkSession('codex:blocked')).toBeNull();
+    expect(db.getSyncState(blockedRootPath)).toBeNull();
+    expect(db.getSyncState(brokenChildPath)?.parserVersion).toBe(0);
+    await db.close();
+  });
+
+  it('retires a moved Codex checkpoint and syncs its archived rollout path', async () => {
+    const { sessionsDir, db, engine } = await setupCodex();
+    const activePath = path.join(sessionsDir, 'active.json');
+    const archivedDir = path.join(sessionsDir, 'archived_sessions');
+    const archivedPath = path.join(archivedDir, 'active.json');
+    const session = fixtureSession('moved-codex', { platform: 'codex' });
+    await fs.writeJSON(activePath, session);
+    await engine.syncFile('codex', activePath);
+    expect(db.getSyncState(activePath)).not.toBeNull();
+
+    await fs.ensureDir(archivedDir);
+    await fs.move(activePath, archivedPath);
+    await fs.writeJSON(archivedPath, {
+      ...session,
+      messages: [
+        ...session.messages,
+        {
+          uuid: 'archived-answer', type: 'assistant', role: 'assistant', timestamp: 1_100,
+          contentText: 'archived answer', isToolResult: false, depth: 0,
+        },
+      ],
+    });
+
+    const result = await engine.syncPlatform('codex', [archivedPath]);
+
+    expect(result.errors).toEqual([]);
+    expect(db.getSyncState(activePath)).toBeNull();
+    expect(db.getSyncState(archivedPath)).not.toBeNull();
+    expect(db.getSessionMessages('codex:moved-codex').map(message => message.id).sort())
+      .toEqual(['archived-answer', 'moved-codex-m1']);
     await db.close();
   });
 });
