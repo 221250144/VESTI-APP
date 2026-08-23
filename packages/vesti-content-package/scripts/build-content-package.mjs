@@ -5,18 +5,16 @@ import { spawnSync } from "node:child_process";
 const rootDir = process.cwd();
 const frontendDir = path.resolve(rootDir, "../../frontend");
 const distDir = path.resolve(rootDir, "dist");
-const esbuildBin = path.resolve(
-  frontendDir,
-  "node_modules",
-  ".bin",
-  process.platform === "win32" ? "esbuild.cmd" : "esbuild"
-);
-const tscBin = path.resolve(
-  frontendDir,
-  "node_modules",
-  ".bin",
-  process.platform === "win32" ? "tsc.cmd" : "tsc"
-);
+// 依次尝试:包自身 node_modules → 仓库根 node_modules → 旧版 frontend 目录
+const binCandidates = (name) => [
+  path.resolve(rootDir, "node_modules", ".bin", name),
+  path.resolve(rootDir, "../../node_modules", ".bin", name),
+  path.resolve(frontendDir, "node_modules", ".bin", name),
+];
+const esbuildBin = binCandidates(process.platform === "win32" ? "esbuild.cmd" : "esbuild")
+  .find((candidate) => existsSync(candidate));
+const tscBin = binCandidates(process.platform === "win32" ? "tsc.cmd" : "tsc")
+  .find((candidate) => existsSync(candidate));
 
 rmSync(distDir, { recursive: true, force: true });
 
