@@ -201,6 +201,28 @@ describe("conversationToNotionBlocks", () => {
     expect(runs.length).toBeGreaterThanOrEqual(3);
     for (const run of runs) expect(run.text.content.length).toBeLessThanOrEqual(2_000);
   });
+
+  it("preserves follow-ups, progress and thinking from an aggregated turn", () => {
+    const blocks = conversationToNotionBlocks(input({
+      messages: [
+        message({
+          role: "ai",
+          content_text: "最终答案",
+          _followups: [{ id: 11, content_text: "跟进内容", created_at: 2 }],
+          _progress_segments: [{ id: 12, content_text: "进度内容", created_at: 3 }],
+          _thinking_segments: [{ id: 13, content_text: "思考内容", created_at: 4 }],
+        }),
+      ],
+    }));
+    const text = blocks.map(blockText).join("\n");
+
+    expect(text).toContain("跟进 1");
+    expect(text).toContain("跟进内容");
+    expect(text).toContain("过程 · 进度");
+    expect(text).toContain("进度内容");
+    expect(text).toContain("过程 · 思考");
+    expect(text).toContain("思考内容");
+  });
 });
 
 describe("plainTextToNotionBlocks", () => {

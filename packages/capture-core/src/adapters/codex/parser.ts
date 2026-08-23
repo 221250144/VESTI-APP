@@ -15,7 +15,11 @@ import type {
   ToolResultBlock,
 } from '../../types/agent.js';
 import type { ToolExecution } from '../../types/index.js';
-import { stripInjectedContextBlocks } from '../../utils/injectedBlocks.js';
+import { sanitizeCodexUserText } from '../../utils/codexUserText.js';
+
+function visibleCodexUserText(text: string): string {
+  return sanitizeCodexUserText(text);
+}
 
 interface RolloutRow {
   timestamp?: string | number;
@@ -150,6 +154,30 @@ function reasoningSummary(payload: Record<string, unknown>): string {
     .trim();
 }
 
+interface CodexChildActivity {
+  childThreadId: string;
+  parentSourceTurnId: string;
+  timestamp: number;
+  callId: string;
+}
+
+interface CodexChildTaskRun {
+  sourceTurnId: string;
+  timestamp: number;
+}
+
+function sourceTurnId(payload: Record<string, unknown>, activeTurnId?: string): string | undefined {
+  const passthrough = asRecord(payload.internal_chat_message_metadata_passthrough);
+  const value = passthrough.turn_id ?? payload.turn_id ?? activeTurnId;
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function assistantPhase(payload: Record<string, unknown>): ParsedMessage['assistantPhase'] {
+  return payload.phase === 'commentary' || payload.phase === 'final_answer'
+    ? payload.phase
+    : undefined;
+}
+
 function toolNameFromLegacy(type: string): string {
   if (/ExecCommand/i.test(type)) return 'shell_command';
   if (/PatchApply/i.test(type)) return 'apply_patch';
@@ -172,9 +200,10 @@ export class CodexParser {
     const meta = asRecord(metaRow?.payload);
     const fallbackId = path.basename(filePath, '.jsonl').match(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/i)?.[0]
       ?? path.basename(filePath, '.jsonl');
-    const sessionId = String(meta.session_id ?? meta.id ?? fallbackId);
     const sourceMeta = asRecord(meta.source);
     const subagentSource = asRecord(sourceMeta.subagent);
+    const isGuardianSession = subagentSource.other === 'guardian';
+    const sessionId = String(meta.session_id ?? meta.id ?? fallbackId);
     const threadSpawnSource = asRecord(subagentSource.thread_spawn);
     const isSpawnedThread = Object.keys(threadSpawnSource).length > 0
       || (typeof meta.forked_from_id === 'string' && meta.forked_from_id.length > 0);
@@ -225,6 +254,12 @@ export class CodexParser {
     let model = '';
     let firstPrompt = '';
     let gitBranch: string | undefined;
+    let activeTaskTurnId: string | undefined;
+    let pendingChildTaskRun: CodexChildTaskRun | undefined;
+    let spawnedThreadContentStarted = !isSpawnedThread;
+    const childTaskRuns: CodexChildTaskRun[] = [];
+    const collaborationCalls = new Map<string, { parentSourceTurnId: string; timestamp: number }>();
+    const childActivities: CodexChildActivity[] = [];
     const git = asRecord(meta.git);
     if (typeof git.branch === 'string') gitBranch = git.branch;
 
@@ -256,6 +291,13 @@ export class CodexParser {
 
       if (row.type === 'inter_agent_communication_metadata') {
         spawnedThreadUsageStarted = true;
+        spawnedThreadContentStarted = true;
+        if (isSpawnedThread && payload.trigger_turn === true && pendingChildTaskRun) {
+          if (!childTaskRuns.some(run => run.sourceTurnId === pendingChildTaskRun?.sourceTurnId)) {
+            childTaskRuns.push(pendingChildTaskRun);
+          }
+          pendingChildTaskRun = undefined;
+        }
         continue;
       }
 
@@ -269,6 +311,8 @@ export class CodexParser {
       }
 
       if (row.type === 'compacted') {
+        if (isGuardianSession) continue;
+        if (!spawnedThreadContentStarted) continue;
         contextCompactions.push({
           sequence: contextCompactions.length + 1,
           compactedAt: ts,
@@ -278,24 +322,26 @@ export class CodexParser {
       }
 
       if (row.type === 'response_item') {
+        if (isGuardianSession) continue;
+        if (!spawnedThreadContentStarted) continue;
         const itemType = String(payload.type ?? '');
         if (itemType === 'message') {
           const role = String(payload.role ?? '');
           if (role !== 'user' && role !== 'assistant') continue;
-          const text = messageContent(payload);
+          const rawText = messageContent(payload);
+          const text = role === 'user' ? visibleCodexUserText(rawText) : rawText;
           if (!text) continue;
           const uuid = newId('message', payload.id);
-          // <environment_context> / <user_instructions> blocks stay in the
-          // stored message, but the first-prompt/title view skips them.
           if (role === 'user' && !firstPrompt) {
-            const realText = stripInjectedContextBlocks(text);
-            if (realText) firstPrompt = realText;
+            firstPrompt = text;
           }
           messages.push({
             uuid,
             type: role,
             role,
             timestamp: ts,
+            sourceTurnId: sourceTurnId(payload, activeTaskTurnId),
+            assistantPhase: role === 'assistant' ? assistantPhase(payload) : undefined,
             contentText: text,
             cwd: projectPath || undefined,
             gitBranch,
@@ -313,6 +359,7 @@ export class CodexParser {
               type: 'assistant',
               role: 'assistant',
               timestamp: ts,
+              sourceTurnId: sourceTurnId(payload, activeTaskTurnId),
               contentThinking: summary,
               cwd: projectPath || undefined,
               isToolResult: false,
@@ -325,6 +372,14 @@ export class CodexParser {
         if (itemType === 'function_call' || itemType === 'custom_tool_call') {
           const callId = String(payload.call_id ?? payload.id ?? `call-${index}`);
           const name = String(payload.name ?? itemType);
+          const parentSourceTurnId = sourceTurnId(payload, activeTaskTurnId);
+          if (
+            payload.namespace === 'collaboration'
+            && (name === 'spawn_agent' || name === 'followup_task')
+            && parentSourceTurnId
+          ) {
+            collaborationCalls.set(callId, { parentSourceTurnId, timestamp: ts });
+          }
           const input = jsonish(payload.arguments ?? payload.input ?? {});
           const messageId = newId('tool-call', callId);
           const toolCall: ToolCallBlock = { id: callId, name, input };
@@ -333,6 +388,7 @@ export class CodexParser {
             type: 'assistant',
             role: 'assistant',
             timestamp: ts,
+            sourceTurnId: sourceTurnId(payload, activeTaskTurnId),
             toolCalls: [toolCall],
             cwd: projectPath || undefined,
             isToolResult: false,
@@ -353,6 +409,7 @@ export class CodexParser {
             type: 'user',
             role: 'user',
             timestamp: ts,
+            sourceTurnId: sourceTurnId(payload, activeTaskTurnId),
             toolResults: [toolResult],
             cwd: projectPath || undefined,
             isToolResult: true,
@@ -365,6 +422,18 @@ export class CodexParser {
 
       if (row.type === 'event_msg') {
         const eventType = String(payload.type ?? '');
+        if (eventType === 'task_started') {
+          activeTaskTurnId = sourceTurnId(payload, activeTaskTurnId);
+          if (isSpawnedThread && activeTaskTurnId) {
+            pendingChildTaskRun = { sourceTurnId: activeTaskTurnId, timestamp: ts };
+          }
+          continue;
+        }
+        if (eventType === 'task_complete') {
+          const completedTurnId = sourceTurnId(payload, activeTaskTurnId);
+          if (!completedTurnId || completedTurnId === activeTaskTurnId) activeTaskTurnId = undefined;
+          continue;
+        }
         if (eventType === 'token_count') {
           const info = asRecord(payload.info);
           const cumulative = tokenSnapshot(info.total_token_usage);
@@ -425,6 +494,27 @@ export class CodexParser {
           continue;
         }
 
+        if (eventType === 'sub_agent_activity' && spawnedThreadContentStarted) {
+          const callId = typeof payload.event_id === 'string' ? payload.event_id : '';
+          const childThreadId = typeof payload.agent_thread_id === 'string'
+            ? payload.agent_thread_id
+            : '';
+          const call = collaborationCalls.get(callId);
+          if (call && childThreadId) {
+            childActivities.push({
+              childThreadId,
+              parentSourceTurnId: call.parentSourceTurnId,
+              timestamp: ts,
+              callId,
+            });
+            collaborationCalls.delete(callId);
+          }
+          continue;
+        }
+
+        if (isGuardianSession) continue;
+        if (!spawnedThreadContentStarted) continue;
+
         if (/Begin$/i.test(eventType) && typeof payload.call_id === 'string') {
           const callId = payload.call_id;
           if (activeTools.has(callId)) continue;
@@ -436,6 +526,7 @@ export class CodexParser {
             type: 'assistant',
             role: 'assistant',
             timestamp: ts,
+            sourceTurnId: sourceTurnId(payload, activeTaskTurnId),
             toolCalls: [{ id: callId, name, input }],
             cwd: typeof payload.cwd === 'string' ? payload.cwd : projectPath || undefined,
             isToolResult: false,
@@ -456,6 +547,7 @@ export class CodexParser {
             type: 'user',
             role: 'user',
             timestamp: ts,
+            sourceTurnId: sourceTurnId(payload, activeTaskTurnId),
             toolResults: [{ toolUseId: callId, content: text, isError }],
             isToolResult: true,
             depth: 0,
@@ -518,6 +610,20 @@ export class CodexParser {
           (sum, event) => sum + (event.reasoningTokens ?? 0),
           0,
         ),
+        capture_usage_only: isGuardianSession || undefined,
+        // Spawned/continued rollouts share the logical parent session id but
+        // contain only their child-owned suffix. During a parser upgrade they
+        // must be appended after the root snapshot instead of replacing it.
+        capture_append_only: isSpawnedThread || undefined,
+        capture_strict_native_turns: true,
+        codex_rollout_id: typeof meta.id === 'string' ? meta.id : fallbackId,
+        codex_parent_thread_id: typeof meta.parent_thread_id === 'string'
+          ? meta.parent_thread_id
+          : typeof threadSpawnSource.parent_thread_id === 'string'
+            ? threadSpawnSource.parent_thread_id
+            : undefined,
+        codex_child_task_runs: childTaskRuns.length ? childTaskRuns : undefined,
+        codex_child_activities: childActivities.length ? childActivities : undefined,
       },
     };
   }

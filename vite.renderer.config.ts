@@ -21,6 +21,8 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      // Keep Node-only capture/database dependencies out of the renderer.
+      '@vesti/capture-core/injected-blocks': aliasPath('packages/capture-core/src/injectedBlocks.ts'),
       // Consume workspace UI packages from source so the renderer shares
       // a single React instance and picks up Tailwind classes directly.
       '@vesti/ui': aliasPath('packages/vesti-ui/src/index.ts'),

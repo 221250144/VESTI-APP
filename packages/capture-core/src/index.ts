@@ -27,7 +27,7 @@ export { WslDetector, decodeWslOutput, parseWslDistroList, wslDistroRoot } from 
 export type { WslDetection, WslDetectorOptions, WslUserHome } from './platform/WslDetector.js';
 export { hostFromPath, nativeHomeRoot, rewriteSessionIdForHost } from './platform/PathResolver.js';
 export type { HomeRoot } from './platform/PathResolver.js';
-export { SyncEngine } from './sync/SyncEngine.js';
+export { SyncEngine, mergeCodexLogicalSession } from './sync/SyncEngine.js';
 export type { SyncResult, SyncFileResult } from './sync/SyncEngine.js';
 export { SearchEngine } from './search/SearchEngine.js';
 export { serializeVector, deserializeVector, cosineSimilarity, searchByVector } from './search/VectorSearch.js';
@@ -101,10 +101,17 @@ export { VaultManager } from './storage/VaultManager.js';
 export { APIServer } from './api/APIServer.js';
 export {
   workSessionToVestiConversation,
+  projectSessionTurnsToVesti,
   sessionMessagesToVestiMessages,
+  firstVisibleUserSnippet,
   cliIdToNumeric,
   resolveCliId,
   mapPlatform,
   reverseMapPlatform,
 } from './api/vestiCompat.js';
-export type { VestiConversationCompat, VestiMessageCompat } from './api/vestiCompat.js';
+export type {
+  VestiConversationCompat,
+  VestiMessageCompat,
+  VestiTurnProjection,
+  VestiTurnSegmentCompat,
+} from './api/vestiCompat.js';

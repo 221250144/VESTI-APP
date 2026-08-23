@@ -136,6 +136,11 @@ export interface ParsedMessage {
   role: 'user' | 'assistant' | 'system';
   timestamp: number;
 
+  /** Native task/turn identifier emitted by the source agent, when present. */
+  sourceTurnId?: string;
+  /** Assistant delivery phase used to distinguish progress from the final answer. */
+  assistantPhase?: 'commentary' | 'final_answer';
+
   // Content
   contentText?: string;
   contentThinking?: string;

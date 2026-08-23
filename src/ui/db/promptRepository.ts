@@ -23,6 +23,7 @@ import type {
   PromptListFilter,
   UpdatePromptChanges,
 } from "./types";
+import { getTurnMessageAnalysisText } from "./utils/turnMessageText";
 import { logger } from "./logger";
 import { db } from "./schema";
 import type { MessageRecord, PromptRecord } from "./schema";
@@ -320,7 +321,7 @@ export async function extractPromptsFromLibrary(
 
     for (const message of messages) {
       if (message.role !== "user") continue;
-      const text = (message.content_text ?? "").trim();
+      const text = getTurnMessageAnalysisText(message).trim();
       if (!text) continue;
       inputs.push({
         origin: "browser",

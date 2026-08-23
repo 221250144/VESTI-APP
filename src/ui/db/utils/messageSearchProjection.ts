@@ -8,12 +8,12 @@ import type {
   MessageSearchEntry,
   SearchMatchSurface,
 } from "../types";
-import { resolveCanonicalBodyText } from "./messageContentPackage";
+import { getTurnMessageAnalysisText } from "./turnMessageText";
 import { tokenize } from "../textSearch";
 
 type MessageSearchProjectionLike = Pick<
   Message,
-  "id" | "content_text" | "citations" | "attachments" | "artifacts"
+  "id" | "content_text" | "citations" | "attachments" | "artifacts" | "_followups"
 > & {
   content_ast?: unknown;
 };
@@ -88,7 +88,7 @@ export function buildMessageSearchEntries(
   message: MessageSearchProjectionLike
 ): MessageSearchEntry[] {
   const entries: MessageSearchEntry[] = [];
-  const bodyText = resolveCanonicalBodyText(message);
+  const bodyText = getTurnMessageAnalysisText(message);
   if (bodyText) {
     entries.push({
       surface: "body",

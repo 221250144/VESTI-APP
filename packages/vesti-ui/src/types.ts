@@ -53,6 +53,7 @@ export interface Conversation {
   first_captured_at?: number;
   last_captured_at?: number;
   message_count?: number;
+  turn_count?: number;
   is_starred: boolean;
   is_archived?: boolean;
   is_trash?: boolean;
@@ -433,6 +434,12 @@ export interface MessageAttachment {
   occurrenceRole: MessageAttachmentOccurrenceRole;
 }
 
+export interface TurnMessageSegment {
+  id: number;
+  content_text: string;
+  created_at: number;
+}
+
 export interface Message {
   id: number;
   conversation_id: number;
@@ -446,6 +453,13 @@ export interface Message {
   artifacts?: MessageArtifact[];
   normalized_html_snapshot?: string | null;
   created_at: number;
+  _turn_id?: string;
+  _turn_sequence?: number;
+  _message_kind?: "turn_prompt" | "turn_response";
+  _followups?: TurnMessageSegment[];
+  _progress_segments?: TurnMessageSegment[];
+  _thinking_segments?: TurnMessageSegment[];
+  _member_message_ids?: number[];
 }
 
 export interface Annotation {
@@ -1854,8 +1868,19 @@ export interface DashboardLabels {
     originalConversation: string;
     preview: string;
     messageCountLabel: string;
+    turnCountLabel: string;
     showOriginalMessages: string;
     hideOriginalMessages: string;
+    showTaskTurns: string;
+    hideTaskTurns: string;
+    followupPlacement: string;
+    followupsUnderPrompt: string;
+    followupsInsideResponse: string;
+    followup: string;
+    turnProcess: string;
+    progressSegments: string;
+    thinkingSegments: string;
+    noFinalAnswerYet: string;
     loadingOriginalConversation: string;
     messagesAvailableButEmpty: string;
     openOriginal: string;
@@ -2063,6 +2088,7 @@ export interface DashboardLabels {
     close: string;
     started: string;
     messages: string;
+    turns: string;
     semanticLinks: string;
     noPreviewSnippet: string;
     tags: string;
