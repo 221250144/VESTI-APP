@@ -281,7 +281,9 @@ export class SettingsService {
     return {
       mode: this.settings.llm.mode,
       baseUrl: this.settings.llm.mode === 'demo_proxy' ? DEMO_BASE_URL : this.settings.llm.customBaseUrl,
-      fallbackBaseUrl: LEGACY_DEMO_BASE_URL,
+      // 旧兜底网关 ccvg1218 已下线(404);兜底改为重试主网关 ——
+      // 网关侧 key 池化后,重试可能落到池内另一条上游。
+      fallbackBaseUrl: DEMO_BASE_URL,
       modelId: this.settings.llm.modelId,
       temperature: this.settings.llm.temperature,
       maxTokens: this.settings.llm.maxTokens,
