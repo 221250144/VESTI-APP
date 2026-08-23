@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { SessionDigest, SessionDigestStats } from '@vesti/capture-core';
+import { serializeVector, type SessionDigest, type SessionDigestStats } from '@vesti/capture-core';
 import type { SessionDetail, SessionMessage } from '../shared/contracts';
 import {
   DIGEST_VERSION,
@@ -51,6 +51,9 @@ class FakeStore implements DigestSessionStore {
 
   getSession(id: string): SessionDetail | null {
     return this.details.get(id) ?? null;
+  }
+  getSessionDigest(sessionId: string): SessionDigest | null {
+    return this.digests.get(sessionId) ?? null;
   }
   listSessionsNeedingDigest(): Array<{ id: string; messageCount: number }> {
     return this.needing;
@@ -176,6 +179,82 @@ describe('DigestService', () => {
     const embedInput = (embedding.embed as ReturnType<typeof vi.fn>).mock.calls[0][0][0];
     expect(embedInput).toContain(GOOD_PAYLOAD.one_liner);
     expect(embedInput).toContain('认证');
+  });
+
+  function okDigestRow(overrides: Partial<SessionDigest>): SessionDigest {
+    return {
+      sessionId: 'codex:s1',
+      host: 'native',
+      platform: 'codex',
+      projectKey: 'cli_0123456789abcdef',
+      oneLiner: GOOD_PAYLOAD.one_liner,
+      keyTopics: [...GOOD_PAYLOAD.key_topics],
+      keyFiles: [...GOOD_PAYLOAD.key_files],
+      decisions: [...GOOD_PAYLOAD.decisions],
+      openQuestions: [...GOOD_PAYLOAD.open_questions],
+      embedding: serializeVector(new Float32Array([0.5, 0.5, 0])),
+      embeddingProvider: 'dashscope',
+      embeddingModel: 'text-embedding-v1',
+      embeddingDimensions: 3,
+      embeddingVersion: 'v1:dashscope:text-embedding-v1:3',
+      embeddingStatus: 'ok',
+      digestVersion: DIGEST_VERSION,
+      messageCount: 1,
+      updatedAt: new Date().toISOString(),
+      ...overrides,
+    };
+  }
+
+  it('reuses the persisted embedding when a grown session re-digests to identical text', async () => {
+    const store = seededStore();
+    // Prior run's row: same digest text with a persisted vector; the session
+    // has since grown, so the message_count gate queues it again.
+    const priorEmbedding = serializeVector(new Float32Array([0.5, 0.5, 0]));
+    store.digests.set('codex:s1', okDigestRow({ embedding: priorEmbedding }));
+    const agent = makeAgent(async () => ({ content: JSON.stringify(GOOD_PAYLOAD) } as never));
+    const embedding = makeEmbedding();
+    const service = new DigestService(store, agent, embedding);
+
+    await service.enqueuePending();
+
+    expect(agent.run).toHaveBeenCalledTimes(1); // the LLM digest still runs
+    expect(embedding.embed).not.toHaveBeenCalled();
+    const digest = store.digests.get('codex:s1')!;
+    expect(digest.embedding).toEqual(priorEmbedding);
+    expect(digest.embeddingStatus).toBe('ok');
+    expect(digest.embeddingProvider).toBe('dashscope');
+    expect(digest.embeddingModel).toBe('text-embedding-v1');
+    expect(digest.embeddingDimensions).toBe(3);
+    expect(digest.embeddingVersion).toBe('v1:dashscope:text-embedding-v1:3');
+    // The row still advances with the session so it is not re-digested until
+    // the next growth.
+    expect(digest.messageCount).toBe(2);
+  });
+
+  it('re-embeds when the new digest text differs from the stored row', async () => {
+    const store = seededStore();
+    store.digests.set('codex:s1', okDigestRow({ keyTopics: ['不同的话题'] }));
+    const agent = makeAgent(async () => ({ content: JSON.stringify(GOOD_PAYLOAD) } as never));
+    const embedding = makeEmbedding();
+    const service = new DigestService(store, agent, embedding);
+
+    await service.enqueuePending();
+
+    expect(embedding.embed).toHaveBeenCalledTimes(1);
+    expect(store.digests.get('codex:s1')!.embeddingStatus).toBe('ok');
+  });
+
+  it('re-embeds when the stored row has no usable vector', async () => {
+    const store = seededStore();
+    store.digests.set('codex:s1', okDigestRow({ embedding: null, embeddingStatus: 'skipped' }));
+    const agent = makeAgent(async () => ({ content: JSON.stringify(GOOD_PAYLOAD) } as never));
+    const embedding = makeEmbedding();
+    const service = new DigestService(store, agent, embedding);
+
+    await service.enqueuePending();
+
+    expect(embedding.embed).toHaveBeenCalledTimes(1);
+    expect(store.digests.get('codex:s1')!.embedding).toBeInstanceOf(Buffer);
   });
 
   it('retries once on malformed JSON and then succeeds', async () => {

@@ -522,24 +522,45 @@ async function buildWebSummaryTranscript(
  * click could otherwise spawn a duplicate pool over the same backlog. */
 const summaryInFlight = new Set<number>();
 
-async function generateSummaryImpl(conversationId: number): Promise<ChatSummaryData> {
+async function generateSummaryImpl(
+  conversationId: number,
+  opts?: { force?: boolean }
+): Promise<ChatSummaryData> {
   if (summaryInFlight.has(conversationId)) {
     throw new Error("SUMMARY_ALREADY_RUNNING");
   }
   summaryInFlight.add(conversationId);
   try {
-    return await generateSummaryInner(conversationId);
+    return await generateSummaryInner(conversationId, opts);
   } finally {
     summaryInFlight.delete(conversationId);
   }
 }
 
-async function generateSummaryInner(conversationId: number): Promise<ChatSummaryData> {
+async function generateSummaryInner(
+  conversationId: number,
+  opts?: { force?: boolean }
+): Promise<ChatSummaryData> {
   const info = await getConversationCliId(conversationId);
   if (!info) {
     throw new Error("CONVERSATION_NOT_FOUND");
   }
   const title = info.title;
+
+  // Freshness gate: a non-fallback summary whose sourceUpdatedAt covers the
+  // conversation's last update is still current — serve it without spending
+  // an LLM call. Fallback rows always regenerate (they exist to be retried),
+  // and an explicit force from the Regenerate button bypasses the gate.
+  if (!opts?.force) {
+    const existing = await getSummaryRecord(conversationId).catch(() => null);
+    if (
+      existing &&
+      existing.status !== "fallback" &&
+      existing.sourceUpdatedAt >= info.updatedAt
+    ) {
+      return summaryRecordToChatSummaryData(existing, title);
+    }
+  }
 
   const api = vestiApi();
   // Browser-captured conversations have no local capture-store session, but
@@ -1999,7 +2020,7 @@ export const desktopStorage: StorageApi = {
     const info = await getConversationCliId(conversationId);
     return summaryRecordToChatSummaryData(record, info?.title);
   },
-  generateSummary: (conversationId) => generateSummaryImpl(conversationId),
+  generateSummary: (conversationId, opts) => generateSummaryImpl(conversationId, opts),
   // AITI 摘要覆盖率: drives the coverage header + 立即生成摘要 batch queue
   // on the aiti pane (pure computation lives in @vesti/ui lib/summaryCoverage).
   getSummaryCoverage: async () => {

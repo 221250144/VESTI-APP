@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { net } from 'electron';
 import type { EmbeddingStatus } from '../shared/contracts';
 import type { SettingsService } from './settingsService';
@@ -6,6 +7,9 @@ import { fetchDemoProxy, type ProxyAttemptMetadata } from './proxyFetch';
 const EMBEDDING_BATCH_SIZE = 32;
 const EMBEDDING_TIMEOUT_MS = 90_000;
 const EMBEDDING_INDEX_SCHEMA_VERSION = 'v1';
+/** Session-scoped vector cache size: identical texts (digest re-embeds,
+ * repeated recall queries, thinking-map probes) skip the endpoint entirely. */
+const EMBEDDING_CACHE_MAX_ENTRIES = 64;
 
 export interface EmbeddingIndexMetadata {
   provider: string;
@@ -17,6 +21,15 @@ export interface EmbeddingIndexMetadata {
 export interface EmbeddingBatchResult {
   vectors: Float32Array[];
   metadata: EmbeddingIndexMetadata;
+}
+
+interface CachedEmbedding {
+  vector: Float32Array;
+  metadata: EmbeddingIndexMetadata;
+}
+
+function sha256(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
 function indexVersion(provider: string, model: string, dimensions: number): string {
@@ -54,6 +67,16 @@ export class EmbeddingService {
   private status: EmbeddingStatus = { available: true };
   private probed = false;
   private tail: Promise<unknown> = Promise.resolve();
+  /** LRU of successful vectors keyed by endpoint identity + text hash.
+   * Failures are never cached, and invalidateStatus() (settings change /
+   * breaker recovery) drops the whole map. Session-scoped on purpose — the
+   * persisted per-version tables handle restart reuse for digests. Cached
+   * vectors are shared by reference; callers serialize them read-only. */
+  private readonly vectorCache = new Map<string, CachedEmbedding>();
+  /** Whole-request dedup: concurrent identical calls share one queued op. */
+  private readonly inflight = new Map<string, Promise<EmbeddingBatchResult>>();
+  /** Bumped by invalidateStatus() so inflight keys never span a settings change. */
+  private settingsGeneration = 0;
 
   constructor(
     private readonly settings: SettingsService,
@@ -63,6 +86,22 @@ export class EmbeddingService {
   invalidateStatus(): void {
     this.status = { available: true };
     this.probed = false;
+    this.settingsGeneration += 1;
+    this.vectorCache.clear();
+  }
+
+  /** Identity of the configured embedding endpoint (mode + base URL + model)
+   * — the parts of the runtime LLM config that determine vector semantics.
+   * Dimensions are only known after a response, so they stay out of the key;
+   * the per-version persisted indexes remain the cross-restart source of
+   * truth. Null when the runtime config is unreadable (locked safeStorage). */
+  getEndpointIdentity(): string | null {
+    try {
+      const llm = this.settings.getRuntimeLlm();
+      return [llm.mode, llm.baseUrl, llm.embeddingModel].join('|');
+    } catch {
+      return null;
+    }
   }
 
   async getStatus(): Promise<EmbeddingStatus> {
@@ -75,7 +114,20 @@ export class EmbeddingService {
   }
 
   async embedWithMetadata(texts: string[]): Promise<EmbeddingBatchResult> {
-    return this.enqueue(() => this.embedQueued(texts));
+    if (texts.length === 0) return this.enqueue(() => this.embedQueued(texts));
+    // In-flight dedup: a concurrent identical request shares the queued op
+    // instead of lining up a second endpoint call behind it. The generation
+    // counter keeps keys from leaking across a settings change.
+    const requestKey = `${this.settingsGeneration}:${sha256(JSON.stringify(texts))}`;
+    const pending = this.inflight.get(requestKey);
+    if (pending) return pending;
+    const run = this.enqueue(() => this.embedQueued(texts));
+    this.inflight.set(requestKey, run);
+    try {
+      return await run;
+    } finally {
+      this.inflight.delete(requestKey);
+    }
   }
 
   private enqueue<T>(task: () => Promise<T>): Promise<T> {
@@ -90,6 +142,19 @@ export class EmbeddingService {
     }
     if (!this.status.available) throw new Error(this.status.reason ?? 'Embedding 服务不可用');
     try {
+      // Cache fast path (breaker closed only — the availability check above
+      // has already thrown when it is open). Served only when every text hits
+      // with a single consistent index version; a partial or mixed-version
+      // hit falls through to a full fresh fetch so batches never mix models.
+      const identity = this.getEndpointIdentity();
+      const keys = identity ? texts.map(text => `${identity}:${sha256(text)}`) : null;
+      const hits = keys?.map(key => this.cacheGet(key)) ?? null;
+      if (hits?.every(Boolean) && new Set(hits.map(hit => hit!.metadata.version)).size === 1) {
+        this.status = { available: true };
+        this.probed = true;
+        return { vectors: hits.map(hit => hit!.vector), metadata: hits[0]!.metadata };
+      }
+
       const vectors: Float32Array[] = [];
       let metadata: EmbeddingIndexMetadata | null = null;
       for (let start = 0; start < texts.length; start += EMBEDDING_BATCH_SIZE) {
@@ -102,6 +167,12 @@ export class EmbeddingService {
       }
       this.status = { available: true };
       this.probed = true;
+      if (keys) {
+        keys.forEach((key, index) => {
+          const vector = vectors[index];
+          if (vector) this.cacheSet(key, { vector, metadata: metadata! });
+        });
+      }
       return { vectors, metadata: metadata! };
     } catch (error) {
       this.status = {
@@ -110,6 +181,25 @@ export class EmbeddingService {
       };
       this.probed = true;
       throw error;
+    }
+  }
+
+  private cacheGet(key: string): CachedEmbedding | null {
+    const hit = this.vectorCache.get(key);
+    if (!hit) return null;
+    // LRU touch: reinsert at the recency end of the insertion-ordered map.
+    this.vectorCache.delete(key);
+    this.vectorCache.set(key, hit);
+    return hit;
+  }
+
+  private cacheSet(key: string, entry: CachedEmbedding): void {
+    this.vectorCache.delete(key);
+    this.vectorCache.set(key, entry);
+    while (this.vectorCache.size > EMBEDDING_CACHE_MAX_ENTRIES) {
+      const oldest = this.vectorCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.vectorCache.delete(oldest);
     }
   }
 

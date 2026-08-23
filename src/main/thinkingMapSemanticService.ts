@@ -45,6 +45,10 @@ export interface ThinkingMapSemanticStore {
 export interface ThinkingMapSemanticEmbedder {
   embedWithMetadata(texts: string[]): Promise<EmbeddingBatchResult>;
   invalidateStatus?(): void;
+  /** Identity of the configured embedding endpoint (mode + base URL + model),
+   * when the embedder can report it. Lets the backfill skip the probe call
+   * once the endpoint's index version has been verified this run. */
+  getEndpointIdentity?(): string | null;
 }
 
 function digestText(digest: SessionDigest): string {
@@ -77,6 +81,10 @@ export class ThinkingMapSemanticService {
     key: string;
     value: Promise<ThinkingMapSemanticIpcSnapshot>;
   } | null = null;
+  /** Endpoint identity → index version, learned from this run's probes. A
+   * later scan against the same endpoint skips the probe when the promoted
+   * index is still active and already covers the probe digest. */
+  private readonly versionByEndpoint = new Map<string, string>();
 
   constructor(
     private readonly store: ThinkingMapSemanticStore,
@@ -93,6 +101,7 @@ export class ThinkingMapSemanticService {
     this.running = false;
     this.rerunRequested = false;
     this.cache = null;
+    this.versionByEndpoint.clear();
     this.clearRetry();
   }
 
@@ -170,23 +179,45 @@ export class ThinkingMapSemanticService {
       // The first digest doubles as the route/model probe. Its vector is
       // persisted only when missing from the discovered candidate version.
       const first = sources[0];
-      const probe = await this.embedding.embedWithMetadata([digestText(first)]);
-      if (!this.running) return;
-      const candidateVersion = probe.metadata.version;
-      const existing = new Set(this.store.listDigestEmbeddingSessionIds(candidateVersion));
       let writeAttempts = 0;
       let writeFailures = 0;
-      if (!existing.has(first.sessionId)) {
-        writeAttempts += 1;
-        const vector = probe.vectors[0];
-        if (!vector) {
-          writeFailures += 1;
-        } else {
-          try {
-            this.persistVector(first.sessionId, vector, probe);
-            existing.add(first.sessionId);
-          } catch {
+      // Probe skip: once a probe this run has verified the current endpoint's
+      // index version, that version is still the promoted one, and it already
+      // covers the probe digest, re-probing would only rediscover the known
+      // version — reuse the active version and spend no endpoint call.
+      const identity = this.embedding.getEndpointIdentity?.() ?? null;
+      const activeVersion = this.store.getEmbeddingIndexState().activeVersion;
+      let candidateVersion: string | null = null;
+      let existing: Set<string> | null = null;
+      if (
+        identity
+        && activeVersion
+        && this.versionByEndpoint.get(identity) === activeVersion
+      ) {
+        const ids = new Set(this.store.listDigestEmbeddingSessionIds(activeVersion));
+        if (ids.has(first.sessionId)) {
+          candidateVersion = activeVersion;
+          existing = ids;
+        }
+      }
+      if (candidateVersion === null || existing === null) {
+        const probe = await this.embedding.embedWithMetadata([digestText(first)]);
+        if (!this.running) return;
+        candidateVersion = probe.metadata.version;
+        if (identity) this.versionByEndpoint.set(identity, candidateVersion);
+        existing = new Set(this.store.listDigestEmbeddingSessionIds(candidateVersion));
+        if (!existing.has(first.sessionId)) {
+          writeAttempts += 1;
+          const vector = probe.vectors[0];
+          if (!vector) {
             writeFailures += 1;
+          } else {
+            try {
+              this.persistVector(first.sessionId, vector, probe);
+              existing.add(first.sessionId);
+            } catch {
+              writeFailures += 1;
+            }
           }
         }
       }

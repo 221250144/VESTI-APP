@@ -420,6 +420,10 @@ export class CaptureService {
     return this.db.listSessionsNeedingDigest(digestVersion);
   }
 
+  getSessionDigest(sessionId: string): SessionDigest | null {
+    return this.db.getSessionDigest(sessionId);
+  }
+
   listDegradedDigestCandidates(): SessionDigest[] {
     return this.db.listDegradedDigestCandidates();
   }

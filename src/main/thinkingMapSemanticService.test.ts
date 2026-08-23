@@ -50,6 +50,7 @@ class FakeStore implements ThinkingMapSemanticStore {
   revision = 0;
   promotedAt: string | null = null;
   reads = 0;
+  versionReads = 0;
   failWrites = false;
   private readonly indexes = new Map<
     string,
@@ -69,6 +70,7 @@ class FakeStore implements ThinkingMapSemanticStore {
   }
 
   listDigestEmbeddingSessionIds(indexVersion: string): string[] {
+    this.versionReads += 1;
     return [...(this.indexes.get(indexVersion)?.keys() ?? [])];
   }
 
@@ -233,5 +235,87 @@ describe('ThinkingMapSemanticService', () => {
     store.revision += 1;
     await service.getSnapshot(['s1', 's2'], 2);
     expect(store.reads).toBe(2);
+  });
+
+  it('skips the probe once the endpoint version is verified and the index covers it', async () => {
+    const store = new FakeStore();
+    store.sources = [digest('s1', 'alpha'), digest('s2', 'alpha nearby')];
+    store.seed('provider:model:2', 's1', new Float32Array([1, 0]));
+    store.seed('provider:model:2', 's2', new Float32Array([0.9, 0.1]));
+    const embedding = {
+      embedWithMetadata: vi.fn(async (texts: string[]) =>
+        batch(texts.map(() => new Float32Array([1, 0])))),
+      getEndpointIdentity: () => 'demo_proxy|https://gate.test|text-embedding-v1',
+    };
+    const service = new ThinkingMapSemanticService(store, embedding, [1]);
+
+    // First scan: nothing learned yet, so the probe runs and discovers that
+    // the endpoint's version is the fully-indexed candidate → promote.
+    service.start();
+    await vi.waitFor(() => expect(store.activeVersion).toBe('provider:model:2'));
+    await vi.waitFor(() => expect(service.isBuilding()).toBe(false));
+    expect(embedding.embedWithMetadata).toHaveBeenCalledTimes(1);
+
+    // Second scan: same endpoint identity, active version verified this run,
+    // and sources[0] already has a vector → no probe call at all.
+    const readsBefore = store.versionReads;
+    service.requestScan();
+    await vi.waitFor(() => expect(store.versionReads).toBeGreaterThan(readsBefore));
+    await vi.waitFor(() => expect(service.isBuilding()).toBe(false));
+    expect(embedding.embedWithMetadata).toHaveBeenCalledTimes(1);
+    expect(store.activeVersion).toBe('provider:model:2');
+    service.stop();
+  });
+
+  it('still probes when the probe digest is missing from the active index', async () => {
+    const store = new FakeStore();
+    store.sources = [digest('s1', 'alpha')];
+    store.seed('provider:model:2', 's1', new Float32Array([1, 0]));
+    const embedding = {
+      embedWithMetadata: vi.fn(async (texts: string[]) =>
+        batch(texts.map(() => new Float32Array([1, 0])))),
+      getEndpointIdentity: () => 'demo_proxy|https://gate.test|text-embedding-v1',
+    };
+    const service = new ThinkingMapSemanticService(store, embedding, [1]);
+
+    service.start();
+    await vi.waitFor(() => expect(store.activeVersion).toBe('provider:model:2'));
+    await vi.waitFor(() => expect(service.isBuilding()).toBe(false));
+    expect(embedding.embedWithMetadata).toHaveBeenCalledTimes(1);
+
+    // A new digest the active index does not cover yet becomes sources[0]:
+    // its vector can only come from a real probe.
+    store.sources = [digest('s2', 'beta'), digest('s1', 'alpha')];
+    service.requestScan();
+    await vi.waitFor(() => expect(embedding.embedWithMetadata).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(service.isBuilding()).toBe(false));
+    expect(store.vector('provider:model:2', 's2')).not.toBeNull();
+    service.stop();
+  });
+
+  it('probes again when the endpoint identity changes mid-run', async () => {
+    const store = new FakeStore();
+    store.sources = [digest('s1', 'alpha')];
+    store.seed('provider:model:2', 's1', new Float32Array([1, 0]));
+    let identity = 'demo_proxy|https://gate.test|text-embedding-v1';
+    const embedding = {
+      embedWithMetadata: vi.fn(async (texts: string[]) =>
+        batch(texts.map(() => new Float32Array([1, 0])))),
+      getEndpointIdentity: () => identity,
+    };
+    const service = new ThinkingMapSemanticService(store, embedding, [1]);
+
+    service.start();
+    await vi.waitFor(() => expect(store.activeVersion).toBe('provider:model:2'));
+    await vi.waitFor(() => expect(service.isBuilding()).toBe(false));
+    expect(embedding.embedWithMetadata).toHaveBeenCalledTimes(1);
+
+    // Settings change (new endpoint/model): the learned mapping no longer
+    // applies, so version discovery goes through a fresh probe.
+    identity = 'custom_byok|https://example.test/v1|other-model';
+    service.requestScan();
+    await vi.waitFor(() => expect(embedding.embedWithMetadata).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(service.isBuilding()).toBe(false));
+    service.stop();
   });
 });

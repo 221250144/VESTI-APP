@@ -4979,6 +4979,7 @@ export function LibraryTab({
                             try {
                               const data = await storage.generateSummary(
                                 selectedConversationId,
+                                { force: true },
                               );
                               setPipelineStages((prev) =>
                                 prev.map((stage) => ({

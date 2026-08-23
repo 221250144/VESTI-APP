@@ -636,7 +636,13 @@ export type StorageApi = {
     }
   ) => Promise<Record<string, LearnRouteSynthesis>>;
   getSummary?: (conversationId: number) => Promise<ChatSummaryData | null>;
-  generateSummary?: (conversationId: number) => Promise<ChatSummaryData>;
+  generateSummary?: (
+    conversationId: number,
+    opts?: {
+      /** Bypass the freshness check and re-run the model ("Regenerate"). */
+      force?: boolean;
+    }
+  ) => Promise<ChatSummaryData>;
   /** AITI coverage: how many live conversations already have a (structured)
    * summary, and which ones are still pending. Drives the 摘要覆盖率 header. */
   getSummaryCoverage?: () => Promise<SummaryCoverage>;

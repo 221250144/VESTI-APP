@@ -119,6 +119,9 @@ export function isDegradedDigest(digest: DegradedDigestShape, firstUserText: str
 /** Storage surface the pipeline needs; CaptureService implements it. */
 export interface DigestSessionStore {
   getSession(id: string): SessionDetail | null;
+  /** The stored digest row for a session (null when never digested) — used to
+   * reuse a persisted embedding when a re-digest reproduces identical text. */
+  getSessionDigest(sessionId: string): SessionDigest | null;
   listSessionsNeedingDigest(digestVersion: number): Array<{ id: string; messageCount: number }>;
   /** SQL pre-filter for degraded rows (four empty structured fields, non-empty
    * one_liner, embedding_status='skipped'); the exact echo check happens in
@@ -382,19 +385,41 @@ export class DigestService {
       dimensions: number;
       version: string;
     } | null = null;
-    try {
-      const texts = [[payload.one_liner, ...payload.key_topics].join('\n')];
-      const result = this.embedding.embedWithMetadata
-        ? await this.embedding.embedWithMetadata(texts)
-        : { vectors: await this.embedding.embed(texts), metadata: null };
-      const [vector] = result.vectors;
-      if (vector) {
-        embedding = serializeVector(vector);
-        embeddingMetadata = result.metadata;
-        embeddingStatus = 'ok';
+    const embedText = [payload.one_liner, ...payload.key_topics].join('\n');
+    // Cross-run reuse: when a grown session re-digests to identical text, the
+    // persisted vector is still valid — keep it instead of re-embedding (the
+    // EmbeddingService session cache only covers repeats within this run).
+    const prior = this.store.getSessionDigest(sessionId);
+    if (
+      prior?.embeddingStatus === 'ok'
+      && prior.embedding
+      && [prior.oneLiner, ...prior.keyTopics].join('\n') === embedText
+    ) {
+      embedding = prior.embedding;
+      embeddingStatus = 'ok';
+      embeddingMetadata = prior.embeddingVersion && prior.embeddingDimensions
+        ? {
+            provider: prior.embeddingProvider ?? '',
+            model: prior.embeddingModel ?? '',
+            dimensions: prior.embeddingDimensions,
+            version: prior.embeddingVersion,
+          }
+        : null;
+    } else {
+      try {
+        const texts = [embedText];
+        const result = this.embedding.embedWithMetadata
+          ? await this.embedding.embedWithMetadata(texts)
+          : { vectors: await this.embedding.embed(texts), metadata: null };
+        const [vector] = result.vectors;
+        if (vector) {
+          embedding = serializeVector(vector);
+          embeddingMetadata = result.metadata;
+          embeddingStatus = 'ok';
+        }
+      } catch {
+        embeddingStatus = 'skipped';
       }
-    } catch {
-      embeddingStatus = 'skipped';
     }
 
     this.store.upsertSessionDigest({
