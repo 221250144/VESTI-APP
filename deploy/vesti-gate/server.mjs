@@ -3,14 +3,18 @@
 // 设计要点:
 // - 上游 API key 只存在本服务器 (/opt/vesti-gate/.env, chmod 600),客户端只带
 //   一个公开的 service token(薄滥用威慑,不是机密)。
+// - 每个供应商一个 key 池:请求按轮询顺序起步,遇到连接失败/超时/401/403/408/429/5xx
+//   自动 failover 到池内下一条 —— 单 key 失效或单上游抖动不再造成服务中断。
 // - SSE 流式透传:上游响应逐 chunk 即时转发,不缓冲完整响应 —— 1.6G 小服务器
 //   也能扛住大量并发长连接,吞吐瓶颈只在上游生成速度,网关不成为瓶颈。
-// - 无模型白名单:按 model 前缀路由供应商,model id 原样透传,新增模型零配置。
+// - 无模型白名单:按 model 前缀路由供应商,model id 原样透传;池内条目可声明
+//   modelMap(如阿里百炼只认 deepseek-v4-flash-0731)做归一。
 // - 用量被动计量(usage 日志)为会员积分体系打底,不侵入请求路径。
 
 import http from 'node:http';
 import { appendFileSync, mkdirSync, readFileSync, existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import {
   CROWDFUND_REDEEM_RATE_LIMIT,
   CROWDFUND_REDEEM_RATE_WINDOW_MS,
@@ -20,7 +24,7 @@ import { renderCrowdfundPage } from './crowdfund-page.mjs';
 
 // ---- config ----------------------------------------------------------------
 
-const envPath = new URL('./.env', import.meta.url).pathname;
+const envPath = fileURLToPath(new URL('./.env', import.meta.url));
 const env = {};
 if (existsSync(envPath)) {
   for (const line of readFileSync(envPath, 'utf8').split('\n')) {
@@ -32,27 +36,78 @@ if (existsSync(envPath)) {
 const LISTEN_HOST = env.LISTEN_HOST || '127.0.0.1';
 const LISTEN_PORT = Number(env.LISTEN_PORT || 8787);
 const CLIENT_TOKEN = env.VESTI_CLIENT_TOKEN || '';
-const DEEPSEEK_KEY = env.DEEPSEEK_API_KEY || '';
-const MOONSHOT_KEY = env.MOONSHOT_API_KEY || '';
-const IMAGE147_KEY = env.IMAGE147_API_KEY || '';
 const LOG_DIR = env.LOG_DIR || '/var/log/vesti-gate';
 mkdirSync(LOG_DIR, { recursive: true });
 
+// 逗号分隔的 key 列表;单列变量(旧版)自动并入,方便直接往 .env 追加新 key。
+function keyList(...vars) {
+  return vars.flatMap((v) => String(v || '').split(',')).map((k) => k.trim()).filter(Boolean);
+}
+
+const DEEPSEEK_KEYS = keyList(env.DEEPSEEK_API_KEYS, env.DEEPSEEK_API_KEY);
+const MOONSHOT_KEYS = keyList(env.MOONSHOT_API_KEYS, env.MOONSHOT_API_KEY);
+const IMAGE147_KEYS = keyList(env.IMAGE147_API_KEYS, env.IMAGE147_API_KEY);
+const ALI_CHAT_KEYS = keyList(env.ALI_BAILIAN_CHAT_KEYS, env.ALI_BAILIAN_CHAT_KEY);
+const ALI_EMBED_KEYS = keyList(env.ALI_BAILIAN_EMBED_KEYS, env.ALI_BAILIAN_EMBED_KEY);
+
+const EMBEDDING_MODEL = (env.VESTI_EMBEDDING_MODEL || 'text-embedding-v4').trim();
+
+// 阿里百炼 token-plan 端点的模型命名与官方 deepseek 不同,做显式归一;
+// 未列出的 model id 原样透传(端点上有的模型,如 deepseek-v4-pro,直接用)。
+const ALI_CHAT_MODEL_MAP = {
+  'deepseek-v4-flash': 'deepseek-v4-flash-0731',
+  'deepseek-chat': 'deepseek-v4-flash-0731',
+  'deepseek-reasoner': 'deepseek-v4-pro',
+};
+
+// provider -> 上游条目池。name 用于日志/响应头;modelMap/forceModel 在转发前改写 model。
 const PROVIDERS = {
-  deepseek: { base: 'https://api.deepseek.com/v1', key: DEEPSEEK_KEY },
+  deepseek: {
+    pool: [
+      ...DEEPSEEK_KEYS.map((key, i) => ({ name: `deepseek#${i + 1}`, base: 'https://api.deepseek.com/v1', key })),
+      ...ALI_CHAT_KEYS.map((key, i) => ({
+        name: `ali-bailian#${i + 1}`,
+        base: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        key,
+        modelMap: ALI_CHAT_MODEL_MAP,
+      })),
+    ],
+  },
   // kimi-for-coding 专用端点(api.moonshot.cn 通用端点不认 coding key);
   // 该端点只有一个模型,任何 kimi/moonshot 前缀的 model id 都映射过去
-  moonshot: { base: 'https://api.kimi.com/coding/v1', key: MOONSHOT_KEY, forceModel: 'kimi-for-coding' },
-  image147: { base: 'https://nn.147ai.com/v1', key: IMAGE147_KEY },
+  moonshot: {
+    pool: MOONSHOT_KEYS.map((key, i) => ({
+      name: `moonshot#${i + 1}`,
+      base: 'https://api.kimi.com/coding/v1',
+      key,
+      forceModel: 'kimi-for-coding',
+    })),
+  },
+  image147: {
+    pool: IMAGE147_KEYS.map((key, i) => ({ name: `image147#${i + 1}`, base: 'https://nn.147ai.com/v1', key })),
+  },
+  embedding: {
+    pool: ALI_EMBED_KEYS.map((key, i) => ({
+      name: `ali-dashscope#${i + 1}`,
+      base: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      key,
+      forceModel: EMBEDDING_MODEL,
+    })),
+  },
 };
 
 const CHAT_BODY_CAP = 4 * 1024 * 1024;      // 4 MB — chat payloads
 const IMAGE_BODY_CAP = 32 * 1024 * 1024;    // 32 MB — multipart image edits
+const EMBED_BODY_CAP = 4 * 1024 * 1024;     // 4 MB — embedding batches
 const COLLECT_BODY_CAP = 16 * 1024 * 1024;  // 16 MB — data-contribution batches
 const UPSTREAM_CONNECT_TIMEOUT_MS = 20_000;
 const IMAGE_UPSTREAM_TIMEOUT_MS = 150_000; // 绘图上游 30-120s 才回响应头
 const COLLECT_DIR = env.COLLECT_DIR || '/var/lib/vesti-gate/collect';
 mkdirSync(COLLECT_DIR, { recursive: true });
+
+// 这些状态码说明"这条 key/上游当前不可用",值得 failover 到池内下一条;
+// 其余 4xx(如 400 参数错误)是请求本身的问题,原样转发给客户端。
+const FAILOVER_STATUSES = new Set([401, 402, 403, 408, 429, 500, 502, 503, 504]);
 
 // ---- 众筹「众筹码」配置 ------------------------------------------------------
 // 档位 → 积分映射(改这里即可调档;公开页与兑换响应都从这里取数)。
@@ -185,7 +240,7 @@ function cors(res) {
 function routeProvider(model) {
   const m = String(model || '').toLowerCase();
   if (m.startsWith('moonshot') || m.startsWith('kimi')) return 'moonshot';
-  return 'deepseek'; // 无白名单:未知模型默认走 deepseek,model id 原样透传
+  return 'deepseek'; // 无白名单:未知模型默认走 deepseek 池,model id 原样透传
 }
 
 function authorized(req) {
@@ -197,50 +252,110 @@ function authorized(req) {
 
 // ---- upstream relay ------------------------------------------------------------
 
-async function relay({ req, res, upstreamUrl, upstreamKey, body, route, model, ip, extraForwardHeaders = {}, connectTimeoutMs = UPSTREAM_CONNECT_TIMEOUT_MS }) {
-  const requestId = randomUUID();
+// 池轮询游标:provider -> 下一个起始下标。请求从游标位置起步,依次尝试池内条目。
+const RR_CURSORS = new Map();
+function poolOrder(providerName) {
+  const pool = (PROVIDERS[providerName]?.pool || []).filter((e) => e.key);
+  if (pool.length === 0) return [];
+  const start = (RR_CURSORS.get(providerName) || 0) % pool.length;
+  RR_CURSORS.set(providerName, start + 1);
+  return [...pool.slice(start), ...pool.slice(0, start)];
+}
+
+// 单条上游尝试。成功建立响应(无论状态码)返回 { upstream, entry };
+// 连接级失败返回 { error }。调用方负责决定 failover 还是转发。
+async function tryUpstream({ req, res, entry, upstreamUrl, body, connectTimeoutMs }) {
   const controller = new AbortController();
   const connectTimer = setTimeout(() => controller.abort(new Error('upstream_connect_timeout')), connectTimeoutMs);
   // 客户端断开后中止上游请求,不浪费上游额度
   res.on('close', () => { if (!res.writableFinished) controller.abort(new Error('client_gone')); });
-
-  let upstream;
   try {
-    upstream = await fetch(upstreamUrl, {
+    const upstream = await fetch(upstreamUrl, {
       method: 'POST',
       headers: {
         'content-type': req.headers['content-type'] || 'application/json',
-        authorization: `Bearer ${upstreamKey}`,
-        'x-request-id': requestId,
-        ...extraForwardHeaders,
+        authorization: `Bearer ${entry.key}`,
       },
       body,
       signal: controller.signal,
     });
+    clearTimeout(connectTimer);
+    return { upstream, entry };
   } catch (error) {
     clearTimeout(connectTimer);
-    const isTimeout = String(error?.message || '').includes('timeout');
-    sendJson(res, isTimeout ? 504 : 502, {
-      error: { message: isTimeout ? '上游连接超时' : '无法连接上游服务', requestId },
-    }, { 'x-request-id': requestId });
-    logUsage({ ip, route, model, status: isTimeout ? 504 : 502 });
+    return { error, entry };
+  }
+}
+
+// 池化转发:按轮询顺序尝试,连接失败/超时或可 failover 的状态码自动跳下一条。
+// 一旦决定转发即流式透传,之后的流中断不再 failover(客户端自行重试)。
+async function relayPool({ req, res, providerName, pathSuffix, parsedBody, rawBody, routeName, model, ip, connectTimeoutMs = UPSTREAM_CONNECT_TIMEOUT_MS }) {
+  const entries = poolOrder(providerName);
+  if (entries.length === 0) {
+    sendJson(res, 503, { error: { message: `provider ${providerName} 未配置` } });
     return;
   }
-  clearTimeout(connectTimer);
 
+  const attempts = [];
+  let chosen = null;
+  for (const entry of entries) {
+    // JSON 请求可按条目的模型命名(modelMap/forceModel)改写;rawBody(multipart 等)原样透传
+    let body = rawBody;
+    if (parsedBody && typeof parsedBody === 'object') {
+      const mapped = { ...parsedBody };
+      if (entry.forceModel) mapped.model = entry.forceModel;
+      else if (entry.modelMap && typeof mapped.model === 'string') {
+        mapped.model = entry.modelMap[mapped.model] || mapped.model;
+      }
+      body = JSON.stringify(mapped);
+    }
+    const result = await tryUpstream({
+      req, res, entry, body,
+      upstreamUrl: `${entry.base}/${pathSuffix}`,
+      connectTimeoutMs,
+    });
+    if (result.error) {
+      const isTimeout = String(result.error?.message || '').includes('timeout');
+      attempts.push({ entry: entry.name, error: isTimeout ? 'connect_timeout' : 'connect_error' });
+      logUsage({ ip, route: routeName, model, provider: entry.name, status: isTimeout ? 504 : 502, failover: true });
+      continue;
+    }
+    if (FAILOVER_STATUSES.has(result.upstream.status)) {
+      // 消耗掉错误响应体,然后试下一条
+      try { await result.upstream.arrayBuffer(); } catch { /* noop */ }
+      attempts.push({ entry: entry.name, status: result.upstream.status });
+      logUsage({ ip, route: routeName, model, provider: entry.name, status: result.upstream.status, failover: true });
+      continue;
+    }
+    chosen = result;
+    break;
+  }
+
+  const requestId = randomUUID();
+  if (!chosen) {
+    sendJson(res, 502, {
+      error: { message: '所有上游均不可用', attempts, requestId },
+    }, { 'x-request-id': requestId });
+    return;
+  }
+
+  const { upstream, entry } = chosen;
   const headers = {
     'access-control-allow-origin': '*',
     'x-request-id': requestId,
-    'x-proxy-provider-used': route.provider,
-    'x-proxy-model-used': model || '',
+    'x-proxy-provider-used': entry.name,
+    'x-proxy-model-used': entry.forceModel || (entry.modelMap?.[model] ?? model) || '',
   };
+  if (attempts.length > 0) {
+    headers['x-proxy-fallback-reason'] = attempts.map((a) => `${a.entry}:${a.status || a.error}`).join(',');
+  }
   const upstreamContentType = upstream.headers.get('content-type') || '';
   if (upstreamContentType) headers['content-type'] = upstreamContentType;
   res.writeHead(upstream.status, headers);
 
   if (!upstream.body) {
     res.end();
-    logUsage({ ip, route: route.name, model, provider: route.provider, status: upstream.status });
+    logUsage({ ip, route: routeName, model, provider: entry.name, status: upstream.status });
     return;
   }
 
@@ -255,7 +370,7 @@ async function relay({ req, res, upstreamUrl, upstreamKey, body, route, model, i
       if (done) break;
       if (value?.length) {
         res.write(Buffer.from(value));
-        if (route.name === 'chat') {
+        if (routeName === 'chat') {
           // 只保留流尾 64KB,usage 汇总 chunk 在流末尾
           tail += decoder.decode(value, { stream: true });
           if (tail.length > 64 * 1024) tail = tail.slice(-64 * 1024);
@@ -268,15 +383,13 @@ async function relay({ req, res, upstreamUrl, upstreamKey, body, route, model, i
     try { await reader.cancel(); } catch { /* noop */ }
     try { res.end(); } catch { /* noop */ }
   }
-  if (route.name === 'chat' && tail) {
+  if (routeName === 'chat' && tail) {
     const matches = [...tail.matchAll(/"usage"\s*:\s*(\{[^}]*\})/g)];
     if (matches.length > 0) {
       try { usage = JSON.parse(matches[matches.length - 1][1]); } catch { /* noop */ }
     }
-  } else if (route.name !== 'chat') {
-    // 非流式:images 不读 usage
   }
-  logUsage({ ip, route: route.name, model, provider: route.provider, status: upstream.status, usage });
+  logUsage({ ip, route: routeName, model, provider: entry.name, status: upstream.status, usage });
 }
 
 // ---- server -------------------------------------------------------------------
@@ -293,7 +406,12 @@ const server = http.createServer(async (req, res) => {
       ok: true,
       service: 'vesti-gate',
       time: new Date().toISOString(),
-      providers: Object.fromEntries(Object.entries(PROVIDERS).map(([k, v]) => [k, Boolean(v.key)])),
+      providers: Object.fromEntries(
+        Object.entries(PROVIDERS).map(([k, v]) => [k, {
+          keys: v.pool.filter((e) => e.key).length,
+          endpoints: v.pool.filter((e) => e.key).map((e) => e.name.replace(/#.*/, '')),
+        }]),
+      ),
     });
     return;
   }
@@ -324,25 +442,49 @@ const server = http.createServer(async (req, res) => {
       }
       const model = typeof parsed.model === 'string' ? parsed.model : '';
       const providerName = routeProvider(model);
-      const provider = PROVIDERS[providerName];
-      if (!provider.key) {
-        sendJson(res, 503, { error: { message: `provider ${providerName} 未配置` } });
-        return;
-      }
       if (path === '/api/chat') parsed.stream = false; // 旧协议固定非流式
-      // 单模型端点(如 kimi-for-coding):model id 归一到端点实际模型
-      if (provider.forceModel) parsed.model = provider.forceModel;
       // 让流式响应携带 usage 以便计量(上游支持时;客户端已设置则不动)
       if (parsed.stream === true && !parsed.stream_options) {
         parsed.stream_options = { include_usage: true };
       }
-      await relay({
+      await relayPool({
         req, res, ip,
-        upstreamUrl: `${provider.base}/chat/completions`,
-        upstreamKey: provider.key,
-        body: JSON.stringify(parsed),
-        route: { name: 'chat', provider: providerName },
+        providerName,
+        pathSuffix: 'chat/completions',
+        parsedBody: parsed,
+        routeName: 'chat',
         model,
+      });
+      return;
+    }
+
+    // 向量嵌入:客户端(插件/App demo 模式)不指定 model,网关统一选型,
+    // 通过 x-proxy-model-used 响应头告知实际模型,客户端按 (provider,model,dims)
+    // 记索引版本。当前默认 text-embedding-v4(阿里百炼 DashScope)。
+    if (req.method === 'POST' && (path === '/api/embeddings' || path === '/v1/embeddings')) {
+      if (!rateLimitOk(ip, 'embed', 240, 10 * 60_000)) {
+        sendJson(res, 429, { error: { message: 'rate_limited', retryAfterSeconds: 600 } });
+        return;
+      }
+      const raw = await readBody(req, EMBED_BODY_CAP);
+      let parsed;
+      try { parsed = JSON.parse(raw.toString('utf8')); } catch {
+        sendJson(res, 400, { error: { message: 'invalid_json' } });
+        return;
+      }
+      if (!parsed || parsed.input === undefined) {
+        sendJson(res, 400, { error: { message: 'missing_input' } });
+        return;
+      }
+      // 服务端选型权威:忽略客户端 model 字段,统一走池内 forceModel
+      delete parsed.model;
+      await relayPool({
+        req, res, ip,
+        providerName: 'embedding',
+        pathSuffix: 'embeddings',
+        parsedBody: parsed,
+        routeName: 'embed',
+        model: EMBEDDING_MODEL,
       });
       return;
     }
@@ -353,21 +495,16 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 429, { error: { message: 'rate_limited', retryAfterSeconds: 600 } });
         return;
       }
-      const provider = PROVIDERS.image147;
-      if (!provider.key) {
-        sendJson(res, 503, { error: { message: 'provider image147 未配置' } });
-        return;
-      }
       const raw = await readBody(req, IMAGE_BODY_CAP);
       const model = (() => {
         try { return JSON.parse(raw.toString('utf8')).model; } catch { return 'multipart'; }
       })();
-      await relay({
+      await relayPool({
         req, res, ip,
-        upstreamUrl: `${provider.base}/${path.slice(4)}`, // /v1/images/* → {base}/images/*
-        upstreamKey: provider.key,
-        body: raw,
-        route: { name: 'image', provider: 'image147' },
+        providerName: 'image147',
+        pathSuffix: path.slice(4), // /v1/images/* → images/*
+        rawBody: raw,
+        routeName: 'image',
         model: typeof model === 'string' ? model : 'multipart',
         connectTimeoutMs: IMAGE_UPSTREAM_TIMEOUT_MS,
       });
@@ -443,12 +580,6 @@ const server = http.createServer(async (req, res) => {
       const { status, body } = crowdfundRedeemer.redeem({ code: parsed?.code, ip });
       if (status === 200) logUsage({ ip, route: 'crowdfund-redeem', tier: body.tier, credits: body.credits });
       sendJson(res, status, body);
-      return;
-    }
-
-    // 旧 embeddings 路由:聚合站接入前明确不可用(客户端会回落到旧网关)
-    if (req.method === 'POST' && path === '/api/embeddings') {
-      sendJson(res, 502, { error: { message: 'embeddings_unavailable_pending_aggregator' } });
       return;
     }
 
