@@ -19,6 +19,7 @@ import { buildChatCompletionBody } from './chatRequest';
 import { chatStreamEndpoint, createSseDataCollector, parseChatStreamData } from './chatStream';
 import type { RuntimeAgentSettings, RuntimeLlmSettings, SettingsService } from './settingsService';
 import { fetchDemoProxy, type ProxyAttemptMetadata } from './proxyFetch';
+import { formatMainString, llmStrings, resolveMainLocale, type MainLlmStrings } from './mainStrings';
 
 const MAX_TRANSCRIPT_CHARACTERS = 80_000;
 
@@ -174,7 +175,14 @@ export class AgentService {
     private readonly capture: CaptureService,
     private readonly settings: SettingsService,
     private readonly credits?: AgentCreditMeter,
+    /** UI-language source (ui-prefs `language`) for user-facing error/test
+     * messages; defaults to Chinese, the legacy factory language. */
+    private readonly uiLocale: () => unknown = () => 'zh',
   ) {}
+
+  private strings(): MainLlmStrings {
+    return llmStrings(resolveMainLocale(this.uiLocale()));
+  }
 
   async run(request: AgentRunRequest, options?: { persist?: boolean }): Promise<AgentResult> {
     const prepared = this.prepareRun(request);
@@ -271,6 +279,7 @@ export class AgentService {
   }
 
   async test(): Promise<LlmTestResult> {
+    const strings = this.strings();
     try {
       const llm = this.settings.getRuntimeLlm();
       const completion = await this.complete(llm, [
@@ -280,18 +289,22 @@ export class AgentService {
       const modelLabel = completion.modelUsed === llm.modelId
         ? llm.modelId
         : `${llm.modelId} → ${completion.modelUsed}`;
-      return { ok: true, message: `连接成功：${modelLabel}` };
+      return { ok: true, message: formatMainString(strings.testSuccess, { model: modelLabel }) };
     } catch (error) {
       // 网关诊断:把 fallback 原因/首败端点带出来,不然"主网关传输失败→旧网关
       // 兜底报错"这类链路问题在 UI 上完全不可见
       if (error instanceof LlmGatewayError) {
         const hints: string[] = [];
-        if (error.details.fallbackReason) hints.push(`主网关重试原因：${error.details.fallbackReason}`);
-        if (error.details.providerUsed) hints.push(`实际命中：${error.details.providerUsed}`);
+        if (error.details.fallbackReason) {
+          hints.push(formatMainString(strings.hintFallbackReason, { reason: error.details.fallbackReason }));
+        }
+        if (error.details.providerUsed) {
+          hints.push(formatMainString(strings.hintProviderUsed, { provider: error.details.providerUsed }));
+        }
         const suffix = hints.length > 0 ? `（${hints.join('，')}）` : '';
         return { ok: false, message: `${error.message}${suffix}` };
       }
-      return { ok: false, message: error instanceof Error ? error.message : '连接失败' };
+      return { ok: false, message: error instanceof Error ? error.message : strings.testFailed };
     }
   }
 
@@ -353,8 +366,9 @@ export class AgentService {
     messages: Array<{ role: string; content: string }>,
     label = 'chat',
   ): Promise<{ content: string; modelUsed: string }> {
+    const strings = this.strings();
     if (settings.mode === 'custom_byok' && !settings.apiKey) {
-      throw new Error('请先在设置中填写 API Key');
+      throw new Error(strings.apiKeyMissing);
     }
     const endpoint = settings.mode === 'demo_proxy'
       ? `${settings.baseUrl}/chat`
@@ -402,9 +416,9 @@ export class AgentService {
       const requestId = response.headers.get('x-request-id')
         || (typeof payload.error === 'object' ? payload.error?.requestId : undefined)
         || proxyMetadata?.requestId;
-      const suffix = requestId ? `（请求 ID：${requestId}）` : '';
+      const suffix = requestId ? formatMainString(strings.requestIdSuffix, { id: requestId }) : '';
       throw new LlmGatewayError(
-        `${detail || `模型请求失败（HTTP ${response.status}）`}${suffix}`,
+        `${detail || formatMainString(strings.requestFailedHttp, { status: String(response.status) })}${suffix}`,
         {
           status: response.status,
           code: typeof payload.error === 'object' ? payload.error?.code : undefined,
@@ -427,9 +441,9 @@ export class AgentService {
     // cap was eaten by the reasoning trace — say so, so the user raises the
     // max-output setting instead of blaming the gateway/proxy.
     if (!cleaned && payload.choices?.[0]?.finish_reason === 'length') {
-      throw new Error('模型输出达到 Token 上限，回答被截断为空。请在设置中把「最大输出 Token」调大或设为 0（不限）');
+      throw new Error(strings.tokenCapTruncated);
     }
-    if (!cleaned) throw new Error('模型没有返回可显示的内容');
+    if (!cleaned) throw new Error(strings.emptyContent);
     const responseModel = typeof payload.model === 'string' ? payload.model.trim() : '';
     const modelUsed = response.headers.get('x-proxy-model-used')?.trim()
       || proxyMetadata?.modelUsed?.trim()
@@ -460,8 +474,9 @@ export class AgentService {
     label: string,
     onDelta: (content: string, reasoning: string) => void,
   ): Promise<{ content: string; modelUsed: string }> {
+    const strings = this.strings();
     if (settings.mode === 'custom_byok' && !settings.apiKey) {
-      throw new Error('请先在设置中填写 API Key');
+      throw new Error(strings.apiKeyMissing);
     }
     const endpoint = chatStreamEndpoint(settings.mode, settings.baseUrl);
     const body = buildChatCompletionBody(settings, messages, true);
@@ -495,9 +510,9 @@ export class AgentService {
       const detail = typeof payload.error === 'string' ? payload.error : payload.error?.message || payload.message;
       const requestId = response.headers.get('x-request-id')
         || (typeof payload.error === 'object' ? payload.error?.requestId : undefined);
-      const suffix = requestId ? `（请求 ID：${requestId}）` : '';
+      const suffix = requestId ? formatMainString(strings.requestIdSuffix, { id: requestId }) : '';
       throw new LlmGatewayError(
-        `${detail || `模型请求失败（HTTP ${response.status}）`}${suffix}`,
+        `${detail || formatMainString(strings.requestFailedHttp, { status: String(response.status) })}${suffix}`,
         {
           status: response.status,
           code: typeof payload.error === 'object' ? payload.error?.code : undefined,
@@ -507,7 +522,7 @@ export class AgentService {
         },
       );
     }
-    if (!response.body) throw new Error('模型服务未返回流式响应体');
+    if (!response.body) throw new Error(strings.noStreamBody);
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -542,9 +557,9 @@ export class AgentService {
     // was eaten by the reasoning trace — say so, so the user raises the
     // max-output setting instead of blaming the gateway/proxy.
     if (!cleaned && finishReason === 'length') {
-      throw new Error('模型输出达到 Token 上限，回答被截断为空。请在设置中把「最大输出 Token」调大或设为 0（不限）');
+      throw new Error(strings.tokenCapTruncated);
     }
-    if (!cleaned) throw new Error('模型没有返回可显示的内容');
+    if (!cleaned) throw new Error(strings.emptyContent);
     const modelUsed = response.headers.get('x-proxy-model-used')?.trim()
       || modelFromChunk
       || settings.modelId;
@@ -567,10 +582,11 @@ export class AgentService {
     }
 
     const proxy = await session.defaultSession.resolveProxy(endpoint).catch(() => 'unknown');
-    const reason = [...new Set(details)].join(' · ') || '未知网络错误';
+    const strings = this.strings();
+    const reason = [...new Set(details)].join(' · ') || strings.unknownNetworkReason;
     const message = proxy === 'DIRECT'
-      ? `无法连接模型服务：${reason}。当前为直连网络，请检查防火墙、VPN 或在系统中配置可用代理。`
-      : `无法通过系统网络连接模型服务：${reason}。当前代理路径：${proxy}。请检查代理是否正在运行。`;
+      ? formatMainString(strings.networkDirect, { reason })
+      : formatMainString(strings.networkProxied, { reason, proxy });
     return new Error(message, { cause: error });
   }
 

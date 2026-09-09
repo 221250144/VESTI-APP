@@ -414,9 +414,7 @@ export function MembershipGate({ children }: MembershipGateProps) {
 
                   <button
                     type="submit"
-                    disabled={
-                      submitting || (status.state === "unregistered" && !consentChecked)
-                    }
+                    disabled={submitting}
                     className="inline-flex min-h-12 w-full items-center justify-center gap-2 rounded-xl bg-accent-primary px-4 py-3 text-[13px] font-sans font-semibold text-text-inverse transition-colors hover:bg-accent-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus focus-visible:ring-offset-2 focus-visible:ring-offset-bg-surface-card disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {submitting ? (

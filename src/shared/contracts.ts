@@ -140,6 +140,8 @@ export interface LlmSettingsView {
   /** 0 = no max_tokens sent — the model's own default output cap applies. */
   maxTokens: number;
   apiKeyConfigured: boolean;
+  /** Effective embedding model (BYOK-editable; never empty, default filled). */
+  embeddingModel: string;
 }
 
 // ---- P3 upstream export (Obsidian vault / Notion) ----
@@ -191,6 +193,8 @@ export interface AppSettingsUpdate {
     maxTokens: number;
     apiKey?: string;
     clearApiKey?: boolean;
+    /** BYOK embedding model override; '' resets to the default, absent keeps the stored value. */
+    embeddingModel?: string;
   };
   upstream: {
     obsidianVaultPath: string;
@@ -636,6 +640,7 @@ export const IPC = {
   chooseDataDirectory: 'vesti:choose-data-directory',
   openDataDirectory: 'vesti:open-data-directory',
   openSettingsDirectory: 'vesti:open-settings-directory',
+  openExternal: 'vesti:open-external',
   clearAgentResults: 'vesti:clear-agent-results',
   restart: 'vesti:restart',
   llmTest: 'vesti:llm-test',
@@ -1198,6 +1203,8 @@ export interface VestiDesktopApi {
   chooseDataDirectory(): Promise<string | null>;
   openDataDirectory(): Promise<void>;
   openSettingsDirectory(): Promise<void>;
+  /** 在系统浏览器打开外部链接(仅 http/https),用于 About 页的官网/隐私政策入口。 */
+  openExternal(url: string): Promise<void>;
   clearAgentResults(): Promise<void>;
   restartApp(): Promise<void>;
   testLlm(): Promise<LlmTestResult>;
@@ -1271,13 +1278,20 @@ export interface DataContributionState {
   consentedAt: number | null;
   /** Agreement version the user consented to. */
   version: string | null;
+  /**
+   * Set once the one-time opt-in credit gift has been granted. Absent on
+   * pre-gift accounts (treated as not yet granted); toggling contribution
+   * off and on again never re-grants.
+   */
+  giftGranted?: boolean;
 }
 
 /** Authentication bridge available before the product shell is unlocked. */
 export interface VestiMembershipApi {
   getStatus(): Promise<MembershipStatus>;
-  /** Registering (claiming the free beta membership) requires consenting to
-   * the privacy & data-contribution agreement: `dataConsent` must be true. */
+  /** Data contribution is optional at registration: `dataConsent` === true
+   * opts the account into the upload (and the one-time credit gift); false
+   * registers with contribution disabled. */
   register(credentials: MembershipCredentials, dataConsent: boolean): Promise<MembershipActionResult>;
   login(credentials: MembershipCredentials): Promise<MembershipActionResult>;
   logout(): Promise<MembershipStatus>;

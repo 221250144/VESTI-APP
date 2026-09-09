@@ -20,16 +20,17 @@ import { AgentMcpRegistry, createAgentMcpRegistry, resolveAgentMcpTargetId } fro
 import { CaptureService } from './main/captureService';
 import { ContributionService } from './main/contributionService';
 import { CapsuleWindowService, normalizeCapsuleBubblePayload } from './main/capsuleWindowService';
-import { CreditError, CreditService, redeemCrowdfundCode } from './main/creditService';
+import { CreditError, CreditService, DATA_CONTRIBUTION_GIFT_CREDITS, redeemCrowdfundCode } from './main/creditService';
 import { DigestService } from './main/digestService';
 import { ProjectMemoryService } from './main/projectMemoryService';
 import { EmbeddingService, type EmbeddingCreditMeter } from './main/embeddingService';
 import { ThinkingMapSemanticService } from './main/thinkingMapSemanticService';
 import { ExtensionBridgeService, MAX_OUTBOX_PROMPT_CHARS } from './main/extensionBridgeService';
 import { NotionService } from './main/notionService';
-import { MembershipError, MembershipService } from './main/membershipService';
+import { MembershipError, MembershipService, shouldGrantDataContributionGift } from './main/membershipService';
 import { SettingsService } from './main/settingsService';
 import { UiPrefsService } from './main/uiPrefsService';
+import { outputLanguageForLocale, resolveMainLocale } from './main/mainStrings';
 import { writeUpstreamExportFile } from './main/vaultExportService';
 import {
   assembleCapsuleRelayDraft,
@@ -63,6 +64,7 @@ import {
   type CapsuleRelaySessionView,
   type CreditBalance,
   type CreditTier,
+  type DataContributionState,
   type ExtensionImportRequestPayload,
   type ExtensionImportResultPayload,
   type MembershipActionResult,
@@ -198,6 +200,32 @@ function broadcastCreditChange(): void {
   }
   for (const window of BrowserWindow.getAllWindows()) {
     if (!window.isDestroyed()) window.webContents.send(IPC.creditChanged, balance);
+  }
+}
+
+/**
+ * One-time opt-in gift (接受赠送积分再开启): the first data-contribution
+ * enable ever — at registration or later via Settings — drops
+ * DATA_CONTRIBUTION_GIFT_CREDITS into the same persistent bonus pool
+ * crowdfund redemptions use. Idempotency comes from the giftGranted flag
+ * persisted atomically with the consent state (see
+ * shouldGrantDataContributionGift), so off→on toggles never re-grant. A
+ * ledger write failure only logs: the flag stays the source of truth.
+ */
+async function grantDataContributionGiftIfDue(
+  before: DataContributionState | null,
+  after: DataContributionState,
+): Promise<void> {
+  if (!shouldGrantDataContributionGift(before, after)) return;
+  try {
+    await credits.grantBonus({
+      ...creditTierContext(),
+      credits: DATA_CONTRIBUTION_GIFT_CREDITS,
+      label: '数据贡献开启赠送',
+    });
+    broadcastCreditChange();
+  } catch (error) {
+    console.warn('[vesti] data contribution gift grant failed:', error);
   }
 }
 
@@ -538,6 +566,7 @@ function validSettingsUpdate(value: unknown): value is AppSettingsUpdate {
     && update.llm.maxTokens <= 16_384
     && (update.llm.apiKey === undefined || typeof update.llm.apiKey === 'string')
     && (update.llm.clearApiKey === undefined || typeof update.llm.clearApiKey === 'boolean')
+    && (update.llm.embeddingModel === undefined || typeof update.llm.embeddingModel === 'string')
     && typeof update.general.launchAtLogin === 'boolean'
     && typeof update.general.startMinimized === 'boolean'
     && typeof update.general.closeToTray === 'boolean'
@@ -922,7 +951,11 @@ function registerIpc(): void {
     return status;
   });
   ipcMain.handle(IPC.membershipRegister, (_event, value: unknown, dataConsent: unknown) =>
-    finishMembershipAction(() => membership.register(normalizeMembershipCredentials(value), dataConsent === true)));
+    finishMembershipAction(async () => {
+      await membership.register(normalizeMembershipCredentials(value), dataConsent === true);
+      // Opting in at registration counts as the first enable → one-time gift.
+      await grantDataContributionGiftIfDue(null, membership.getDataContribution());
+    }));
   ipcMain.handle(IPC.membershipLogin, (_event, value: unknown) =>
     finishMembershipAction(() => membership.login(normalizeMembershipCredentials(value))));
   ipcMain.handle(IPC.membershipLogout, async () => {
@@ -934,7 +967,9 @@ function registerIpc(): void {
   });
   memberIpcHandle(IPC.membershipDataContributionGet, () => membership.getDataContribution());
   memberIpcHandle(IPC.membershipDataContributionSet, async (_event, enabled: unknown) => {
+    const before = membership.getDataContribution();
     const state = await membership.setDataContribution(enabled === true);
+    if (enabled === true) await grantDataContributionGiftIfDue(before, state);
     // Consent changes take effect immediately: a withdrawn consent drops the
     // pending upload queue inside runOnce instead of waiting for the timer.
     void contribution.runOnce();
@@ -986,6 +1021,13 @@ function registerIpc(): void {
   });
   memberIpcHandle(IPC.openDataDirectory, () => openDirectory(capture.activeDataDirectory));
   memberIpcHandle(IPC.openSettingsDirectory, () => openDirectory(settings.getView(capture.activeDataDirectory).settingsDirectory));
+  // 外部链接(官网/隐私政策等):仅放行 http(s),其余 scheme 一律拒绝。
+  memberIpcHandle(IPC.openExternal, (_event, url: unknown) => {
+    if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) {
+      throw new Error('无效的链接');
+    }
+    return shell.openExternal(url);
+  });
   memberIpcHandle(IPC.chooseDirectory, async (_event, title: unknown) => {
     const options: Electron.OpenDialogOptions = {
       title: typeof title === 'string' && title.trim() ? title : '选择目录',
@@ -1220,7 +1262,20 @@ function registerIpc(): void {
     if (!membership.isActive() && key !== 'theme' && key !== 'language') {
       throw new MembershipError('AUTHENTICATION_REQUIRED', 'Membership is required for this preference.');
     }
+    // The agent output language follows the UI language by default: snapshot
+    // the old pref so followAgentOutputLanguage can tell "still on the old
+    // default" (follow) from "user picked a language" (leave alone).
+    const previousLanguage = key === 'language' ? uiPrefs.get(key) : undefined;
     await uiPrefs.set(key, value);
+    if (key === 'language') {
+      const previous = previousLanguage == null
+        ? null
+        : outputLanguageForLocale(resolveMainLocale(previousLanguage));
+      await settings.followAgentOutputLanguage(
+        previous,
+        outputLanguageForLocale(resolveMainLocale(value)),
+      );
+    }
   });
   memberIpcHandle(IPC.capsuleState, () => capsule.getState());
   memberIpcHandle(IPC.capsuleSync, async () => {
@@ -1505,7 +1560,7 @@ app.on('second-instance', showMainWindow);
 
 app.whenReady().then(async () => {
   app.setAppUserModelId('com.vesti.desktop');
-  settings = new SettingsService(app.getPath('userData'), app.getVersion());
+  settings = new SettingsService(app.getPath('userData'), app.getVersion(), () => uiPrefs.get('language'));
   await settings.initialize();
   membership = new MembershipService(app.getPath('userData'));
   try {
@@ -1549,9 +1604,9 @@ app.whenReady().then(async () => {
   await applyProxySettings();
   applyGeneralSettings();
   await capture.initialize(broadcastChange, settings.dataDirectory, settings.capture.enabledPlatforms);
-  agent = new AgentService(capture, settings, agentCreditMeter);
+  agent = new AgentService(capture, settings, agentCreditMeter, () => uiPrefs.get('language'));
   image = new ImageService(capture, settings, imageCreditMeter);
-  embedding = new EmbeddingService(settings, embeddingCreditMeter);
+  embedding = new EmbeddingService(settings, embeddingCreditMeter, () => uiPrefs.get('language'));
   thinkingMapSemantics = new ThinkingMapSemanticService(capture, embedding);
   digest = new DigestService(capture, agent, embedding, () => settings.isLlmConfigured());
   digest.setScanCompletedListener(() => {

@@ -6,6 +6,7 @@ import {
   CREDITS_FILE_NAME,
   CreditError,
   CreditService,
+  DATA_CONTRIBUTION_GIFT_CREDITS,
   FREE_DAILY_CREDITS,
   MEMBER_MONTHLY_CREDITS,
   creditCost,
@@ -290,6 +291,28 @@ describe('CreditService bonus pool (crowdfund grants)', () => {
     const restarted = createService();
     await restarted.initialize();
     expect(restarted.getBalance('free').remaining).toBe(FREE_DAILY_CREDITS + 6_000);
+  });
+
+  it('lands the data-contribution opt-in gift in the same bonus pool', async () => {
+    const service = createService();
+    await service.initialize();
+
+    // The product-owner-fixed one-time gift (接受赠送积分再开启), granted via
+    // the exact path main.ts uses for the first contribution enable.
+    expect(DATA_CONTRIBUTION_GIFT_CREDITS).toBe(2_000);
+    const balance = await service.grantBonus({
+      tier: 'member',
+      memberSince: MEMBER_SINCE,
+      credits: DATA_CONTRIBUTION_GIFT_CREDITS,
+      label: '数据贡献开启赠送',
+    });
+
+    expect(balance.remaining).toBe(MEMBER_MONTHLY_CREDITS + DATA_CONTRIBUTION_GIFT_CREDITS);
+    expect(balance.recent[0]).toMatchObject({
+      category: 'grant',
+      credits: DATA_CONTRIBUTION_GIFT_CREDITS,
+      label: '数据贡献开启赠送',
+    });
   });
 
   it('rejects non-positive bonus grants', async () => {

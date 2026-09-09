@@ -3963,6 +3963,38 @@ export function LibraryTab({
                     }
                     className="flex-1 overflow-y-auto p-3 space-y-1.5 mt-2"
                   >
+                    {filteredConversations.length === 0 ? (
+                      conversations.length === 0 ? (
+                        // Library truly empty: first-run guide — how capturing starts.
+                        <div className="rounded-xl border border-dashed border-border-subtle bg-bg-surface-card px-4 py-6">
+                          <p className="text-[14px] font-sans font-medium text-text-primary">
+                            {labels.emptyLibraryTitle ?? "Your library is empty"}
+                          </p>
+                          <p className="mt-1.5 text-[13px] font-sans leading-relaxed text-text-tertiary">
+                            {labels.emptyLibraryHint ??
+                              "Vesti gathers conversations captured on desktop and by the browser extension here, organized by source, project, and topic."}
+                          </p>
+                          <ul className="mt-3 space-y-1.5 text-[12px] font-sans leading-relaxed text-text-tertiary">
+                            <li>
+                              {"· "}
+                              {labels.emptyLibraryStepDesktop ??
+                                "Desktop: use Codex, Cursor, Kimi Code, or Claude Code as usual — Vesti captures those sessions automatically."}
+                            </li>
+                            <li>
+                              {"· "}
+                              {labels.emptyLibraryStepExtension ??
+                                "Browser: install and pair the VESTI extension to sync your web AI chats too."}
+                            </li>
+                          </ul>
+                        </div>
+                      ) : (
+                        // Library has data; the active filter/selection matches nothing.
+                        <div className="rounded-xl border border-dashed border-border-subtle bg-bg-surface-card px-4 py-6 text-[13px] font-sans text-text-tertiary">
+                          {labels.emptyFilterHint ??
+                            "No conversations under the current filter — try a different one."}
+                        </div>
+                      )
+                    ) : null}
                     {isListVirtualized && virtualTopSpacer > 0 ? (
                       <div
                         data-virtual-spacer

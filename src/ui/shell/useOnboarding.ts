@@ -8,6 +8,27 @@ import type { SupportedLocale } from "../i18n/locales";
 
 const ONBOARDING_PREF_KEY = "onboarding.completed";
 
+interface UiPrefsBridge {
+  setUiPreference(key: string, value: unknown): Promise<void>;
+}
+
+/**
+ * Persist onboarding completion. Both finishing AND skipping the wizard call
+ * this: a skipped tour must never reappear on the next launch, so the stored
+ * value is always true. Exported for node-environment tests (no DOM needed).
+ */
+export function persistOnboardingCompleted(
+  bridge: UiPrefsBridge | undefined = typeof window !== "undefined" ? window.vestiUi : undefined,
+): void {
+  try {
+    if (bridge) {
+      void bridge.setUiPreference(ONBOARDING_PREF_KEY, true);
+    } else {
+      localStorage.setItem(ONBOARDING_PREF_KEY, "true");
+    }
+  } catch { /* best-effort persistence */ }
+}
+
 interface OnboardingState {
   /** True when the wizard should be visible. */
   show: boolean;
@@ -61,22 +82,17 @@ export function useOnboarding(
     return undefined;
   }, [completed, syncReady]);
 
-  const persistComplete = useCallback((skipped: boolean) => {
+  // Skipping also completes onboarding: both paths persist completed=true so
+  // the wizard never reappears on the next launch.
+  const persistComplete = useCallback(() => {
     setShow(false);
     setCompleted(true);
-    const value = !skipped; // only mark "completed" if they went through it
-    try {
-      if (typeof window !== "undefined" && window.vestiUi) {
-        void window.vestiUi.setUiPreference(ONBOARDING_PREF_KEY, value);
-      } else {
-        localStorage.setItem(ONBOARDING_PREF_KEY, String(value));
-      }
-    } catch { /* best-effort persistence */ }
+    persistOnboardingCompleted();
   }, []);
 
   return {
     show,
-    complete: () => persistComplete(false),
-    skip: () => persistComplete(true),
+    complete: () => persistComplete(),
+    skip: () => persistComplete(),
   };
 }

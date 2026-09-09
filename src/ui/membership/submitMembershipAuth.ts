@@ -45,10 +45,10 @@ export interface MembershipSubmitOutcome {
 }
 
 /**
- * Register/login submit decision, extracted so the consent gate is testable
- * without a DOM: unregistered submissions require matching passwords AND an
- * explicit privacy-agreement consent, and register always passes
- * dataConsent=true once that gate has passed.
+ * Register/login submit decision, extracted so the flow is testable without a
+ * DOM: unregistered submissions require matching passwords; data contribution
+ * is optional, and the checkbox value flows through as the registration-time
+ * opt-in (`dataConsent`).
  */
 export async function submitMembershipAuth(
   input: MembershipSubmitInput,
@@ -58,13 +58,10 @@ export async function submitMembershipAuth(
   if (registering && input.password !== input.confirmPassword) {
     return { status: null, error: "password_mismatch", succeeded: false };
   }
-  if (registering && !input.consentChecked) {
-    return { status: null, error: "CONSENT_REQUIRED", succeeded: false };
-  }
   try {
     const credentials = { username: input.username.trim(), password: input.password };
     const result = registering
-      ? await api.register(credentials, true)
+      ? await api.register(credentials, input.consentChecked)
       : await api.login(credentials);
     return {
       status: result.status,

@@ -214,15 +214,9 @@ export class MembershipService {
           'A local Vesti account has already been registered.',
         );
       }
-      // Claiming the free beta membership requires explicit consent to the
-      // privacy & data-contribution agreement (docs/PRIVACY-DATA-CONTRIBUTION.md).
-      if (dataConsent !== true) {
-        throw new MembershipError(
-          'CONSENT_REQUIRED',
-          'Registering requires consenting to the privacy & data-contribution agreement.',
-        );
-      }
-
+      // Data contribution is opt-in and decoupled from registration: consent
+      // recorded only when the user explicitly checked the box; otherwise the
+      // account starts opted out and can enable it later in Settings.
       const username = this.validateUsername(credentials.username);
       this.validatePassword(credentials.password);
       const startedAt = this.now();
@@ -247,11 +241,17 @@ export class MembershipService {
         },
         session: this.createSession(startedAt),
         contributorId: randomUUID(),
-        dataContribution: {
-          enabled: true,
-          consentedAt: startedAt,
-          version: PRIVACY_AGREEMENT_VERSION,
-        },
+        // Opting in at registration counts as the first enable: the one-time
+        // credit gift is marked here and granted by the caller (main.ts)
+        // through the shared credit ledger.
+        dataContribution: dataConsent === true
+          ? {
+              enabled: true,
+              consentedAt: startedAt,
+              version: PRIVACY_AGREEMENT_VERSION,
+              giftGranted: true,
+            }
+          : { ...DATA_CONTRIBUTION_DISABLED },
       };
 
       try {
@@ -325,7 +325,9 @@ export class MembershipService {
 
   /**
    * Toggle RL data contribution (requires an authenticated account). Enabling
-   * records a fresh consent timestamp and the current agreement version;
+   * records a fresh consent timestamp and the current agreement version, and
+   * marks the one-time opt-in credit gift as granted (the caller grants the
+   * credits via the shared ledger — see shouldGrantDataContributionGift);
    * disabling keeps the last consent record as an audit trail but stops all
    * uploads.
    */
@@ -338,11 +340,19 @@ export class MembershipService {
       }
       const previous = account.dataContribution;
       account.dataContribution = enabled
-        ? { enabled: true, consentedAt: this.now(), version: PRIVACY_AGREEMENT_VERSION }
+        ? {
+            enabled: true,
+            consentedAt: this.now(),
+            version: PRIVACY_AGREEMENT_VERSION,
+            // First-ever enable marks the gift; later re-enables keep the flag.
+            giftGranted: true,
+          }
         : {
             enabled: false,
             consentedAt: previous?.consentedAt ?? null,
             version: previous?.version ?? null,
+            // The gift flag survives opt-out so off→on never re-grants.
+            ...(previous?.giftGranted === true ? { giftGranted: true } : {}),
           };
       try {
         await this.persist();
@@ -507,6 +517,21 @@ function normalizeUsername(value: string): string {
   return typeof value === 'string' ? value.trim().normalize('NFKC').toLocaleLowerCase('en-US') : '';
 }
 
+/**
+ * One-time opt-in credit gift decision. `before` is the effective consent
+ * state captured immediately before the enable mutation (null when no account
+ * existed, e.g. at registration); `after` is the state the mutation produced.
+ * True exactly once per account: on the first enable that finds no persisted
+ * giftGranted flag. The flag itself is persisted atomically with the enable
+ * (see setDataContribution/register), so off→on toggles never re-grant.
+ */
+export function shouldGrantDataContributionGift(
+  before: DataContributionState | null,
+  after: DataContributionState,
+): boolean {
+  return after.enabled === true && before?.giftGranted !== true;
+}
+
 /** Exported for CreditService's member-cycle anchoring (same month math). */
 export function addUtcCalendarMonths(timestamp: number, months: number): number {
   const source = new Date(timestamp);
@@ -577,7 +602,8 @@ function isValidDataContribution(value: unknown): value is DataContributionState
   if (!isRecord(value)) return false;
   return typeof value.enabled === 'boolean'
     && (value.consentedAt === null || isFiniteTimestamp(value.consentedAt))
-    && (value.version === null || typeof value.version === 'string');
+    && (value.version === null || typeof value.version === 'string')
+    && (value.giftGranted === undefined || typeof value.giftGranted === 'boolean');
 }
 
 function isFiniteTimestamp(value: unknown): value is number {

@@ -2008,6 +2008,13 @@ export interface DashboardLabels {
     openSidebar: string;
     emptyDetailTitle: string;
     emptyDetailHint: string;
+    /** First-run library empty state (no conversations at all) + the
+     * filter-matches-nothing hint. Optional so extension hosts still typecheck. */
+    emptyLibraryTitle?: string;
+    emptyLibraryHint?: string;
+    emptyLibraryStepDesktop?: string;
+    emptyLibraryStepExtension?: string;
+    emptyFilterHint?: string;
     summaryCard: {
       coreQuestion: string;
       thinkingJourney: string;
@@ -2036,6 +2043,10 @@ export interface DashboardLabels {
       notes: string;
       browser: string;
       wslBadge: string;
+      /** L0 project-brief entry + project hover-card fields. */
+      projectBrief?: string;
+      activeFiles?: string;
+      openQuestions?: string;
     };
     // Organizer assistant (P2b)
     organize?: {

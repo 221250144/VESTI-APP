@@ -146,7 +146,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     bridgeDisconnect: "断开",
     bridgeDisconnectConfirm: "确定断开该客户端吗?扩展需要重新配对才能继续同步。",
     dataTitle: "内容数据与隐私",
-    dataDesc: "会话数据库、标准化文本和 Agent 结果保存在这里。程序安装目录与内容数据目录相互独立。",
+    dataDesc: "会话数据库、标准化文本和 Agent 结果保存在这里。程序安装目录与内容数据目录相互独立。切换数据目录不会迁移已有数据，原有内容仍保留在旧目录中。",
     dataDirectory: "数据目录",
     chooseFolder: "选择文件夹",
     activeDir: "当前正在使用:",
@@ -161,6 +161,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     llmDesc: "配置方式与浏览器插件一致:可使用 Vesti Demo Proxy,或连接 OpenAI 兼容接口并使用自己的 API Key。",
     demoProxy: "Demo Proxy",
     demoProxyDesc: "开箱即用，模型名称原样透传",
+    demoProxyPrivacyNote: "请求经 Vesti 网关转发至第三方模型服务，对话内容会离开本机。",
     byok: "自定义 / BYOK",
     byokDesc: "OpenAI 兼容 API",
     baseUrl: "Base URL",
@@ -168,6 +169,8 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     temperature: "Temperature",
     maxTokens: "最大输出 Token",
     maxTokensHint: "0 = 不限（按模型默认上限），长文档不会被截断",
+    embeddingModel: "嵌入模型 (Embedding)",
+    embeddingModelHint: "用于语义索引与召回;留空使用默认 text-embedding-v1。请求发往 Base URL 的 /embeddings 端点。",
     apiKeySaved: "(已安全保存,留空则不修改)",
     deleteApiKey: "删除已保存的 API Key",
     apiKeyNote: "API Key 由操作系统安全存储加密,前端页面不会读取已保存的明文。",
@@ -276,6 +279,8 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     customOwlFailed: "生成失败，请稍后再试。",
     aboutTitle: "关于 Vesti",
     aboutDesc: "本地优先的 AI 会话采集、归档与洞察工具。当前支持 Codex、Cursor、Kimi Code 和 Claude Code。",
+    aboutWebsite: "访问官网",
+    aboutPrivacy: "隐私政策",
     settingsDir: "设置目录",
     contentDir: "内容目录",
     openSettingsDir: "打开设置目录",
@@ -357,7 +362,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     bridgeDisconnect: "Disconnect",
     bridgeDisconnectConfirm: "Disconnect this client? The extension must pair again to keep syncing.",
     dataTitle: "Data & Privacy",
-    dataDesc: "The session database, normalized text, and agent results live here. The install directory and content directory are independent.",
+    dataDesc: "The session database, normalized text, and agent results live here. The install directory and content directory are independent. Switching the data directory does not migrate existing data — everything stays in the old directory.",
     dataDirectory: "Data directory",
     chooseFolder: "Choose folder",
     activeDir: "Currently in use:",
@@ -372,6 +377,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     llmDesc: "Same as the browser extension: use the Vesti Demo Proxy, or bring your own OpenAI-compatible API key.",
     demoProxy: "Demo Proxy",
     demoProxyDesc: "Ready to use; model names pass through unchanged",
+    demoProxyPrivacyNote: "Requests are relayed through the Vesti gateway to third-party model providers — conversation content leaves this device.",
     byok: "Custom / BYOK",
     byokDesc: "OpenAI-compatible API",
     baseUrl: "Base URL",
@@ -379,6 +385,8 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     temperature: "Temperature",
     maxTokens: "Max output tokens",
     maxTokensHint: "0 = uncapped (model default); long documents won't be truncated",
+    embeddingModel: "Embedding model",
+    embeddingModelHint: "Used for semantic indexing and recall; leave empty for the default text-embedding-v1. Requests go to the Base URL's /embeddings endpoint.",
     apiKeySaved: "(saved securely; leave blank to keep)",
     deleteApiKey: "Delete the saved API Key",
     apiKeyNote: "The API key is encrypted by the OS secure storage; the page never reads it back.",
@@ -487,6 +495,8 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     customOwlFailed: "Generation failed. Please try again later.",
     aboutTitle: "About Vesti",
     aboutDesc: "A local-first AI conversation capture, archive, and insight tool. Currently supports Codex, Cursor, Kimi Code, and Claude Code.",
+    aboutWebsite: "Visit website",
+    aboutPrivacy: "Privacy policy",
     settingsDir: "Settings directory",
     contentDir: "Content directory",
     openSettingsDir: "Open settings directory",
@@ -562,7 +572,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     bridgeDisconnect: "切断",
     bridgeDisconnectConfirm: "このクライアントを切断しますか？再度同期するには拡張機能のペアリングが必要です。",
     dataTitle: "データとプライバシー",
-    dataDesc: "会話データベース、正規化テキスト、Agent の結果を保存する場所です。アプリのインストール先とは独立しています。",
+    dataDesc: "会話データベース、正規化テキスト、Agent の結果を保存する場所です。アプリのインストール先とは独立しています。保存先を切り替えても既存データは移行されず、元のフォルダーにそのまま残ります。",
     dataDirectory: "データ保存先",
     chooseFolder: "フォルダーを選択",
     activeDir: "現在使用中:",
@@ -577,6 +587,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     llmDesc: "ブラウザー拡張機能と同様に、Vesti Demo Proxy または独自の OpenAI 互換 API キーを使用できます。",
     demoProxy: "Demo Proxy",
     demoProxyDesc: "すぐに利用可能。モデル名はそのまま送信",
+    demoProxyPrivacyNote: "リクエストは Vesti ゲートウェイ経由で第三者のモデルサービスに転送され、会話内容はこの端末の外部に送信されます。",
     byok: "カスタム / BYOK",
     byokDesc: "OpenAI 互換 API",
     baseUrl: "Base URL",
@@ -584,6 +595,8 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     temperature: "Temperature",
     maxTokens: "最大出力 Token",
     maxTokensHint: "0 = 無制限（モデルのデフォルト上限）、長文が途中で切れません",
+    embeddingModel: "埋め込みモデル (Embedding)",
+    embeddingModelHint: "セマンティック索引と召回に使用します。空欄ならデフォルトの text-embedding-v1。リクエストは Base URL の /embeddings エンドポイントに送られます。",
     apiKeySaved: "（安全に保存済み。空欄なら維持）",
     deleteApiKey: "保存済み API キーを削除",
     apiKeyNote: "API キーは OS の安全なストレージで暗号化され、この画面から平文を読み取ることはありません。",
@@ -680,6 +693,8 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     customOwlFailed: "生成に失敗しました。後でもう一度お試しください。",
     aboutTitle: "Vesti について",
     aboutDesc: "ローカル優先の AI 会話収集・整理・インサイトツールです。Codex、Cursor、Kimi Code、Claude Code に対応しています。",
+    aboutWebsite: "公式サイト",
+    aboutPrivacy: "プライバシーポリシー",
     settingsDir: "設定フォルダー",
     contentDir: "コンテンツフォルダー",
     openSettingsDir: "設定フォルダーを開く",
@@ -755,7 +770,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     bridgeDisconnect: "연결 해제",
     bridgeDisconnectConfirm: "이 클라이언트의 연결을 해제할까요? 계속 동기화하려면 확장 프로그램을 다시 페어링해야 합니다.",
     dataTitle: "데이터 및 개인정보",
-    dataDesc: "대화 데이터베이스, 정규화된 텍스트와 Agent 결과가 저장되는 위치입니다. 앱 설치 위치와 콘텐츠 저장 위치는 서로 독립적입니다.",
+    dataDesc: "대화 데이터베이스, 정규화된 텍스트와 Agent 결과가 저장되는 위치입니다. 앱 설치 위치와 콘텐츠 저장 위치는 서로 독립적입니다. 저장 위치를 변경할 경우 기존 데이터는 이전되지 않고 원래 폴더에 그대로 남습니다.",
     dataDirectory: "데이터 폴더",
     chooseFolder: "폴더 선택",
     activeDir: "현재 사용 중:",
@@ -770,6 +785,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     llmDesc: "브라우저 확장 프로그램과 동일하게 Vesti Demo Proxy를 사용하거나 OpenAI 호환 API 키를 직접 연결할 수 있습니다.",
     demoProxy: "Demo Proxy",
     demoProxyDesc: "바로 사용 가능, 모델 이름을 그대로 전달",
+    demoProxyPrivacyNote: "요청은 Vesti 게이트웨이를 통해 타사 모델 서비스로 전달되며, 대화 내용이 이 기기 밖으로 전송됩니다.",
     byok: "사용자 지정 / BYOK",
     byokDesc: "OpenAI 호환 API",
     baseUrl: "Base URL",
@@ -777,6 +793,8 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     temperature: "Temperature",
     maxTokens: "최대 출력 토큰",
     maxTokensHint: "0 = 제한 없음(모델 기본 상한) — 긴 문서가 잘리지 않습니다",
+    embeddingModel: "임베딩 모델",
+    embeddingModelHint: "시맨틱 인덱싱과 검색에 사용됩니다. 비워 두면 기본값 text-embedding-v1이 적용됩니다. 요청은 Base URL의 /embeddings 엔드포인트로 전송됩니다.",
     apiKeySaved: "(안전하게 저장됨, 비워 두면 유지)",
     deleteApiKey: "저장된 API 키 삭제",
     apiKeyNote: "API 키는 운영체제의 보안 저장소로 암호화되며 이 화면에서는 평문을 다시 읽지 않습니다.",
@@ -873,6 +891,8 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     customOwlFailed: "생성에 실패했습니다. 잠시 후 다시 시도해 주세요.",
     aboutTitle: "Vesti 정보",
     aboutDesc: "로컬 우선 AI 대화 수집, 보관 및 인사이트 도구입니다. Codex, Cursor, Kimi Code와 Claude Code를 지원합니다.",
+    aboutWebsite: "공식 웹사이트",
+    aboutPrivacy: "개인정보 처리방침",
     settingsDir: "설정 폴더",
     contentDir: "콘텐츠 폴더",
     openSettingsDir: "설정 폴더 열기",
@@ -917,6 +937,7 @@ function toDraft(settings: AppSettingsView): SettingsDraft {
       modelId: settings.llm.modelId,
       temperature: settings.llm.temperature,
       maxTokens: settings.llm.maxTokens,
+      embeddingModel: settings.llm.embeddingModel,
       apiKey: "",
       clearApiKey: false,
     },
@@ -2196,6 +2217,11 @@ export function SettingsPage({
               </button>
             ))}
           </div>
+          {draft.llm.mode === "demo_proxy" && (
+            <p className="mb-4 -mt-1 text-[11px] font-sans leading-5 text-text-tertiary">
+              {copy.demoProxyPrivacyNote}
+            </p>
+          )}
           <div className="grid gap-4 md:grid-cols-2">
             {draft.llm.mode === "custom_byok" && (
               <Field label={copy.baseUrl} wide>
@@ -2217,6 +2243,19 @@ export function SettingsPage({
                 }
               />
             </Field>
+            {draft.llm.mode === "custom_byok" && (
+              <Field label={copy.embeddingModel}>
+                <input
+                  className={inputClass}
+                  value={draft.llm.embeddingModel ?? ""}
+                  placeholder="text-embedding-v1"
+                  onChange={(event) =>
+                    setDraft({ ...draft, llm: { ...draft.llm, embeddingModel: event.target.value } })
+                  }
+                />
+                <p className="mt-1 text-[11px] font-sans text-text-tertiary">{copy.embeddingModelHint}</p>
+              </Field>
+            )}
             <Field label={copy.temperature}>
               <input
                 className={inputClass}
@@ -2605,6 +2644,12 @@ export function SettingsPage({
             </div>
           </dl>
           <div className="flex flex-wrap gap-2">
+            <button type="button" className={buttonSecondary} onClick={() => void window.vesti.openExternal("https://vesti.world")}>
+              {copy.aboutWebsite}
+            </button>
+            <button type="button" className={buttonSecondary} onClick={() => void window.vesti.openExternal("https://vesti.world/privacy")}>
+              {copy.aboutPrivacy}
+            </button>
             <button type="button" className={buttonSecondary} onClick={() => void window.vesti.openSettingsDirectory()}>
               {copy.openSettingsDir}
             </button>

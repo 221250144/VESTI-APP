@@ -3,6 +3,13 @@ import { net } from 'electron';
 import type { EmbeddingStatus } from '../shared/contracts';
 import type { SettingsService } from './settingsService';
 import { fetchDemoProxy, type ProxyAttemptMetadata } from './proxyFetch';
+import {
+  embeddingStrings,
+  formatMainString,
+  llmStrings,
+  resolveMainLocale,
+  type MainEmbeddingStrings,
+} from './mainStrings';
 
 const EMBEDDING_BATCH_SIZE = 32;
 const EMBEDDING_TIMEOUT_MS = 90_000;
@@ -81,7 +88,14 @@ export class EmbeddingService {
   constructor(
     private readonly settings: SettingsService,
     private readonly credits?: EmbeddingCreditMeter,
+    /** UI-language source (ui-prefs `language`) for user-facing status/error
+     * messages; defaults to Chinese, the legacy factory language. */
+    private readonly uiLocale: () => unknown = () => 'zh',
   ) {}
+
+  private strings(): MainEmbeddingStrings {
+    return embeddingStrings(resolveMainLocale(this.uiLocale()));
+  }
 
   invalidateStatus(): void {
     this.status = { available: true };
@@ -137,10 +151,11 @@ export class EmbeddingService {
   }
 
   private async embedQueued(texts: string[]): Promise<EmbeddingBatchResult> {
+    const strings = this.strings();
     if (texts.length === 0) {
-      throw new EmbeddingRequestError('embedding 输入不能为空');
+      throw new EmbeddingRequestError(strings.emptyInput);
     }
-    if (!this.status.available) throw new Error(this.status.reason ?? 'Embedding 服务不可用');
+    if (!this.status.available) throw new Error(this.status.reason ?? strings.unavailable);
     try {
       // Cache fast path (breaker closed only — the availability check above
       // has already thrown when it is open). Served only when every text hits
@@ -160,7 +175,7 @@ export class EmbeddingService {
       for (let start = 0; start < texts.length; start += EMBEDDING_BATCH_SIZE) {
         const batch = await this.embedBatch(texts.slice(start, start + EMBEDDING_BATCH_SIZE));
         if (metadata && metadata.version !== batch.metadata.version) {
-          throw new EmbeddingRequestError('embedding 批次使用了不同模型，已拒绝混合索引');
+          throw new EmbeddingRequestError(strings.mixedModels);
         }
         metadata = batch.metadata;
         vectors.push(...batch.vectors);
@@ -177,7 +192,7 @@ export class EmbeddingService {
     } catch (error) {
       this.status = {
         available: false,
-        reason: error instanceof Error ? error.message : 'embedding 请求失败',
+        reason: error instanceof Error ? error.message : strings.requestFailed,
       };
       this.probed = true;
       throw error;
@@ -204,9 +219,10 @@ export class EmbeddingService {
   }
 
   private async embedBatch(texts: string[]): Promise<EmbeddingBatchResult> {
+    const strings = this.strings();
     const llm = this.settings.getRuntimeLlm();
     if (llm.mode === 'custom_byok' && !llm.apiKey) {
-      throw new Error('请先在设置中填写 API Key');
+      throw new Error(llmStrings(resolveMainLocale(this.uiLocale())).apiKeyMissing);
     }
 
     let response: Response;
@@ -242,7 +258,11 @@ export class EmbeddingService {
       }
     } catch (error) {
       throw new EmbeddingRequestError(
-        `无法连接模型服务：${error instanceof Error ? error.message : '未知网络错误'}`,
+        formatMainString(strings.networkError, {
+          reason: error instanceof Error
+            ? error.message
+            : llmStrings(resolveMainLocale(this.uiLocale())).unknownNetworkReason,
+        }),
       );
     }
 
@@ -258,7 +278,7 @@ export class EmbeddingService {
         || (typeof payload.error === 'object' ? payload.error?.requestId : undefined)
         || proxyMetadata?.requestId;
       throw new EmbeddingRequestError(
-        detail || `embedding 请求失败（HTTP ${response.status}）`,
+        detail || formatMainString(strings.requestFailedHttp, { status: String(response.status) }),
         {
           status: response.status,
           code: typeof payload.error === 'object' ? payload.error?.code : undefined,
@@ -271,19 +291,19 @@ export class EmbeddingService {
       );
     }
     if (!Array.isArray(payload.data) || payload.data.length !== texts.length) {
-      throw new EmbeddingRequestError('embedding 响应格式异常');
+      throw new EmbeddingRequestError(strings.badResponse);
     }
 
     const ordered = [...payload.data].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
     const vectors = ordered.map(item => {
       if (!Array.isArray(item.embedding) || !item.embedding.every(value => typeof value === 'number')) {
-        throw new EmbeddingRequestError('embedding 响应格式异常');
+        throw new EmbeddingRequestError(strings.badResponse);
       }
       return Float32Array.from(item.embedding as number[]);
     });
     const dimensions = vectors[0]?.length ?? 0;
     if (!dimensions || vectors.some(vector => vector.length !== dimensions)) {
-      throw new EmbeddingRequestError('embedding 向量维度不一致');
+      throw new EmbeddingRequestError(strings.mixedDimensions);
     }
     const provider = response.headers.get('x-proxy-provider-used')
       || proxyMetadata?.providerUsed

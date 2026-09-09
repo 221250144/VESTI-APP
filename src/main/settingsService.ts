@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type {
+  AgentOutputLanguage,
   AgentSettings,
   AppSettingsUpdate,
   AppSettingsView,
@@ -21,6 +22,7 @@ import {
   normalizeMaxTokens,
   PRIMARY_CAPTURE_PLATFORMS,
 } from './settingsMigration';
+import { outputLanguageForLocale, resolveMainLocale, settingsStrings } from './mainStrings';
 
 // Official gateway: keys stay server-side, model ids pass through with no
 // whitelist; the previous deployment remains the transport-level fallback.
@@ -122,9 +124,23 @@ export class SettingsService {
   constructor(
     private readonly userDataDirectory: string,
     private readonly appVersion: string,
+    /** UI-language source (ui-prefs `language`) for user-facing validation
+     * messages and the locale-derived default agent output language; defaults
+     * to Chinese, the legacy factory language. */
+    private readonly uiLocale: () => unknown = () => 'zh',
   ) {
     this.filePath = path.join(userDataDirectory, 'settings.json');
     this.settings = this.defaults();
+  }
+
+  private strings() {
+    return settingsStrings(resolveMainLocale(this.uiLocale()));
+  }
+
+  /** Default agent output language: follows the UI language unless the user
+   * picked one explicitly. */
+  private defaultOutputLanguage(): AgentOutputLanguage {
+    return outputLanguageForLocale(resolveMainLocale(this.uiLocale()));
   }
 
   async initialize(): Promise<void> {
@@ -163,6 +179,32 @@ export class SettingsService {
 
   getRuntimeAgent(): RuntimeAgentSettings {
     return { ...this.settings.agent };
+  }
+
+  /**
+   * Default-follows-UI sync for the agent output language, called by main
+   * when the ui-prefs `language` changes. The stored value only tracks the
+   * new language when the user never picked a different one explicitly:
+   * with a previous UI locale that means the stored value still equals that
+   * locale's mapping; without one (first-ever pref write) it means the value
+   * is still a factory default ('zh-CN' legacy builds, 'en-US' otherwise).
+   * Returns true when the setting was updated and persisted.
+   */
+  async followAgentOutputLanguage(
+    previous: AgentOutputLanguage | null,
+    next: AgentOutputLanguage,
+  ): Promise<boolean> {
+    const current = this.settings.agent.outputLanguage;
+    const follows = previous
+      ? current === previous
+      : current === 'zh-CN' || current === 'en-US';
+    if (!follows || current === next) return false;
+    this.settings = {
+      ...this.settings,
+      agent: { ...this.settings.agent, outputLanguage: next },
+    };
+    await this.persist();
+    return true;
   }
 
   getBridgePort(): number | undefined {
@@ -218,6 +260,8 @@ export class SettingsService {
         temperature: this.settings.llm.temperature,
         maxTokens: this.settings.llm.maxTokens,
         apiKeyConfigured: Boolean(this.settings.llm.encryptedApiKey),
+        // Effective embedding model (BYOK-editable in the settings UI).
+        embeddingModel: this.settings.llm.embeddingModel?.trim() || DEFAULT_EMBEDDING_MODEL,
       },
       upstream: {
         obsidianVaultPath: this.settings.upstream.obsidianVaultPath,
@@ -274,7 +318,7 @@ export class SettingsService {
     let apiKey = '';
     if (this.settings.llm.encryptedApiKey) {
       if (!safeStorage.isEncryptionAvailable()) {
-        throw new Error('系统安全存储当前不可用，无法读取 API Key');
+        throw new Error(this.strings().safeStorageReadApiKey);
       }
       apiKey = safeStorage.decryptString(Buffer.from(this.settings.llm.encryptedApiKey, 'base64'));
     }
@@ -294,6 +338,7 @@ export class SettingsService {
   }
 
   async save(update: AppSettingsUpdate, activeDataDirectory: string): Promise<SettingsSaveResult> {
+    const strings = this.strings();
     const requestedDirectory = update.dataDirectory.trim();
     if (!requestedDirectory) throw new Error('数据目录不能为空');
     const dataDirectory = path.resolve(requestedDirectory);
@@ -302,20 +347,20 @@ export class SettingsService {
     const mode = update.llm.mode;
     const requestedCustomBaseUrl = update.llm.baseUrl.trim();
     if (mode === 'custom_byok' && !requestedCustomBaseUrl) {
-      throw new Error('BYOK Base URL cannot be empty');
+      throw new Error(strings.byokBaseUrlRequired);
     }
     const customBaseUrl = mode === 'custom_byok'
       ? this.normalizeUrl(requestedCustomBaseUrl)
       : this.settings.llm.customBaseUrl;
     const modelId = update.llm.modelId.trim();
-    if (!modelId) throw new Error('模型名称不能为空');
+    if (!modelId) throw new Error(strings.modelIdRequired);
 
     let encryptedApiKey = this.settings.llm.encryptedApiKey;
     if (update.llm.clearApiKey) encryptedApiKey = undefined;
     const apiKey = update.llm.apiKey?.trim();
     if (apiKey) {
       if (!safeStorage.isEncryptionAvailable()) {
-        throw new Error('系统安全存储不可用，Vesti 不会以明文保存 API Key');
+        throw new Error(strings.safeStorageSaveApiKey);
       }
       encryptedApiKey = safeStorage.encryptString(apiKey).toString('base64');
     }
@@ -330,7 +375,7 @@ export class SettingsService {
       : update.network.proxyUrl.trim();
     const outputLanguage = ['zh-CN', 'en-US', 'ja-JP', 'ko-KR'].includes(update.agent.outputLanguage)
       ? update.agent.outputLanguage
-      : 'zh-CN';
+      : this.defaultOutputLanguage();
 
     const obsidianVaultPath = update.upstream.obsidianVaultPath.trim();
     if (obsidianVaultPath && !path.isAbsolute(obsidianVaultPath)) {
@@ -373,8 +418,11 @@ export class SettingsService {
         temperature: this.numberInRange(update.llm.temperature, 0, 2, 0.3),
         maxTokens: Math.round(this.numberInRange(update.llm.maxTokens, 0, 16_384, 0)),
         encryptedApiKey,
-        // Not editable from the settings UI yet; keep any value present in settings.json.
-        embeddingModel: this.settings.llm.embeddingModel,
+        // BYOK-editable embedding model: an explicit string is stored (empty
+        // resets to the default); an absent field preserves the stored value.
+        embeddingModel: typeof update.llm.embeddingModel === 'string'
+          ? update.llm.embeddingModel.trim() || undefined
+          : this.settings.llm.embeddingModel,
       },
       upstream: {
         obsidianVaultPath: obsidianVaultPath ? path.resolve(obsidianVaultPath) : '',
@@ -416,7 +464,7 @@ export class SettingsService {
         proxyUrl: '',
       },
       agent: {
-        outputLanguage: 'zh-CN',
+        outputLanguage: this.defaultOutputLanguage(),
         includeThinking: true,
         includeToolDetails: true,
         customInstructions: '',
@@ -495,7 +543,7 @@ export class SettingsService {
       agent: {
         outputLanguage: ['zh-CN', 'en-US', 'ja-JP', 'ko-KR'].includes(agent.outputLanguage)
           ? agent.outputLanguage
-          : 'zh-CN',
+          : this.defaultOutputLanguage(),
         includeThinking: typeof agent.includeThinking === 'boolean' ? agent.includeThinking : defaults.agent.includeThinking,
         includeToolDetails: typeof agent.includeToolDetails === 'boolean' ? agent.includeToolDetails : defaults.agent.includeToolDetails,
         customInstructions: typeof agent.customInstructions === 'string' ? agent.customInstructions.trim().slice(0, 4_000) : '',
@@ -612,7 +660,7 @@ export class SettingsService {
 
   private normalizeUrl(value: string): string {
     const url = new URL(value.trim());
-    if (!['https:', 'http:'].includes(url.protocol)) throw new Error('模型地址必须使用 HTTP 或 HTTPS');
+    if (!['https:', 'http:'].includes(url.protocol)) throw new Error(this.strings().modelUrlProtocol);
     return url.toString().replace(/\/$/, '');
   }
 

@@ -128,10 +128,10 @@ const STEP_BODIES = {
   explore_en: "The Learn page turns your conversations into a personal knowledge map — domains, depth distribution, glossary, and open questions. The Roundtable convenes a panel of AI personas to debate your questions.",
   explore_ja: "学習ページは会話を個人の知識マップに変換します—ドメイン、深さの分布、用語集、未解決の質問。円卓会議はAIパネルを招集して質問を議論します。",
   explore_ko: "학습 페이지는 대화를 개인 지식 맵으로 변환합니다—도메인, 깊이 분포, 용어집, 미해결 질문. 원탁회의는 AI 패널을 소집하여 질문을 토론합니다.",
-  settings_zh: "在设置中配置 AI 模型、语言偏好、自动分类策略和日报生成。支持本地和云端两种模式，数据完全由你掌控。",
-  settings_en: "Configure AI models, language preferences, auto-classification, and daily reports in Settings. Supports both local and cloud modes — your data stays under your control.",
-  settings_ja: "設定でAIモデル、言語設定、自動分類、日次レポートを構成します。ローカルモードとクラウドモードの両方をサポートし、データはあなたの管理下にあります。",
-  settings_ko: "설정에서 AI 모델, 언어 기본 설정, 자동 분류, 일일 보고서를 구성합니다. 로컬 및 클라우드 모드를 모두 지원하며 데이터는 사용자가 제어합니다.",
+  settings_zh: "在设置中配置 AI 模型、语言偏好、自动分类策略和日报生成。默认「开箱即用」模式下，对话文本会经 Vesti 网关转发至第三方模型服务，用于摘要、搜索与日志等功能；配置自带密钥（BYOK）则发送到你自己的接口。你可以随时在设置中切换。",
+  settings_en: "Configure AI models, language preferences, auto-classification, and daily reports in Settings. In the default ready-to-use mode, conversation text is sent through the Vesti gateway to third-party LLM providers for digest, search, and journal features; with your own key (BYOK) requests go to your own endpoint instead. You can switch anytime in Settings.",
+  settings_ja: "設定でAIモデル、言語設定、自動分類、日次レポートを構成します。デフォルトの「すぐに使える」モードでは、要約・検索・日記などの機能のために会話テキストが Vesti ゲートウェイ経由で第三者の LLM プロバイダーに送信されます。自分のキー（BYOK）を設定した場合は自分のエンドポイントに送信されます。設定でいつでも切り替えられます。",
+  settings_ko: "설정에서 AI 모델, 언어 기본 설정, 자동 분류, 일일 보고서를 구성합니다. 기본 「바로 사용」 모드에서는 요약, 검색, 일지 등의 기능을 위해 대화 텍스트가 Vesti 게이트웨이를 통해 타사 LLM 제공업체로 전송됩니다. 자체 키(BYOK)를 구성하면 사용자의 엔드포인트로 전송됩니다. 설정에서 언제든 전환할 수 있습니다.",
 };
 
 const STEP_FEATURES = {

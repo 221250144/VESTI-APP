@@ -53,20 +53,25 @@ function apiFixture(result?: Partial<Extract<MembershipActionResult, { ok: true 
 }
 
 describe("submitMembershipAuth", () => {
-  it("blocks registration when the privacy agreement is not accepted", async () => {
+  it("registers without consent when the optional contribution box is unchecked", async () => {
     const api = apiFixture();
     const outcome = await submitMembershipAuth(
       inputFixture({ consentChecked: false }),
       api,
     );
-    expect(outcome.error).toBe("CONSENT_REQUIRED");
-    expect(outcome.succeeded).toBe(false);
-    expect(outcome.status).toBeNull();
-    expect(api.register).not.toHaveBeenCalled();
+    // Data contribution is optional: an unchecked box no longer blocks
+    // registration — it just flows through as dataConsent=false.
+    expect(api.register).toHaveBeenCalledWith(
+      { username: "tester", password: "password123" },
+      false,
+    );
     expect(api.login).not.toHaveBeenCalled();
+    expect(outcome.succeeded).toBe(true);
+    expect(outcome.error).toBeNull();
+    expect(outcome.status?.authenticated).toBe(true);
   });
 
-  it("registers with dataConsent=true once the agreement is accepted", async () => {
+  it("registers with dataConsent=true when the contribution box is checked", async () => {
     const api = apiFixture();
     const outcome = await submitMembershipAuth(inputFixture(), api);
     expect(api.register).toHaveBeenCalledWith(
@@ -89,18 +94,18 @@ describe("submitMembershipAuth", () => {
     expect(api.register).not.toHaveBeenCalled();
   });
 
-  it("surfaces a CONSENT_REQUIRED rejection from the service", async () => {
+  it("surfaces a rejection from the service", async () => {
     const status = statusFixture();
     const api: MembershipSubmitApi = {
       register: vi.fn(async () => ({
         ok: false as const,
         status,
-        error: "CONSENT_REQUIRED" as const,
+        error: "ALREADY_REGISTERED" as const,
       })),
       login: vi.fn(),
     };
     const outcome = await submitMembershipAuth(inputFixture(), api);
-    expect(outcome.error).toBe("CONSENT_REQUIRED");
+    expect(outcome.error).toBe("ALREADY_REGISTERED");
     expect(outcome.succeeded).toBe(false);
     expect(outcome.status).toEqual(status);
   });
@@ -180,5 +185,27 @@ describe("formatConsentDay", () => {
   it("formats a timestamp as local YYYY-MM-DD", () => {
     expect(formatConsentDay(new Date(2026, 7, 14, 9, 30).getTime())).toBe("2026-08-14");
     expect(formatConsentDay(new Date(2026, 0, 5, 0, 1).getTime())).toBe("2026-01-05");
+  });
+});
+
+describe("optional-but-rewarded contribution copy", () => {
+  it("frames consent as optional and mentions the one-time 2,000-credit gift in every locale", () => {
+    for (const locale of ["zh", "en", "ja", "ko"] as const) {
+      const copy = MEMBERSHIP_COPY[locale];
+      // Registration checkbox, agreement intro and settings card all carry
+      // the optional framing plus the gift amount.
+      const consentLine = `${copy.consentPrefix}${copy.privacyAgreementName}${copy.consentSuffix}`;
+      expect(consentLine).toContain("2,000");
+      expect(copy.privacyIntro).toContain("2,000");
+      expect(copy.dataContributionHint).toContain("2,000");
+      expect(copy.dataContributionDescription).toContain("2,000");
+    }
+  });
+
+  it("no longer frames contribution consent as mandatory for registration", () => {
+    // zh previously read "不同意则无法领取免费会员"; the en/ja/ko variants
+    // carried the same claim. The framing must be gone in every locale.
+    expect(MEMBERSHIP_COPY.zh.privacyIntro).not.toContain("不同意则无法");
+    expect(MEMBERSHIP_COPY.en.privacyIntro).not.toContain("cannot be claimed");
   });
 });

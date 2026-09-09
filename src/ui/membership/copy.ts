@@ -217,14 +217,14 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
         body: "Vesti 目前由一个小团队自筹运转。如果你愿意推我们一把，可以在「设置 → 会员与账号 → 支持众筹」选择暖心、同行、共创三档方案：付款后我们会发放一次性「众筹码」，在 App 内兑换后积分立即到账。所有众筹款项只用于服务器、模型额度，以及让更多人用上 Vesti；众筹完全自愿，不参与也不会影响你的任何既有权益。",
       },
     ],
-    consentPrefix: "我已阅读并同意",
+    consentPrefix: "（可选）我已阅读并同意",
     privacyAgreementName: "《隐私说明与数据贡献协议》",
-    consentSuffix: "",
+    consentSuffix: "，并开启数据贡献；首次开启赠送 2,000 积分",
     privacyEyebrow: "PRIVACY & DATA CONTRIBUTION",
     privacyTitle: "隐私说明与数据贡献协议",
     privacyVersion: "版本 v{version}",
     privacyIntro:
-      "在你注册并领取免费会员之前，请仔细阅读本协议。勾选同意即表示你已阅读并接受本协议；不同意则无法领取免费会员，但你仍可在阅读后随时改变主意。",
+      "数据贡献完全自愿：不勾选也能注册并领取免费会员。勾选开启即表示你已阅读并接受本协议，首次开启赠送 2,000 积分；之后可随时在「设置 → 会员与账号 → 数据贡献」关闭，关闭后立即停止上传，不影响会员权益。",
     privacySections: [
       {
         heading: "我们收集什么",
@@ -254,9 +254,9 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     privacyReadButton: "我已阅读",
     privacyAgreeButton: "我已阅读并同意",
     dataContributionTitle: "数据贡献",
-    dataContributionDescription: "同意《隐私说明与数据贡献协议》后，本地 AI 编程工具的对话会匿名上传，用于模型训练与产品改进。",
+    dataContributionDescription: "同意《隐私说明与数据贡献协议》后，本地 AI 编程工具的对话会匿名上传，用于模型训练与产品改进。默认关闭，首次开启赠送 2,000 积分，可随时关闭。",
     dataContributionHint:
-      "仅上传本地 AI 编程工具的对话；浏览器对话永不上传；含个人信息的会话自动排除。",
+      "仅上传本地 AI 编程工具的对话；浏览器对话永不上传；含个人信息的会话自动排除。首次开启一次性赠送 2,000 积分。",
     dataContributionViewAgreement: "查看完整协议",
     dataContributionConsentedAt: "同意于 {date}",
     dataContributionEnabled: "已开启",
@@ -392,14 +392,14 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
         body: "Vesti is currently self-funded by a small team. If you'd like to give us a push, see Settings → Membership & account → Support the crowdfund for three tiers (Warmth, Companion, Co-creator): after payment we issue a one-time supporter code, and redeeming it in the app adds credits immediately. All proceeds go to servers, model quota, and bringing Vesti to more people; contributing is entirely voluntary and never affects your existing benefits.",
       },
     ],
-    consentPrefix: "I have read and agree to the ",
+    consentPrefix: "(Optional) I have read and agree to the ",
     privacyAgreementName: "Privacy & Data Contribution Agreement",
-    consentSuffix: "",
+    consentSuffix: " and enable data contribution — the first enable grants 2,000 credits",
     privacyEyebrow: "PRIVACY & DATA CONTRIBUTION",
     privacyTitle: "Privacy & Data Contribution Agreement",
     privacyVersion: "Version v{version}",
     privacyIntro:
-      "Please read this agreement carefully before registering and claiming your free membership. Checking the box means you have read and accepted it; without consent the free membership cannot be claimed, but you can always change your mind after reading.",
+      "Data contribution is entirely voluntary: you can register and claim your free membership without enabling it. Enabling it means you have read and accepted this agreement, and the first enable grants 2,000 credits; you can turn it off anytime under Settings → Membership & account → Data contribution, which stops all uploads immediately without affecting your membership.",
     privacySections: [
       {
         heading: "What we collect",
@@ -430,9 +430,9 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     privacyAgreeButton: "I have read and agree",
     dataContributionTitle: "Data contribution",
     dataContributionDescription:
-      "With the Privacy & Data Contribution Agreement accepted, conversations from local AI coding tools are uploaded anonymously for model training and product improvement.",
+      "With the Privacy & Data Contribution Agreement accepted, conversations from local AI coding tools are uploaded anonymously for model training and product improvement. Off by default; the first enable grants 2,000 credits, and you can revoke it anytime.",
     dataContributionHint:
-      "Only conversations from local AI coding tools are uploaded; browser conversations are never uploaded; sessions containing personal information are automatically excluded.",
+      "Only conversations from local AI coding tools are uploaded; browser conversations are never uploaded; sessions containing personal information are automatically excluded. The first enable grants a one-time 2,000-credit gift.",
     dataContributionViewAgreement: "Read the full agreement",
     dataContributionConsentedAt: "Consented on {date}",
     dataContributionEnabled: "On",
@@ -572,12 +572,12 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     ],
     consentPrefix: "",
     privacyAgreementName: "「プライバシーとデータ貢献に関する同意書」",
-    consentSuffix: "に同意します",
+    consentSuffix: "に同意し、データ貢献を有効にします（任意。初回の有効化で 2,000 クレジットを付与）",
     privacyEyebrow: "PRIVACY & DATA CONTRIBUTION",
     privacyTitle: "プライバシーとデータ貢献に関する同意書",
     privacyVersion: "バージョン v{version}",
     privacyIntro:
-      "無料メンバーシップの登録・受け取り前に、本同意書をよくお読みください。チェックを入れると内容に同意したことになります。同意しない場合は無料メンバーシップを受け取れませんが、お読みいただいた後いつでも考えを変えられます。",
+      "データ貢献は完全に任意です。有効にしなくても登録して無料メンバーシップを受け取れます。有効にすると本同意書に同意したことになり、初回の有効化で 2,000 クレジットを付与します。「設定 → メンバーシップとアカウント → データ貢献」からいつでも無効にでき、無効化すると直ちにアップロードが停止します。メンバーシップの特典への影響はありません。",
     privacySections: [
       {
         heading: "収集するもの",
@@ -608,9 +608,9 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     privacyAgreeButton: "読みました、同意します",
     dataContributionTitle: "データ貢献",
     dataContributionDescription:
-      "「プライバシーとデータ貢献に関する同意書」に同意すると、ローカル AI コーディングツールの会話が匿名でアップロードされ、モデルのトレーニングと製品改善に使われます。",
+      "「プライバシーとデータ貢献に関する同意書」に同意すると、ローカル AI コーディングツールの会話が匿名でアップロードされ、モデルのトレーニングと製品改善に使われます。デフォルトはオフで、初回の有効化で 2,000 クレジットを付与。いつでも無効にできます。",
     dataContributionHint:
-      "アップロードされるのはローカル AI コーディングツールの会話のみです。ブラウザの会話は永遠にアップロードされず、個人情報を含むセッションは自動的に除外されます。",
+      "アップロードされるのはローカル AI コーディングツールの会話のみです。ブラウザの会話は永遠にアップロードされず、個人情報を含むセッションは自動的に除外されます。初回の有効化で 2,000 クレジットを一度だけ付与します。",
     dataContributionViewAgreement: "同意書全文を見る",
     dataContributionConsentedAt: "同意日 {date}",
     dataContributionEnabled: "オン",
@@ -750,12 +750,12 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     ],
     consentPrefix: "",
     privacyAgreementName: "「개인정보 및 데이터 기여 동의서」",
-    consentSuffix: "를 읽고 동의합니다",
+    consentSuffix: "를 읽고 동의하며 데이터 기여를 활성화합니다(선택 사항, 최초 활성화 시 2,000 크레딧 지급)",
     privacyEyebrow: "PRIVACY & DATA CONTRIBUTION",
     privacyTitle: "개인정보 및 데이터 기여 동의서",
     privacyVersion: "버전 v{version}",
     privacyIntro:
-      "무료 멤버십을 등록하고 받기 전에 본 동의서를 주의 깊게 읽어 주세요. 체크박스를 선택하면 본 동의서를 읽고 동의한 것으로 간주됩니다. 동의하지 않으면 무료 멤버십을 받을 수 없지만, 읽은 후 언제든지 마음을 바꿀 수 있습니다.",
+      "데이터 기여는 전적으로 선택 사항입니다. 활성화하지 않아도 가입하고 멤버십을 받을 수 있습니다. 활성화하면 본 동의서에 동의한 것으로 간주되며 최초 활성화 시 2,000 크레딧을 드립니다. 「설정 → 멤버십 및 계정 → 데이터 기여」에서 언제든 끌 수 있으며, 끄는 즉시 업로드가 중단되고 멤버십 혜택에는 영향이 없습니다.",
     privacySections: [
       {
         heading: "수집하는 항목",
@@ -786,9 +786,9 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     privacyAgreeButton: "읽었으며 동의합니다",
     dataContributionTitle: "데이터 기여",
     dataContributionDescription:
-      "「개인정보 및 데이터 기여 동의서」에 동의하면 로컬 AI 코딩 도구의 대화가 익명으로 업로드되어 모델 학습과 제품 개선에 사용됩니다.",
+      "「개인정보 및 데이터 기여 동의서」에 동의하면 로컬 AI 코딩 도구의 대화가 익명으로 업로드되어 모델 학습과 제품 개선에 사용됩니다. 기본값은 꺼짐이며, 최초 활성화 시 2,000 크레딧을 드리고 언제든 해제할 수 있습니다.",
     dataContributionHint:
-      "로컬 AI 코딩 도구의 대화만 업로드됩니다. 브라우저 대화는 절대 업로드되지 않으며, 개인 정보가 포함된 세션은 자동으로 제외됩니다.",
+      "로컬 AI 코딩 도구의 대화만 업로드됩니다. 브라우저 대화는 절대 업로드되지 않으며, 개인 정보가 포함된 세션은 자동으로 제외됩니다. 최초 활성화 시 2,000 크레딧을 한 번만 드립니다.",
     dataContributionViewAgreement: "전체 동의서 보기",
     dataContributionConsentedAt: "동의일 {date}",
     dataContributionEnabled: "켜짐",

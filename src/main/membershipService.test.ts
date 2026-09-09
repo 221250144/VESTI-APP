@@ -8,6 +8,7 @@ import {
   MEMBERSHIP_FILE_NAME,
   MembershipError,
   MembershipService,
+  shouldGrantDataContributionGift,
 } from './membershipService';
 
 describe('MembershipService', () => {
@@ -168,14 +169,18 @@ describe('MembershipService', () => {
 
   // ---- Data contribution consent (docs/PRIVACY-DATA-CONTRIBUTION.md) ----
 
-  it('refuses registration without data-contribution consent', async () => {
+  it('registers without data-contribution consent and defaults to opted out', async () => {
     const service = createService();
     await service.initialize();
 
-    await expect(service.register({ username: 'beta-user', password: 'password-123' }, false))
-      .rejects.toMatchObject({ code: 'CONSENT_REQUIRED' });
-    // No account may be persisted when consent is missing.
-    await expect(fs.access(path.join(directory, MEMBERSHIP_FILE_NAME))).rejects.toMatchObject({ code: 'ENOENT' });
+    const status = await service.register({ username: 'beta-user', password: 'password-123' }, false);
+
+    // Registration succeeds without consent; contribution starts disabled.
+    expect(status).toMatchObject({ state: 'active', authenticated: true, canUseApp: true });
+    expect(status.dataContribution).toEqual({ enabled: false, consentedAt: null, version: null });
+    expect(service.getDataContribution()).toEqual({ enabled: false, consentedAt: null, version: null });
+    // The account (and its contributor id) exists like any other.
+    expect(await service.getContributorId()).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   it('records consent, agreement version and a contributor id at registration', async () => {
@@ -188,6 +193,8 @@ describe('MembershipService', () => {
       enabled: true,
       consentedAt: now,
       version: PRIVACY_AGREEMENT_VERSION,
+      // Opting in at registration counts as the first enable (one-time gift).
+      giftGranted: true,
     });
     expect(service.getDataContribution()).toEqual(status.dataContribution);
     const contributorId = await service.getContributorId();
@@ -244,6 +251,7 @@ describe('MembershipService', () => {
       enabled: false,
       consentedAt: now,
       version: PRIVACY_AGREEMENT_VERSION,
+      giftGranted: true,
     });
 
     now += 60_000;
@@ -253,12 +261,57 @@ describe('MembershipService', () => {
       enabled: true,
       consentedAt: now,
       version: PRIVACY_AGREEMENT_VERSION,
+      giftGranted: true,
     });
 
     // The toggle survives a service restart.
     const restarted = createService();
     await restarted.initialize();
     expect(restarted.getDataContribution()).toEqual(reenabled);
+  });
+
+  it('marks the one-time gift on the first enable and keeps it across off→on toggles', async () => {
+    const service = createService();
+    await service.initialize();
+    // Register WITHOUT consent: no gift flag yet.
+    await service.register({ username: 'beta-user', password: 'password-123' }, false);
+    expect(service.getDataContribution()).toEqual({ enabled: false, consentedAt: null, version: null });
+
+    // First enable (Settings flow): marks the gift flag for the ledger grant.
+    const firstEnable = await service.setDataContribution(true);
+    expect(firstEnable).toEqual({
+      enabled: true,
+      consentedAt: now,
+      version: PRIVACY_AGREEMENT_VERSION,
+      giftGranted: true,
+    });
+
+    // Off→on again: the flag survives, so the caller never re-grants.
+    await service.setDataContribution(false);
+    expect(service.getDataContribution().giftGranted).toBe(true);
+    const secondEnable = await service.setDataContribution(true);
+    expect(secondEnable.giftGranted).toBe(true);
+  });
+
+  it('decides the one-time gift exactly once (shouldGrantDataContributionGift)', () => {
+    const enabledFirstTime = { enabled: true, consentedAt: 1, version: '1.0', giftGranted: true };
+    // Registration with consent (no prior account state).
+    expect(shouldGrantDataContributionGift(null, enabledFirstTime)).toBe(true);
+    // First enable from an opted-out state without the flag.
+    expect(shouldGrantDataContributionGift(
+      { enabled: false, consentedAt: null, version: null },
+      enabledFirstTime,
+    )).toBe(true);
+    // Off→on with the flag already persisted: never re-grant.
+    expect(shouldGrantDataContributionGift(
+      { enabled: false, consentedAt: 1, version: '1.0', giftGranted: true },
+      enabledFirstTime,
+    )).toBe(false);
+    // Disabling never grants.
+    expect(shouldGrantDataContributionGift(
+      null,
+      { enabled: false, consentedAt: null, version: null },
+    )).toBe(false);
   });
 
   function createService(): MembershipService {

@@ -72,6 +72,7 @@ const api: VestiDesktopApi = {
   chooseDataDirectory: () => ipcRenderer.invoke(IPC.chooseDataDirectory),
   openDataDirectory: () => ipcRenderer.invoke(IPC.openDataDirectory),
   openSettingsDirectory: () => ipcRenderer.invoke(IPC.openSettingsDirectory),
+  openExternal: url => ipcRenderer.invoke(IPC.openExternal, url),
   clearAgentResults: () => ipcRenderer.invoke(IPC.clearAgentResults),
   restartApp: () => ipcRenderer.invoke(IPC.restart),
   testLlm: () => ipcRenderer.invoke(IPC.llmTest),

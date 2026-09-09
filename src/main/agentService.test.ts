@@ -189,6 +189,88 @@ describe('AgentService Demo proxy contract', () => {
   });
 });
 
+describe('AgentService.test connection messages follow the UI language', () => {
+  beforeEach(() => {
+    vi.mocked(net.fetch).mockReset();
+  });
+
+  function byokService(locale: unknown, apiKey = 'sk-test'): AgentService {
+    const capture = {
+      getSession: () => null,
+      activeDataDirectory: 'C:/tmp/vesti-agent-test',
+    } as unknown as CaptureService;
+    const llm = runtime({
+      mode: 'custom_byok',
+      baseUrl: 'https://api.openai.com/v1',
+      modelId: 'gpt-4o-mini',
+      apiKey,
+    });
+    const settings = {
+      getRuntimeAgent: () => ({
+        outputLanguage: 'en-US',
+        includeThinking: false,
+        includeToolDetails: false,
+        customInstructions: '',
+      }),
+      getRuntimeLlm: () => llm,
+    } as unknown as SettingsService;
+    return new AgentService(capture, settings, undefined, () => locale);
+  }
+
+  it('reports success in English for an English UI', async () => {
+    vi.mocked(net.fetch).mockResolvedValue(new Response(JSON.stringify({
+      model: 'gpt-4o-mini',
+      choices: [{ message: { content: 'OK' } }],
+    }), { status: 200 }));
+
+    const result = await byokService({ locale: 'en' }).test();
+
+    expect(result).toEqual({ ok: true, message: 'Connection successful: gpt-4o-mini' });
+    // BYOK hits the standard OpenAI-compatible endpoint with a Bearer header.
+    const [url, init] = vi.mocked(net.fetch).mock.calls[0];
+    expect(url).toBe('https://api.openai.com/v1/chat/completions');
+    expect((init?.headers as Record<string, string>).authorization).toBe('Bearer sk-test');
+  });
+
+  it('reports success in Chinese by default (legacy factory language)', async () => {
+    vi.mocked(net.fetch).mockResolvedValue(new Response(JSON.stringify({
+      model: 'gpt-4o-mini',
+      choices: [{ message: { content: 'OK' } }],
+    }), { status: 200 }));
+
+    const result = await service(runtime({
+      mode: 'custom_byok',
+      baseUrl: 'https://api.openai.com/v1',
+      modelId: 'gpt-4o-mini',
+      apiKey: 'sk-test',
+    })).test();
+
+    expect(result).toEqual({ ok: true, message: '连接成功：gpt-4o-mini' });
+  });
+
+  it('localizes the missing-API-key failure', async () => {
+    const en = await byokService({ locale: 'en' }, '').test();
+    expect(en).toEqual({ ok: false, message: 'Add your API key in Settings first' });
+
+    const ja = await byokService({ locale: 'ja' }, '').test();
+    expect(ja).toEqual({ ok: false, message: '先に設定で API キーを入力してください' });
+
+    expect(vi.mocked(net.fetch)).not.toHaveBeenCalled();
+  });
+
+  it('localizes HTTP failures from the provider', async () => {
+    vi.mocked(net.fetch).mockResolvedValue(new Response(JSON.stringify({
+      error: { message: 'Incorrect API key provided' },
+    }), { status: 401 }));
+
+    const result = await byokService({ locale: 'ko' }).test();
+
+    expect(result.ok).toBe(false);
+    // Upstream detail passes through verbatim; no Chinese scaffolding is added.
+    expect(result.message).toBe('Incorrect API key provided');
+  });
+});
+
 describe('AgentService.runStream', () => {
   beforeEach(() => {
     vi.mocked(net.fetch).mockReset();

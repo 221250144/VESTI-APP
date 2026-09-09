@@ -146,7 +146,8 @@ export function CreditCard({ membership, llmMode, locale }: CreditCardProps) {
 
       <MembershipDocModal open={docOpen} onClose={() => setDocOpen(false)} locale={locale} />
     </section>
-    <CrowdfundCard locale={locale} />
+    {/* 发布版先隐藏众筹卡:收款码尚未上线。保留组件与 copy,上线后恢复下行渲染即可。 */}
+    {/* <CrowdfundCard locale={locale} /> */}
     </>
   );
 }

@@ -149,12 +149,13 @@ export type ChatErrorCategory =
   | 'unknown';
 
 const NETWORK_ERROR_PATTERN =
-  /无法连接模型服务|无法通过系统网络连接模型服务|fetch failed|econnrefused|econnreset|enotfound|etimedout|eai_again|socket hang up|network\s?error|timed?\s*out|operation timed out|超时/i;
+  /无法连接模型服务|无法通过系统网络连接模型服务|could not reach the model service|接続できません|연결할 수 없습니다|fetch failed|econnrefused|econnreset|enotfound|etimedout|eai_again|socket hang up|network\s?error|timed?\s*out|operation timed out|超时/i;
 const AUTH_ERROR_PATTERN =
-  /请先在设置中填写\s*API\s*Key|invalid\s+(api[\s_-]?key|token|key)|unauthorized|forbidden|authentication|认证|鉴权|密钥|令牌|api[\s_-]?key/i;
+  /请先在设置中填写\s*API\s*Key|invalid\s+(api[\s_-]?key|token|key)|unauthorized|forbidden|authentication|认证|鉴权|密钥|令牌|api[\s_-]?key|api\s*キー|api\s*키/i;
 const MODEL_ERROR_PATTERN =
   /model[^\n]{0,80}(not found|does not exist|unavailable|not supported)|no such model|模型[^\n]{0,20}(不存在|不可用|未找到|不支持)/i;
-const EMPTY_RESULT_PATTERN = /模型没有返回可显示的内容|模型服务未返回流式响应体|输出达到\s*Token\s*上限/;
+const EMPTY_RESULT_PATTERN =
+  /模型没有返回可显示的内容|模型服务未返回流式响应体|输出达到\s*Token\s*上限|no displayable content|no streaming response body|output token cap|表示できる内容|ストリーミング応答|トークン上限|표시할 수 있는 내용|스트리밍 응답|토큰 상한/i;
 
 /** Read an HTTP status off an LlmGatewayError-shaped object (`details.status`)
  * or a bare `status` field; undefined when nothing structured survived. */

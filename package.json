@@ -1,9 +1,9 @@
 {
   "name": "vesti-app",
   "productName": "Vesti",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Local-first desktop hub for AI conversation capture and reflection",
-  "author": "VESTI Team <team@vesti.local>",
+  "author": "Vesti Team <firefly.hefeng@gmail.com>",
   "private": true,
   "main": ".vite/build/main.js",
   "scripts": {

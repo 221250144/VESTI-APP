@@ -17,6 +17,8 @@ export const CREDITS_FILE_NAME = 'credits.json';
 export const MEMBER_MONTHLY_CREDITS = 50_000;
 /** Free-tier daily allowance, reset at local midnight. */
 export const FREE_DAILY_CREDITS = 300;
+/** One-time gift granted the first time an account enables data contribution. */
+export const DATA_CONTRIBUTION_GIFT_CREDITS = 2_000;
 
 /** Fixed metered costs: chat is usage-based, image/embedding are flat. */
 export const IMAGE_CREDITS_PER_GENERATION = 20;
