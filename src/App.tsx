@@ -17,7 +17,7 @@ import { TitleBar } from "./ui/shell/TitleBar";
 import { useUiTheme } from "./ui/shell/useUiTheme";
 import { useOnboarding } from "./ui/shell/useOnboarding";
 import { MembershipGate } from "./ui/membership/MembershipGate";
-import { MAIN_SHELL_TABS, type MembershipStatus } from "./shared/contracts";
+import { MAIN_SHELL_TABS, type MembershipStatus, type UpdateStatusView } from "./shared/contracts";
 import { LOGO_BASE64 } from "./ui/logo";
 import { desktopStorage } from "./ui/storage/desktopStorage";
 import { OWL_MOOD_ICONS } from "./ui/companion/owlIcons";
@@ -59,6 +59,106 @@ const LOADING_COPY: Record<SupportedLocale, { title: string; hint: string }> = {
   ko: { title: "AI 대화를 동기화하는 중…", hint: "첫 실행 시 로컬 데이터 소스를 스캔합니다." },
 };
 
+// 更新横幅(轻量 toast,样式与设置页 message toast 一致):检测到新版本/下载完成
+// 时出现,可关闭;点击文案跳转到设置页 About 卡片,按钮直接下载/重启安装。
+const UPDATE_BANNER_COPY: Record<
+  SupportedLocale,
+  { available: string; download: string; downloading: string; downloaded: string; restart: string; dismiss: string }
+> = {
+  zh: {
+    available: "发现新版本 v{version}",
+    download: "下载更新",
+    downloading: "下载中 {percent}%",
+    downloaded: "更新已下载,重启后完成安装",
+    restart: "重启安装",
+    dismiss: "关闭",
+  },
+  en: {
+    available: "New version v{version} available",
+    download: "Download",
+    downloading: "Downloading {percent}%",
+    downloaded: "Update downloaded — restart to install",
+    restart: "Restart & install",
+    dismiss: "Dismiss",
+  },
+  ja: {
+    available: "新しいバージョン v{version} があります",
+    download: "ダウンロード",
+    downloading: "ダウンロード中 {percent}%",
+    downloaded: "ダウンロード済み — 再起動してインストール",
+    restart: "再起動してインストール",
+    dismiss: "閉じる",
+  },
+  ko: {
+    available: "새 버전 v{version}을(를) 사용할 수 있습니다",
+    download: "다운로드",
+    downloading: "다운로드 중 {percent}%",
+    downloaded: "다운로드 완료 — 재시작하면 설치됩니다",
+    restart: "재시작하여 설치",
+    dismiss: "닫기",
+  },
+};
+
+function UpdateBanner({
+  status,
+  copy,
+  onOpenSettings,
+  onDismiss,
+}: {
+  status: UpdateStatusView;
+  copy: (typeof UPDATE_BANNER_COPY)[SupportedLocale];
+  onOpenSettings: () => void;
+  onDismiss: () => void;
+}) {
+  const percent = Math.round(status.percent ?? 0);
+  const message =
+    status.phase === "available"
+      ? copy.available.replace("{version}", status.latestVersion ?? "")
+      : status.phase === "downloading"
+        ? copy.downloading.replace("{percent}", String(percent))
+        : copy.downloaded;
+  return (
+    <div
+      role="status"
+      className="fixed bottom-4 right-6 z-40 flex max-w-[420px] items-center gap-3 rounded-xl border border-border-subtle bg-bg-primary px-4 py-3 shadow-popover"
+    >
+      <button
+        type="button"
+        onClick={onOpenSettings}
+        title={message}
+        className="min-w-0 flex-1 truncate text-left text-[12px] font-sans text-text-secondary transition-colors hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus"
+      >
+        {message}
+      </button>
+      {status.phase === "available" ? (
+        <button
+          type="button"
+          className="shrink-0 rounded-lg bg-accent-primary px-3 py-1.5 text-[12px] font-sans font-medium text-text-inverse transition-colors hover:bg-accent-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus"
+          onClick={() => void window.vesti?.downloadUpdate().catch(() => undefined)}
+        >
+          {copy.download}
+        </button>
+      ) : status.phase === "downloaded" ? (
+        <button
+          type="button"
+          className="shrink-0 rounded-lg bg-accent-primary px-3 py-1.5 text-[12px] font-sans font-medium text-text-inverse transition-colors hover:bg-accent-primary-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus"
+          onClick={() => void window.vesti?.quitAndInstallUpdate().catch(() => undefined)}
+        >
+          {copy.restart}
+        </button>
+      ) : null}
+      <button
+        type="button"
+        aria-label={copy.dismiss}
+        onClick={onDismiss}
+        className="shrink-0 rounded-md px-1.5 py-0.5 text-[13px] font-sans text-text-tertiary transition-colors hover:bg-bg-surface-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-focus"
+      >
+        ✕
+      </button>
+    </div>
+  );
+}
+
 function LoadingState({ copy }: { copy: { title: string; hint: string } }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-4 bg-bg-app">
@@ -95,6 +195,27 @@ function Shell({
   const [aitiPersonaNote, setAitiPersonaNote] = useState<string | null>(null);
   // 夜话头像:默认心情图标集;owlSkin==='custom' 时整套换成 DIY 皮肤。
   const [owlIcons, setOwlIcons] = useState(OWL_MOOD_ICONS);
+  // 自动更新横幅:主进程状态机镜像;关闭状态按 phase+version 记忆,
+  // 阶段推进(available→downloading→downloaded)会重新弹出对应提示。
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatusView | null>(null);
+  const [updateBannerDismissed, setUpdateBannerDismissed] = useState<string | null>(null);
+
+  useEffect(() => {
+    const api = window.vesti;
+    if (!api?.getUpdateStatus) return;
+    let cancelled = false;
+    void api
+      .getUpdateStatus()
+      .then((status) => {
+        if (!cancelled) setUpdateStatus(status);
+      })
+      .catch(() => undefined);
+    const off = api.onUpdateStatusChanged(setUpdateStatus);
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, []);
 
   // Follow the floating-ball skin pref: the custom DIY owl replaces every
   // mood icon (it has no mood variants of its own), built-in skins restore
@@ -285,6 +406,13 @@ function Shell({
     syncState.conversationCount === 0 && (syncState.syncing || syncState.lastSyncAt === null);
   const syncReady = !showLoading && syncState.conversationCount > 0;
   const onboarding = useOnboarding(locale as SupportedLocale, syncReady);
+  const updateBannerKey =
+    updateStatus?.enabled &&
+    (updateStatus.phase === "available" ||
+      updateStatus.phase === "downloading" ||
+      updateStatus.phase === "downloaded")
+      ? `${updateStatus.phase}:${updateStatus.latestVersion ?? ""}`
+      : null;
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-bg-app text-text-primary">
       {!splashDone && <SplashIntro onDone={() => setSplashDone(true)} />}
@@ -348,6 +476,14 @@ function Shell({
           )}
         </main>
       </div>
+      {updateBannerKey !== null && updateBannerDismissed !== updateBannerKey && updateStatus ? (
+        <UpdateBanner
+          status={updateStatus}
+          copy={UPDATE_BANNER_COPY[locale] ?? UPDATE_BANNER_COPY.en}
+          onOpenSettings={() => setPage("settings")}
+          onDismiss={() => setUpdateBannerDismissed(updateBannerKey)}
+        />
+      ) : null}
     </div>
   );
 }

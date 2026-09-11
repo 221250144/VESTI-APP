@@ -65,4 +65,9 @@ dmg:
   artifactName: Vesti-${version}-${arch}.${ext}
   title: Vesti
 
-publish: null
+# 自动更新:generic provider 指向 nginx 静态目录(channel 默认 latest,
+# electron-builder 会随 NSIS 构建产出 latest.yml + blockmap 到 out/installer/,
+# 发版时把整个 out/installer/ 同步到 https://vesti.world/downloads/)。
+publish:
+  provider: generic
+  url: https://vesti.world/downloads/

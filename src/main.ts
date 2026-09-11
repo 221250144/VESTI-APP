@@ -30,6 +30,7 @@ import { NotionService } from './main/notionService';
 import { MembershipError, MembershipService, shouldGrantDataContributionGift } from './main/membershipService';
 import { SettingsService } from './main/settingsService';
 import { UiPrefsService } from './main/uiPrefsService';
+import { UpdateService } from './main/updateService';
 import { outputLanguageForLocale, resolveMainLocale } from './main/mainStrings';
 import { writeUpstreamExportFile } from './main/vaultExportService';
 import {
@@ -76,6 +77,7 @@ import {
   type RelayOutboxEnqueueRequest,
   type RelayPrepareCliRequest,
   type RelayPrepareCliResult,
+  type UpdateStatusView,
   type UpstreamWriteFileRequest,
 } from './shared/contracts';
 
@@ -103,6 +105,7 @@ const uiPrefs = new UiPrefsService();
 let capsule: CapsuleWindowService;
 let extensionBridge: ExtensionBridgeService;
 let agentMcp: AgentMcpRegistry;
+let updates: UpdateService;
 let productRuntimeActive = false;
 let productActivation: Promise<void> | null = null;
 let membershipExpiryTimer: NodeJS.Timeout | null = null;
@@ -419,6 +422,13 @@ function showMainWindow(): void {
 
 function broadcastBridgeChange(): void {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC.extensionBridgeChanged);
+}
+
+/** 自动更新状态推送到所有窗口(About 卡片与更新横幅都靠它刷新)。 */
+function broadcastUpdateStatus(status: UpdateStatusView): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send(IPC.updateStatusChanged, status);
+  }
 }
 
 // TOFU association prompts the user denied: don't nag the same extension
@@ -1083,6 +1093,13 @@ function registerIpc(): void {
     app.relaunch();
     app.exit(0);
   });
+  // ---- 自动更新(electron-updater;dev 构建下 UpdateService 全部 no-op)。
+  // 应用级维护能力,不触碰会员数据,因此不走 memberIpcHandle 门禁;通道均
+  // 无入参,状态流转与 quitAndInstall 时机由 UpdateService 内部校验。 ----
+  ipcMain.handle(IPC.updateStatus, () => updates.getStatus());
+  ipcMain.handle(IPC.updateCheck, () => updates.checkForUpdates());
+  ipcMain.handle(IPC.updateDownload, () => updates.downloadUpdate());
+  ipcMain.handle(IPC.updateQuitAndInstall, () => updates.quitAndInstall());
   memberIpcHandle(IPC.llmTest, () => agent.test());
   memberIpcHandle(IPC.embeddingStatus, () => embedding.getStatus());
   memberIpcHandle(
@@ -1659,6 +1676,11 @@ app.whenReady().then(async () => {
     loadOriginAllowlist: () => settings.getBridgeOriginAllowlist(),
     log: line => console.log(`[vesti] ${line}`),
   });
+  // 自动更新:仅打包构建启用(dev 下 start() no-op);启动后延迟检查一次,
+  // 之后每 4 小时轮询,失败静默记日志。状态变化实时推给渲染进程。
+  updates = new UpdateService({ isPackaged: app.isPackaged, currentVersion: app.getVersion() });
+  updates.onStatusChanged(broadcastUpdateStatus);
+  updates.start();
   registerIpc();
   await createWindow();
   createTray();
@@ -1679,6 +1701,7 @@ app.on('before-quit', () => {
   membershipLockReloadTimer = null;
   tray?.destroy();
   tray = null;
+  updates?.stop();
   if (extensionBridge) void extensionBridge.stop().catch(console.error);
   digest?.stop();
   contribution?.stop();

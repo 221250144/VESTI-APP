@@ -579,4 +579,20 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 16,
+    name: 'index_session_digest_embeddings_version_dimensions',
+    up(db) {
+      // SessionRecall's vector-snapshot invalidation probe runs
+      // COUNT(*) / MAX(rowid) / SUM(rowid) filtered by (index_version,
+      // dimensions) on every recall. This composite index (SQLite indexes
+      // store the rowid) makes the probe index-only — the old
+      // idx_session_digest_embeddings_version on (index_version) alone would
+      // still force a table lookup per matching row for the dimensions check.
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_session_digest_embeddings_version_dimensions
+          ON session_digest_embeddings(index_version, dimensions);
+      `);
+    },
+  },
 ];

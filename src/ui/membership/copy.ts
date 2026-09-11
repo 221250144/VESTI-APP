@@ -502,7 +502,7 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     expiredEyebrow: "MEMBERSHIP EXPIRED",
     expiredTitle: "Beta メンバーシップの有効期限が切れました",
     expiredDescription:
-      "更新機能は現在準備中です。再開されるまで、ライブラリ、分析、Agent 機能はロックされます。",
+      "更新機能は現在準備中です。再開されるまで、ライブラリ、分析、エージェント機能はロックされます。",
     expiredFor: "ログイン中のアカウント",
     expiredAt: "有効期限",
     checkAgain: "もう一度確認",
@@ -539,7 +539,7 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     creditsDocSections: [
       {
         heading: "私たちの約束",
-        body: "Vesti はローカルファーストの製品です。会話ライブラリ、メモリー空間、アカウント情報はすべてあなた自身の端末に保存されます。メンバーシップとクレジットの目的はただひとつ——実際のインテリジェンスコストをまかない、製品が長く健全に運営され続けるようにすることです。",
+        body: "Vesti はローカルファーストの製品です。会話ライブラリ、メモリースペース、アカウント情報はすべてあなた自身の端末に保存されます。メンバーシップとクレジットの目的はただひとつ——実際のインテリジェンスコストをまかない、製品が長く健全に運営され続けるようにすることです。",
       },
       {
         heading: "クレジットとは",
@@ -551,7 +551,7 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
       },
       {
         heading: "Beta メンバーシップ",
-        body: "毎月 50,000 クレジット（開通日を起点に毎月リセット）に加え、夢、AITI 画像などの高度な機能が解放されます。今ご登録いただくと 3 か月の Beta メンバーシップをプレゼント。お支払い方法の登録は不要です。",
+        body: "毎月 50,000 クレジット（開通日を起点に毎月リセット）に加え、夢、AITI イメージなどの高度な機能のロックが解除されます。今ご登録いただくと 3 か月の Beta メンバーシップをプレゼント。お支払い方法の登録は不要です。",
       },
       {
         heading: "自分のキーを使う（BYOK）",
@@ -567,7 +567,7 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
       },
       {
         heading: "クラウドファンディング",
-        body: "Vesti は現在、小さなチームの自費で運営されています。後押ししていただける場合は、「設定 → メンバーシップとアカウント → クラウドファンディング」から 3 つのプラン(ほっと応援・同行・共創)をご覧いただけます。お支払い後に使い捨ての「サポーターコード」を発行し、アプリ内で引き換えるとクレジットがすぐに加算されます。資金はサーバー、モデル枠、そしてより多くの人に Vesti を届けるためにのみ使われます。参加は完全に任意で、既存の特典への影響はありません。",
+        body: "Vesti は現在、小さなチームの自費で運営されています。後押ししていただける場合は、「設定 → メンバーシップとアカウント → クラウドファンディング」から 3 つのプラン（ほっと応援・同行・共創）をご覧いただけます。お支払い後に使い捨ての「サポーターコード」を発行し、アプリ内で引き換えるとクレジットがすぐに加算されます。資金はサーバー、モデル枠、そしてより多くの人に Vesti を届けるためにのみ使われます。参加は完全に任意で、既存の特典への影響はありません。",
       },
     ],
     consentPrefix: "",
@@ -581,11 +581,11 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     privacySections: [
       {
         heading: "収集するもの",
-        body: "同意後、Vesti はローカルの AI コーディングツール（Kimi Code、Claude Code、Codex、Cursor などの CLI・デスクトップ Agent）の会話記録を継続的にアップロードします。AI とのメッセージ本文、AI の思考と返信、ツール呼び出しの要約（ツール名・入出力の要約）、関連するファイルパス、タイムスタンプ、トークン使用量、モデル情報が含まれます。これらのデータは Vesti の改善と、AI モデルのトレーニング・研究（強化学習の訓練データを含む）に使用されます。",
+        body: "同意後、Vesti はローカルの AI コーディングツール（Kimi Code、Claude Code、Codex、Cursor などの CLI・デスクトップエージェント）の会話記録を継続的にアップロードします。AI とのメッセージ本文、AI の思考と返信、ツール呼び出しの要約（ツール名・入出力の要約）、関連するファイルパス、タイムスタンプ、トークン使用量、モデル情報が含まれます。これらのデータは Vesti の改善と、AI モデルのトレーニング・研究（強化学習の訓練データを含む）に使用されます。",
       },
       {
         heading: "収集しないもの",
-        body: "ブラウザ側の会話（Kimi、DeepSeek、ChatGPT、Claude、Gemini などの Web AI）はローカルにのみ保存され、アップロードされることはありません。電話番号、メールアドレス、身分証番号、銀行カード番号、秘密鍵/API キーなどの個人情報・機密認証情報パターンに一致した会話は、セッション全体が除外されアップロードされません。ユーザー名とパスワードは暗号化された形でのみお使いのコンピューターに保存され、デバイスから出ることはありません。",
+        body: "ブラウザ側の会話（Kimi、DeepSeek、ChatGPT、Claude、Gemini などの Web AI）はローカルにのみ保存され、アップロードされることはありません。電話番号、メールアドレス、ID 番号、銀行カード番号、秘密鍵/API キーなどの個人情報・機密認証情報パターンに一致した会話は、セッション全体が除外されアップロードされません。ユーザー名とパスワードは暗号化された形でのみお使いのコンピューターに保存され、デバイスから出ることはありません。",
       },
       {
         heading: "匿名性",
@@ -601,7 +601,7 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
       },
       {
         heading: "リスクに関する注意",
-        body: "個人情報のフィルタリングは自動パターン検出に基づいており、改善を続けていますが、見落としの可能性があります。AI との会話に本名、住所、証明書番号などの機密性の高い個人情報を入力しないでください。",
+        body: "個人情報のフィルタリングは自動パターン検出に基づいており、改善を続けていますが、見落としの可能性があります。AI との会話に本名、住所、ID 番号などの機密性の高い個人情報を入力しないでください。",
       },
     ],
     privacyReadButton: "読みました",
@@ -638,7 +638,7 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     errors: {
       NOT_INITIALIZED: "メンバーシップサービスの準備が完了していません。もう一度お試しください。",
       ALREADY_REGISTERED: "この端末にはすでに Vesti アカウントがあります。ログインしてください。",
-      INVALID_USERNAME: "ユーザー名は 3～32 文字の英数字、または .、_、- を使用してください。",
+      INVALID_USERNAME: "ユーザー名は 3～32 文字の英数字で入力してください（. _ - も使用できます）。",
       WEAK_PASSWORD: "8 文字以上のパスワードを使用してください。",
       NOT_REGISTERED: "この端末には Vesti アカウントが登録されていません。",
       INVALID_CREDENTIALS: "ユーザー名またはパスワードが正しくありません。",
@@ -657,7 +657,7 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     heroEyebrow: "VESTI / BETA MEMBERSHIP",
     heroTitle: "AI 대화를 쌓여 가는 지식으로",
     heroDescription:
-      "Vesti는 AI 작업 기록을 로컬에서 수집하고 정리해 서로 연결합니다. 계정을 만들면 모든 기능을 사용할 수 있습니다.",
+      "Vesti는 AI 작업 기록을 로컬에서 캡처하고 정리해 서로 연결합니다. 계정을 만들면 모든 기능을 사용할 수 있습니다.",
     localFirst: "로컬 우선",
     localFirstDescription: "계정과 대화 데이터는 이 기기에 저장됩니다.",
     trial: "3개월 무료 제공",
@@ -680,7 +680,7 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     expiredEyebrow: "MEMBERSHIP EXPIRED",
     expiredTitle: "Beta 멤버십이 만료되었습니다",
     expiredDescription:
-      "갱신 기능을 준비하고 있습니다. 멤버십이 복구될 때까지 라이브러리, 분석 및 Agent 기능이 잠깁니다.",
+      "갱신 기능을 준비하고 있습니다. 멤버십이 복구될 때까지 라이브러리, 분석 및 에이전트 기능이 잠깁니다.",
     expiredFor: "로그인한 계정",
     expiredAt: "만료일",
     checkAgain: "다시 확인",
@@ -729,7 +729,7 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
       },
       {
         heading: "Beta 멤버십",
-        body: "매월 50,000 크레딧(개통일 기준 매월 초기화)과 함께 꿈, AITI 프로필 등 고급 기능이 잠금 해제됩니다. 지금 가입하면 3개월 Beta 멤버십을 드리며, 결제 수단을 등록할 필요가 없습니다.",
+        body: "매월 50,000 크레딧(개통일 기준 매월 초기화)과 함께 꿈, AITI 이미지 등 고급 기능이 잠금 해제됩니다. 지금 가입하면 3개월 Beta 멤버십을 드리며, 결제 수단을 등록할 필요가 없습니다.",
       },
       {
         heading: "자체 키 사용(BYOK)",
@@ -759,7 +759,7 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     privacySections: [
       {
         heading: "수집하는 항목",
-        body: "동의 후 Vesti는 로컬 AI 코딩 도구(Kimi Code, Claude Code, Codex, Cursor 등 CLI 및 데스크톱 Agent)의 대화 기록을 지속적으로 업로드합니다. AI와 주고받은 메시지 본문, AI의 사고와 응답, 도구 호출 요약(도구 이름, 입력·출력 요약), 관련 파일 경로, 타임스탬프, 토큰 사용량 및 모델 정보가 포함됩니다. 이 데이터는 Vesti 제품 개선과 AI 모델 학습·연구(강화 학습 훈련 데이터 포함)에 사용됩니다.",
+        body: "동의 후 Vesti는 로컬 AI 코딩 도구(Kimi Code, Claude Code, Codex, Cursor 등 CLI 및 데스크톱 에이전트)의 대화 기록을 지속적으로 업로드합니다. AI와 주고받은 메시지 본문, AI의 사고와 응답, 도구 호출 요약(도구 이름, 입력·출력 요약), 관련 파일 경로, 타임스탬프, 토큰 사용량 및 모델 정보가 포함됩니다. 이 데이터는 Vesti 제품 개선과 AI 모델 학습·연구(강화 학습 훈련 데이터 포함)에 사용됩니다.",
       },
       {
         heading: "수집하지 않는 항목",
@@ -779,7 +779,7 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
       },
       {
         heading: "위험 고지",
-        body: "개인 정보 필터링은 자동 패턴 감지에 기반하며, 지속적으로 개선하고 있지만 누락될 가능성이 있습니다. AI와의 대화에 실명, 주소, 증명서 번호 등 민감한 개인 정보를 입력하지 마세요.",
+        body: "개인 정보 필터링은 자동 패턴 감지에 기반하며, 지속적으로 개선하고 있지만 누락될 가능성이 있습니다. AI와의 대화에 실명, 주소, 신분증 번호 등 민감한 개인 정보를 입력하지 마세요.",
       },
     ],
     privacyReadButton: "읽었습니다",
@@ -804,7 +804,7 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     crowdfundPaymentHint:
       "QR 결제 시 메모에 가입 이메일 또는 사용자 이름을 남겨 주세요. 확인 후 일회용 「서포터 코드」를 보내드립니다.",
     crowdfundPageButton: "자세히 보기",
-    crowdfundRedeemLabel: "서포터 코드가 있어요",
+    crowdfundRedeemLabel: "서포터 코드가 있습니다",
     crowdfundCodePlaceholder: "VESTI-XXXX-XXXX-XXXX",
     crowdfundRedeemSubmit: "교환",
     crowdfundRedeeming: "교환 중…",
@@ -816,7 +816,7 @@ export const MEMBERSHIP_COPY: Record<SupportedLocale, MembershipCopy> = {
     errors: {
       NOT_INITIALIZED: "멤버십 서비스가 아직 준비되지 않았습니다. 다시 시도해 주세요.",
       ALREADY_REGISTERED: "이 기기에 Vesti 계정이 이미 있습니다. 로그인해 주세요.",
-      INVALID_USERNAME: "사용자 이름은 3~32자의 문자·숫자 또는 .、_、-를 사용하세요.",
+      INVALID_USERNAME: "사용자 이름은 3~32자의 영문자와 숫자로 입력하세요(., _, - 사용 가능).",
       WEAK_PASSWORD: "8자 이상의 비밀번호를 사용하세요.",
       NOT_REGISTERED: "이 기기에 등록된 Vesti 계정이 없습니다.",
       INVALID_CREDENTIALS: "사용자 이름 또는 비밀번호가 올바르지 않습니다.",

@@ -1,7 +1,8 @@
 {
   "name": "vesti-app",
   "productName": "Vesti",
-  "version": "0.3.1",
+  "version": "0.3.2",
+  "homepage": "https://vesti.world",
   "description": "Local-first desktop hub for AI conversation capture and reflection",
   "author": "Vesti Team <firefly.hefeng@gmail.com>",
   "private": true,
@@ -17,9 +18,9 @@
     "typecheck": "pnpm core:build && tsc --noEmit",
     "test": "vitest run && pnpm -r --if-present test",
     "package": "pnpm core:build && pnpm mcp:build && pnpm mcp:stage && pnpm native:prepare && pnpm electron:cache && electron-forge package",
-    "make:win": "pnpm package && electron-builder --prepackaged out/Vesti-win32-x64 --win nsis --config electron-builder.yml",
-    "make:mac": "pnpm package && electron-builder --prepackaged out/Vesti-darwin-x64 --mac dmg --config electron-builder.yml",
-    "make:linux": "pnpm package && electron-builder --prepackaged out/Vesti-linux-x64 --linux AppImage deb --config electron-builder.yml",
+    "make:win": "pnpm package && node scripts/write-app-update-yml.mjs out/Vesti-win32-x64 && electron-builder --prepackaged out/Vesti-win32-x64 --win nsis --config electron-builder.yml",
+    "make:mac": "pnpm package && node scripts/write-app-update-yml.mjs out/Vesti-darwin-x64 && electron-builder --prepackaged out/Vesti-darwin-x64 --mac dmg --config electron-builder.yml",
+    "make:linux": "pnpm package && node scripts/write-app-update-yml.mjs out/Vesti-linux-x64 && electron-builder --prepackaged out/Vesti-linux-x64 --linux AppImage deb --config electron-builder.yml",
     "make": "pnpm make:win"
   },
   "dependencies": {
@@ -32,6 +33,7 @@
     "better-sqlite3": "12.10.0",
     "chokidar": "^4.0.3",
     "dexie": "^4.3.0",
+    "electron-updater": "^6.8.9",
     "fflate": "^0.8.2",
     "fs-extra": "^11.3.2",
     "glob": "^11.0.3",

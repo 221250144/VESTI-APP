@@ -12,7 +12,13 @@
  * in-memory database.
  */
 
-import { deserializeVector, searchByVector } from './VectorSearch.js';
+import {
+  deserializeVector,
+  dotProduct,
+  cosineScoreFromNorms,
+  rankScoredCandidates,
+  vectorNormSq,
+} from './VectorSearch.js';
 import { messageDedupKey } from '../tree/forks.js';
 
 type Database = import('better-sqlite3').Database;
@@ -190,6 +196,13 @@ export interface SessionRecallOptions {
   queryEmbeddingVersion?: string | null;
   /** Per-list FTS candidate cap before fusion. */
   candidateLimit?: number;
+  /**
+   * Row cap for the in-memory vector snapshot cache
+   * (DEFAULT_VECTOR_SNAPSHOT_MAX_ROWS, env VESTI_RECALL_SNAPSHOT_MAX_ROWS).
+   * Above the cap no snapshot is built and the recall falls back to a direct
+   * scan — still zero-copy and heap-selected, just uncached.
+   */
+  vectorSnapshotMaxRows?: number;
   /** Reference time (ms epoch) for recency decay; tests inject a fixed now. */
   now?: number;
 }
@@ -291,29 +304,205 @@ function rankSessionHits(db: Database, ftsQuery: string, limit: number): Array<{
   }
 }
 
+// ---------------------------------------------------------------------------
+// Vector snapshot cache
+// Digest embeddings change rarely while recalls are frequent, so the decoded
+// vectors (zero-copy views over the SQLite BLOBs) and their squared norms are
+// cached per database handle. A cheap aggregate probe runs on every recall;
+// the snapshot is rebuilt only when the probe fingerprint changes.
+// ---------------------------------------------------------------------------
+
+/** Default row cap for the snapshot cache (option/env overridable). */
+export const DEFAULT_VECTOR_SNAPSHOT_MAX_ROWS = 20_000;
+
+/**
+ * Cumulative cache counters, exported for tests and benchmarks. `hits` counts
+ * recalls served from an unchanged snapshot; `builds` counts snapshot
+ * (re)builds; `directScans` counts uncached scans (over the row cap, or a
+ * failed probe).
+ */
+export const vectorSnapshotStats = { probes: 0, hits: 0, builds: 0, directScans: 0 };
+
+interface VectorSnapshot {
+  fingerprint: string;
+  ids: string[];
+  /** Decoded embeddings, aligned with ids; zero-copy views where possible. */
+  vectors: Float32Array[];
+  /**
+   * Per-row squared L2 norms, precomputed at build time. Float64 on purpose:
+   * cosineSimilarity accumulates norms in double precision, and rounding them
+   * to float32 would flip near-tie orderings (see the near-tie regression
+   * test in SessionVectorCache.test.ts).
+   */
+  normSqs: Float64Array;
+}
+
+/**
+ * Snapshots keyed by database handle: switching the data directory swaps the
+ * Database instance, so per-handle isolation comes for free and WeakMap lets
+ * closed databases be garbage-collected. Inner key: cacheKey below.
+ */
+const vectorSnapshotCache = new WeakMap<Database, Map<string, VectorSnapshot>>();
+
+/** Revision of the promoted embedding index; 0 when the table is absent. */
+function readEmbeddingIndexRevision(db: Database): number {
+  try {
+    const row = db.prepare(
+      'SELECT revision FROM embedding_index_state WHERE singleton = 1',
+    ).get() as { revision: number } | undefined;
+    return row?.revision ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Invalidation probe for the vector candidate set; returns null when the
+ * probe itself fails (e.g. the table does not exist on a legacy database),
+ * in which case the caller bypasses the cache entirely.
+ *
+ * fingerprint = count | max(rowid) | sum(rowid) | revision:
+ * - COUNT/MAX(rowid)/SUM(rowid) catch inserts and deletes; SUM additionally
+ *   catches delete+reinsert sequences that keep COUNT stable. With the
+ *   (index_version, dimensions) index (migration 16) the aggregate reads the
+ *   index only, never the BLOB pages. NULL aggregates on an empty set render
+ *   as 'null' — deterministic, which is all the fingerprint needs.
+ * - The embedding_index_state revision catches in-place BLOB replacement:
+ *   every shipped writer upserts with ON CONFLICT DO UPDATE (rowid stable,
+ *   invisible to the aggregates) but bumps the revision in the same
+ *   transaction.
+ */
+export function probeVectorIndexFingerprint(
+  db: Database,
+  embeddingVersion: string | null,
+  dimensions: number,
+): string | null {
+  try {
+    const row = (embeddingVersion
+      ? db.prepare(`
+          SELECT COUNT(*) AS c, MAX(rowid) AS m, SUM(rowid) AS s
+          FROM session_digest_embeddings
+          WHERE index_version = ? AND dimensions = ?
+        `).get(embeddingVersion, dimensions)
+      : db.prepare(`
+          SELECT COUNT(*) AS c, MAX(rowid) AS m, SUM(rowid) AS s
+          FROM session_digests
+          WHERE embedding_status = 'ok' AND embedding IS NOT NULL
+        `).get()) as { c: number; m: number | null; s: number | null };
+    const revision = readEmbeddingIndexRevision(db);
+    return `${row.c}|${row.m}|${row.s}|r${revision}`;
+  } catch {
+    return null;
+  }
+}
+
+function resolveVectorSnapshotMaxRows(option?: number): number {
+  if (option !== undefined && Number.isFinite(option) && option > 0) return Math.floor(option);
+  const fromEnv = Number(process.env.VESTI_RECALL_SNAPSHOT_MAX_ROWS);
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return Math.floor(fromEnv);
+  return DEFAULT_VECTOR_SNAPSHOT_MAX_ROWS;
+}
+
+interface DigestEmbeddingRow { session_id: string; embedding: Buffer }
+
+function loadVectorCandidateRows(
+  db: Database,
+  queryVector: Float32Array,
+  embeddingVersion?: string | null,
+): DigestEmbeddingRow[] {
+  return embeddingVersion
+    ? db.prepare(`
+        SELECT session_id, embedding FROM session_digest_embeddings
+        WHERE index_version = ? AND dimensions = ?
+      `).all(embeddingVersion, queryVector.length) as DigestEmbeddingRow[]
+    : db.prepare(`
+        SELECT session_id, embedding FROM session_digests
+        WHERE embedding_status = 'ok' AND embedding IS NOT NULL
+      `).all() as DigestEmbeddingRow[];
+}
+
+/** Rows whose BLOB fails to decode are skipped, exactly as the legacy scan did. */
+function buildVectorSnapshot(fingerprint: string, rows: DigestEmbeddingRow[]): VectorSnapshot {
+  const ids: string[] = [];
+  const vectors: Float32Array[] = [];
+  const normSqs: number[] = [];
+  for (const row of rows) {
+    try {
+      const vector = deserializeVector(row.embedding);
+      ids.push(row.session_id);
+      vectors.push(vector);
+      normSqs.push(vectorNormSq(vector));
+    } catch {
+      // Malformed BLOB (not a multiple of 4 bytes): not a candidate.
+    }
+  }
+  return { fingerprint, ids, vectors, normSqs: Float64Array.from(normSqs) };
+}
+
+/**
+ * Cosine-rank the snapshot against the query. Bit-identical to the original
+ * per-candidate cosineSimilarity + full sort: the query norm is computed
+ * once (same accumulation order as the old per-pair normA), the dot product
+ * accumulates in index order, and rankScoredCandidates reproduces the
+ * score-desc / id-asc / insertion-order tie-breaks. dotProduct throws on a
+ * dimension mismatch just as cosineSimilarity did.
+ */
+function rankVectorSnapshot(
+  snapshot: Pick<VectorSnapshot, 'ids' | 'vectors' | 'normSqs'>,
+  queryVector: Float32Array,
+  limit: number,
+): Array<{ id: string }> {
+  const queryNormSq = vectorNormSq(queryVector);
+  const scored = new Array<{ id: string; score: number }>(snapshot.ids.length);
+  for (let i = 0; i < snapshot.ids.length; i += 1) {
+    const dot = dotProduct(queryVector, snapshot.vectors[i]);
+    scored[i] = {
+      id: snapshot.ids[i],
+      score: cosineScoreFromNorms(dot, queryNormSq, snapshot.normSqs[i]),
+    };
+  }
+  return rankScoredCandidates(scored, limit).map(match => ({ id: match.id }));
+}
+
 function rankVectorHits(
   db: Database,
   queryVector: Float32Array,
   limit: number,
   embeddingVersion?: string | null,
+  maxRows?: number,
 ): Array<{ id: string }> {
-  const rows = embeddingVersion
-    ? db.prepare(`
-        SELECT session_id, embedding FROM session_digest_embeddings
-        WHERE index_version = ? AND dimensions = ?
-      `).all(embeddingVersion, queryVector.length) as Array<{ session_id: string; embedding: Buffer }>
-    : db.prepare(`
-        SELECT session_id, embedding FROM session_digests
-        WHERE embedding_status = 'ok' AND embedding IS NOT NULL
-      `).all() as Array<{ session_id: string; embedding: Buffer }>;
-  const candidates = rows.flatMap(row => {
-    try {
-      return [{ id: row.session_id, vector: deserializeVector(row.embedding) }];
-    } catch {
-      return [];
+  vectorSnapshotStats.probes += 1;
+  const fingerprint = probeVectorIndexFingerprint(db, embeddingVersion ?? null, queryVector.length);
+  const cacheKey = embeddingVersion
+    ? `v:${embeddingVersion}:${queryVector.length}`
+    : `legacy:${queryVector.length}`;
+  if (fingerprint !== null) {
+    let perDb = vectorSnapshotCache.get(db);
+    const cached = perDb?.get(cacheKey);
+    if (cached && cached.fingerprint === fingerprint) {
+      vectorSnapshotStats.hits += 1;
+      return rankVectorSnapshot(cached, queryVector, limit);
     }
-  });
-  return searchByVector(queryVector, candidates, limit).map(match => ({ id: match.id }));
+    const rows = loadVectorCandidateRows(db, queryVector, embeddingVersion);
+    if (rows.length <= resolveVectorSnapshotMaxRows(maxRows)) {
+      const snapshot = buildVectorSnapshot(fingerprint, rows);
+      if (!perDb) {
+        perDb = new Map();
+        vectorSnapshotCache.set(db, perDb);
+      }
+      perDb.set(cacheKey, snapshot);
+      vectorSnapshotStats.builds += 1;
+      return rankVectorSnapshot(snapshot, queryVector, limit);
+    }
+    // Over the row cap: fall through to an uncached direct scan below.
+    vectorSnapshotStats.directScans += 1;
+    return rankVectorSnapshot(buildVectorSnapshot(fingerprint, rows), queryVector, limit);
+  }
+  // Probe failed (e.g. legacy database without the tables): uncached scan,
+  // preserving the original behaviour (including any throw from the SELECT).
+  vectorSnapshotStats.directScans += 1;
+  const rows = loadVectorCandidateRows(db, queryVector, embeddingVersion);
+  return rankVectorSnapshot(buildVectorSnapshot('', rows), queryVector, limit);
 }
 
 /**
@@ -379,6 +568,7 @@ export function recallSessions(db: Database, query: string, options: SessionReca
         options.queryVector,
         candidateLimit,
         options.queryEmbeddingVersion,
+        options.vectorSnapshotMaxRows,
       ).map(row => row.id),
     );
   }

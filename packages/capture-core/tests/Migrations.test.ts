@@ -294,7 +294,7 @@ describe('schema migrations', () => {
     await manager.close();
 
     const migrations = appliedMigrations(dbPath);
-    expect(migrations.map(m => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    expect(migrations.map(m => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
     expect(migrations[0].name).toBe('add_work_sessions_session_type');
     expect(migrations[1].name).toBe('add_work_sessions_host');
     expect(migrations[2].name).toBe('add_session_digests_and_project_registry');
@@ -391,7 +391,7 @@ describe('schema migrations', () => {
 
     expect(columnNames(dbPath, 'work_sessions')).toContain('session_type');
     expect(columnNames(dbPath, 'work_sessions')).toContain('host');
-    expect(appliedMigrations(dbPath).map(m => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    expect(appliedMigrations(dbPath).map(m => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
     // Migration 3 creates the index tables on legacy databases too.
     expect(tableNames(dbPath)).toEqual(expect.arrayContaining(['session_digests', 'project_registry']));
     // Legacy rows get a project registry entry from the normal upsert path.
@@ -516,7 +516,38 @@ describe('schema migrations', () => {
     await second.initialize();
     await second.close();
 
-    expect(appliedMigrations(dbPath)).toHaveLength(15);
+    expect(appliedMigrations(dbPath)).toHaveLength(16);
+  });
+
+  it('migration 16 adds a covering (index_version, dimensions) index used by the recall probe', async () => {
+    const dir = await makeTempDir('vesti-migrations-v16-');
+    const dbPath = path.join(dir, 'vesti.db');
+
+    const manager = new DatabaseManager(dbPath);
+    await manager.initialize();
+
+    const db = new Database(dbPath, { readonly: true });
+    try {
+      const indexes = (db.prepare("PRAGMA index_list('session_digest_embeddings')").all() as Array<{ name: string }>)
+        .map(row => row.name);
+      expect(indexes).toContain('idx_session_digest_embeddings_version_dimensions');
+      const columns = db
+        .prepare("PRAGMA index_info('idx_session_digest_embeddings_version_dimensions')")
+        .all() as Array<{ name: string }>;
+      expect(columns.map(column => column.name)).toEqual(['index_version', 'dimensions']);
+      // The snapshot invalidation probe resolves through the new index
+      // instead of scanning the BLOB-bearing table.
+      const plan = db.prepare(`
+        EXPLAIN QUERY PLAN
+        SELECT COUNT(*) AS c, MAX(rowid) AS m, SUM(rowid) AS s
+        FROM session_digest_embeddings
+        WHERE index_version = 'v:test' AND dimensions = 4
+      `).all() as Array<{ detail: string }>;
+      expect(plan.some(row => row.detail.includes('idx_session_digest_embeddings_version_dimensions'))).toBe(true);
+    } finally {
+      db.close();
+      await manager.close();
+    }
   });
 
   it('migration 6 reclassifies degraded digest rows as skipped', async () => {
@@ -822,7 +853,7 @@ describe('migration 5: fts5 trigram tokenizer', () => {
     expect(ftsTableSql(dbPath, 'messages_fts').toLowerCase()).toContain('trigram');
     expect(ftsTableSql(dbPath, 'sessions_fts').toLowerCase()).toContain('trigram');
     const migrations = appliedMigrations(dbPath);
-    expect(migrations.map(m => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    expect(migrations.map(m => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
     expect(migrations[4].name).toBe('fts5_trigram_tokenizer');
     // Applied (not skipped) → no note.
     expect(migrationNote(dbPath, 5)).toBeNull();
@@ -852,7 +883,7 @@ describe('migration 5: fts5 trigram tokenizer', () => {
     // Rebuilt with trigram; schema_migrations records v5 without a skip note.
     expect(ftsTableSql(dbPath, 'messages_fts').toLowerCase()).toContain('trigram');
     expect(ftsTableSql(dbPath, 'sessions_fts').toLowerCase()).toContain('trigram');
-    expect(appliedMigrations(dbPath).map(m => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    expect(appliedMigrations(dbPath).map(m => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
     expect(migrationNote(dbPath, 5)).toBeNull();
 
     // Backfill完整性: every content row re-indexed (rebuild, not incremental).

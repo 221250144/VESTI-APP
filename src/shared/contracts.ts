@@ -716,7 +716,44 @@ export const IPC = {
   memoryMetaSet: 'vesti:memory-meta-set',
   customOwlGenerate: 'vesti:custom-owl-generate',
   customOwlRead: 'vesti:custom-owl-read',
+  updateStatus: 'vesti:update-status',
+  updateCheck: 'vesti:update-check',
+  updateDownload: 'vesti:update-download',
+  updateQuitAndInstall: 'vesti:update-quit-and-install',
+  updateStatusChanged: 'vesti:update-status-changed',
 } as const;
+
+// ---- Auto update (electron-updater, generic provider over vesti.world) ----
+
+export type UpdatePhase =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'downloading'
+  | 'downloaded'
+  | 'error';
+
+/**
+ * Public auto-update state mirrored to renderers (Settings About card, update
+ * banner). The state machine lives in src/main/updateService.ts; every
+ * transition is broadcast on IPC.updateStatusChanged.
+ */
+export interface UpdateStatusView {
+  /** false on unpackaged/dev builds — every update action is a no-op there. */
+  enabled: boolean;
+  phase: UpdatePhase;
+  currentVersion: string;
+  /** Server-side version once a check has found one. */
+  latestVersion: string | null;
+  /** 0–100 while phase === 'downloading' (100 once downloaded). */
+  percent: number | null;
+  /** Download throughput in bytes/sec while downloading. */
+  bytesPerSecond: number | null;
+  /** Human-readable failure detail while phase === 'error'. */
+  error: string | null;
+  /** Epoch ms of the last completed check; null before the first one. */
+  checkedAt: number | null;
+}
 
 // ---- Desktop floating capsule ----
 
@@ -1207,6 +1244,15 @@ export interface VestiDesktopApi {
   openExternal(url: string): Promise<void>;
   clearAgentResults(): Promise<void>;
   restartApp(): Promise<void>;
+  // ---- 自动更新(electron-updater;dev 构建下全部为 no-op) ----
+  getUpdateStatus(): Promise<UpdateStatusView>;
+  /** About 卡片/横幅的手动检查;已有检查或下载在进行时直接返回当前状态。 */
+  checkForUpdate(): Promise<UpdateStatusView>;
+  /** 下载已发现的更新(autoDownload 保持关闭,只有这里会触发下载)。 */
+  downloadUpdate(): Promise<UpdateStatusView>;
+  /** 退出并安装已下载的更新;仅 phase === 'downloaded' 时有效。 */
+  quitAndInstallUpdate(): Promise<void>;
+  onUpdateStatusChanged(listener: (status: UpdateStatusView) => void): () => void;
   testLlm(): Promise<LlmTestResult>;
   embeddingStatus(): Promise<EmbeddingStatus>;
   getThinkingMapSemantics(

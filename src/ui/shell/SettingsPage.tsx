@@ -11,6 +11,7 @@ import type {
   ExtensionPairCodeView,
   MembershipStatus,
   Overview,
+  UpdateStatusView,
   WslStatusView,
 } from "../../shared/contracts";
 import { useI18n } from "../i18n";
@@ -281,6 +282,19 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     aboutDesc: "本地优先的 AI 会话采集、归档与洞察工具。当前支持 Codex、Cursor、Kimi Code 和 Claude Code。",
     aboutWebsite: "访问官网",
     aboutPrivacy: "隐私政策",
+    updateTitle: "软件更新",
+    updateCurrent: "当前版本 v{version}",
+    updateCheck: "检查更新",
+    updateChecking: "正在检查更新…",
+    updateUpToDate: "已是最新版本",
+    updateNeverChecked: "尚未检查过更新",
+    updateAvailable: "发现新版本 v{version}",
+    updateDownload: "下载更新",
+    updateDownloading: "下载中 {percent}%",
+    updateDownloaded: "新版本已下载,重启后完成安装",
+    updateRestartInstall: "重启安装",
+    updateFailed: "检查失败,请稍后重试",
+    updateDisabled: "开发构建不参与自动更新",
     settingsDir: "设置目录",
     contentDir: "内容目录",
     openSettingsDir: "打开设置目录",
@@ -497,6 +511,19 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     aboutDesc: "A local-first AI conversation capture, archive, and insight tool. Currently supports Codex, Cursor, Kimi Code, and Claude Code.",
     aboutWebsite: "Visit website",
     aboutPrivacy: "Privacy policy",
+    updateTitle: "Software update",
+    updateCurrent: "Current version v{version}",
+    updateCheck: "Check for updates",
+    updateChecking: "Checking for updates…",
+    updateUpToDate: "You're up to date",
+    updateNeverChecked: "Not checked yet",
+    updateAvailable: "New version v{version} available",
+    updateDownload: "Download update",
+    updateDownloading: "Downloading {percent}%",
+    updateDownloaded: "Update downloaded — restart to install",
+    updateRestartInstall: "Restart & install",
+    updateFailed: "Check failed — please try again later",
+    updateDisabled: "Updates are disabled in development builds",
     settingsDir: "Settings directory",
     contentDir: "Content directory",
     openSettingsDir: "Open settings directory",
@@ -526,26 +553,26 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     generalTitle: "アプリの動作",
     generalDesc: "Windows へのサインイン時の起動方法と、ウィンドウを閉じた後の動作を設定します。",
     launchAtLogin: "サインイン時に Vesti を起動",
-    launchAtLoginDesc: "Windows へのサインイン後、収集サービスを自動的に開始します。",
+    launchAtLoginDesc: "Windows へのサインイン後、キャプチャサービスを自動的に開始します。",
     startMinimized: "起動時にウィンドウを隠す",
     startMinimizedDesc: "トレイアイコンだけを表示し、作業を中断しません。",
     closeToTray: "閉じてもトレイで実行を継続",
-    closeToTrayDesc: "ウィンドウを閉じてもバックグラウンド収集を続けます。終了はトレイメニューから行えます。",
+    closeToTrayDesc: "ウィンドウを閉じてもバックグラウンドキャプチャを続けます。終了はトレイメニューから行えます。",
     showCapsule: "デスクトップのフローティングボールを表示",
     showCapsuleDesc: "小さなフクロウを画面端に常駐させ、同期やメイン画面をすぐ開けます。",
     capsuleTitle: "フローティングボール",
     capsuleDesc: "デスクトップのフローティングボールの表示、話しかけ・完了通知、フクロウのスキンを設定します。",
-    ambientBubble: "フクロウの環境バブル",
+    ambientBubble: "フクロウのアンビエントバブル",
     ambientBubbleDesc: "アイドル時にフクロウが夢の整理や最新の会話についてそっと話しかけます。",
     agentNotify: "エージェント完了通知",
     agentNotifyDesc: "Kimi Code や Claude Code などのエージェントが作業を終えると、フローティングボールがお知らせします。",
-    captureTitle: "収集エンジン",
+    captureTitle: "キャプチャエンジン",
     captureDesc: "有効なツールがローカルに保存した会話ファイルだけを読み取ります。無効にしても保存済みデータは削除されません。",
-    watchOnStartup: "起動後にリアルタイム収集を開始",
+    watchOnStartup: "起動後にリアルタイムキャプチャを開始",
     watchOnStartupDesc: "新規・更新された会話ファイルを監視します。トレイからいつでも一時停止できます。",
     syncNow: "今すぐ同期",
     syncing: "同期中…",
-    liveCapture: "リアルタイム収集",
+    liveCapture: "リアルタイムキャプチャ",
     detected: "検出済み",
     notDetected: "未検出",
     sessions: "件の会話",
@@ -557,12 +584,18 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     wslRedetect: "再検出",
     wslDetecting: "検出中…",
     bridgeTitle: "VESTI 拡張機能を接続",
-    bridgeDesc: "ブラウザー拡張機能はローカルのループバックサービス経由で Web 会話を Vesti に取り込みます。ペアリングコードを生成して拡張機能に入力してください。",
+    bridgeDesc: "ブラウザ拡張機能はローカルのループバックサービス経由で Web 会話を Vesti に取り込みます。拡張機能のサイドパネルを開くと自動で接続されます（初回のみ確認が表示されます）。ペアリングコードでの手動接続も可能です。",
     bridgeRunning: "サービス実行中",
     bridgeStopped: "サービス停止中",
     bridgeError: "ポート競合のため拡張機能に接続できません",
+    bridgeAutoTitle: "自動接続（推奨）",
+    bridgeAutoDesc: "VESTI ブラウザ拡張機能をインストール済みなら、サイドパネルを開くだけで自動接続されます。初回のみこのデバイスで確認が表示され、以降は操作不要です。ペアリングウィンドウが開いている間だけ拡張機能から接続できます。",
+    bridgeOpenWindow: "ペアリングウィンドウを開く",
+    bridgeWindowOpen: "ペアリングウィンドウ開放中",
+    bridgeWindowClosed: "ペアリングウィンドウは閉じています。開くと拡張機能が自動接続できます。",
+    bridgeManualTitle: "ペアリングコードで接続（フォールバック）",
     bridgeGenerate: "ペアリングコードを生成",
-    bridgeCodeHint: "このコードをブラウザー拡張機能に入力",
+    bridgeCodeHint: "このコードをブラウザ拡張機能に入力",
     bridgeCodeExpired: "コードの有効期限が切れました。再生成してください。",
     bridgeClients: "接続済みクライアント",
     bridgeNoClients: "接続済みクライアントはありません。",
@@ -572,19 +605,19 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     bridgeDisconnect: "切断",
     bridgeDisconnectConfirm: "このクライアントを切断しますか？再度同期するには拡張機能のペアリングが必要です。",
     dataTitle: "データとプライバシー",
-    dataDesc: "会話データベース、正規化テキスト、Agent の結果を保存する場所です。アプリのインストール先とは独立しています。保存先を切り替えても既存データは移行されず、元のフォルダーにそのまま残ります。",
+    dataDesc: "会話データベース、正規化テキスト、エージェントの結果を保存する場所です。アプリのインストール先とは独立しています。保存先を切り替えても既存データは移行されず、元のフォルダにそのまま残ります。",
     dataDirectory: "データ保存先",
-    chooseFolder: "フォルダーを選択",
-    activeDir: "現在使用中:",
+    chooseFolder: "フォルダを選択",
+    activeDir: "現在使用中：",
     restartNeeded: "データ保存先の変更は再起動後に反映されます。既存データは自動移動されません。",
     restartNow: "今すぐ再起動",
-    openDataDir: "現在のデータフォルダーを開く",
-    clearAgent: "Agent の履歴を消去",
-    clearAgentConfirm: "Summary / Explore の結果をすべて削除しますか？収集済みの元会話は削除されません。",
-    clearAgentDone: "Agent の履歴を消去しました。",
-    clearAgentNote: "Agent の結果を消去しても、元会話、SQLite データベース、ソースツールのファイルには影響しません。",
+    openDataDir: "現在のデータフォルダを開く",
+    clearAgent: "エージェントの履歴を消去",
+    clearAgentConfirm: "Summary / Explore の結果をすべて削除しますか？キャプチャ済みの元の会話は削除されません。",
+    clearAgentDone: "エージェントの履歴を消去しました。",
+    clearAgentNote: "エージェントの結果を消去しても、元の会話、SQLite データベース、ソースツールのファイルには影響しません。",
     llmTitle: "モデルサービス",
-    llmDesc: "ブラウザー拡張機能と同様に、Vesti Demo Proxy または独自の OpenAI 互換 API キーを使用できます。",
+    llmDesc: "ブラウザ拡張機能と同様に、Vesti Demo Proxy または独自の OpenAI 互換 API キーを使用できます。",
     demoProxy: "Demo Proxy",
     demoProxyDesc: "すぐに利用可能。モデル名はそのまま送信",
     demoProxyPrivacyNote: "リクエストは Vesti ゲートウェイ経由で第三者のモデルサービスに転送され、会話内容はこの端末の外部に送信されます。",
@@ -595,8 +628,8 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     temperature: "Temperature",
     maxTokens: "最大出力 Token",
     maxTokensHint: "0 = 無制限（モデルのデフォルト上限）、長文が途中で切れません",
-    embeddingModel: "埋め込みモデル (Embedding)",
-    embeddingModelHint: "セマンティック索引と召回に使用します。空欄ならデフォルトの text-embedding-v1。リクエストは Base URL の /embeddings エンドポイントに送られます。",
+    embeddingModel: "埋め込みモデル（Embedding）",
+    embeddingModelHint: "セマンティックインデックスとリコールに使用します。空欄ならデフォルトの text-embedding-v1。リクエストは Base URL の /embeddings エンドポイントに送られます。",
     apiKeySaved: "（安全に保存済み。空欄なら維持）",
     deleteApiKey: "保存済み API キーを削除",
     apiKeyNote: "API キーは OS の安全なストレージで暗号化され、この画面から平文を読み取ることはありません。",
@@ -611,12 +644,12 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     includeToolDetails: "ツール呼び出しの詳細を含める",
     includeToolDetailsDesc: "ツール名、入力、出力、エラーを送信し、より詳しく分析します。",
     organizeTitle: "整理",
-    organizeDesc: "未分類の会話をトピックツリーへ自動整理します。確信度が低い結果は確認待ちになり、手動分類は上書きしません。",
+    organizeDesc: "未分類の会話をトピックツリーへ自動整理します。信頼度が低い結果は確認待ちになり、手動分類は上書きしません。",
     organizeAuto: "自動分類",
     organizeAutoDesc: "新しい会話の同期完了から約 10 秒後に自動実行します。",
     organizeUnavailable: "自動分類を使うには、下の「モデルサービス」で利用可能なモデルを設定してください。",
     organizeModeAuto: "自動で適用",
-    organizeModeAutoDesc: "確信度 60% 以上を直接分類",
+    organizeModeAutoDesc: "信頼度 60% 以上を直接分類",
     organizeModeSuggest: "提案のみ",
     organizeModeSuggestDesc: "すべて確認待ちに追加",
     organizeNow: "今すぐ整理",
@@ -632,40 +665,52 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     organizeAccept: "承認",
     organizeIgnore: "無視",
     organizeAcceptAll: "すべて承認",
+    organizeTidy: "既存トピックを整理",
+    organizeTidyDesc: "AI にトピックツリーをレビューさせ、同義トピックの統合や名前の改善を提案させます。確認後にのみ適用されます。",
+    organizeTidyRunning: "レビュー中…",
+    organizeTidyEmpty: "レビュー完了：トピックツリーに整理の必要はありません。",
+    organizeTidyFailed: "整理レビューに失敗しました。後でもう一度お試しください。",
+    organizeTidySuggestions: "整理の提案（確認後に適用）",
+    organizeTidyMerge: "統合",
+    organizeTidyRename: "改名",
+    organizeTidyApply: "整理を適用",
+    organizeTidyApplying: "適用中…",
+    organizeTidyCancel: "キャンセル",
+    organizeTidyDone: "整理を適用しました：{merged} 組を統合、{renamed} 件を改名。",
     dailyTitle: "デイリーログ",
-    dailyDesc: "毎日決まった時刻に当日のレポートを生成します。起動時には未生成の前日分を補完し、モデル未設定時はローカルテンプレートを使います。",
+    dailyDesc: "毎日決まった時刻に当日のレポートを生成します。起動時には未生成の前日分もまとめて生成し、モデル未設定時はローカルテンプレートを使います。",
     dailyTime: "毎日の生成時刻",
     dailyTimeDesc: "既定は 21:30。活動がない日はスキップします。",
     upstreamTitle: "外部へのエクスポート",
-    upstreamDesc: "会話を Obsidian Vault または Notion に出力します。Obsidian は選択したローカルフォルダーへ書き込み、Notion Token は OS の安全なストレージで暗号化します。",
+    upstreamDesc: "会話を Obsidian Vault または Notion にエクスポートします。Obsidian は選択したローカルフォルダへ書き込み、Notion Token は OS の安全なストレージで暗号化します。",
     obsidianSection: "Obsidian",
-    vaultPath: "Vault フォルダー",
+    vaultPath: "Vault フォルダ",
     vaultNotChosen: "未選択",
-    vaultChoose: "フォルダーを選択",
+    vaultChoose: "フォルダを選択",
     autoExport: "新しい会話を Obsidian へ自動エクスポート",
-    autoExportDesc: "同期の約 15 秒後、まだ出力していない新しい会話を Vault に書き込みます。",
-    exportAllObsidian: "すべて Obsidian に出力",
-    exportAllMarkdown: "すべて Markdown フォルダーに出力",
+    autoExportDesc: "同期の約 15 秒後、まだエクスポートしていない新しい会話を Vault に書き込みます。",
+    exportAllObsidian: "すべて Obsidian にエクスポート",
+    exportAllMarkdown: "すべて Markdown フォルダにエクスポート",
     notionSection: "Notion",
     notionToken: "Integration Token",
     notionTokenSaved: "（安全に保存済み。空欄なら維持）",
     deleteNotionToken: "保存済み Token を削除",
     notionParent: "対象 Page ID / Database ID",
     notionParentHint: "Notion の対象ページでも「··· → 接続」からこの Integration を許可してください。",
-    notionParentTypePage: "確認済み: ページ",
-    notionParentTypeDatabase: "確認済み: データベース",
+    notionParentTypePage: "確認済み：ページ",
+    notionParentTypeDatabase: "確認済み：データベース",
     notionVerify: "保存して接続を確認",
     notionVerifying: "確認中…",
-    statsExported: "出力済み",
+    statsExported: "エクスポート済み",
     statsFailed: "失敗",
     statsPending: "待機中",
-    statsLastAt: "最終出力",
+    statsLastAt: "最終エクスポート",
     statsLastError: "最新のエラー",
-    statsNever: "まだ出力されていません。",
-    exportRunning: "出力中",
-    exportDone: "出力完了",
+    statsNever: "まだエクスポートされていません。",
+    exportRunning: "エクスポート中",
+    exportDone: "エクスポート完了",
     exportFailedCount: "失敗",
-    exportNeedVault: "先に Vault フォルダーを選択して保存してください。",
+    exportNeedVault: "先に Vault フォルダを選択して保存してください。",
     networkTitle: "ネットワークとプロキシ",
     networkDesc: "モデルへのリクエストは既定で Windows のシステムプロキシに従います。変更は再起動なしで反映されます。",
     proxySystem: "システム設定に従う",
@@ -684,20 +729,33 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     owlSkinDesc: "小さなフクロウの外観を選択します。クリックするとすぐ反映されます。",
     customOwlSlot: "カスタム",
     customOwlDiyTitle: "フクロウをDIYする",
-    customOwlDiyDesc: "欲しいスタイルを一言で伝えると、AI が統一されたフクロウの形象で専用スキンを描きます。フローティングボールと夜話アバターの両方に適用されます。",
-    customOwlPlaceholder: "例：青花瓷の模様、淡い藍色",
+    customOwlDiyDesc: "欲しいスタイルを一言で伝えると、AI が統一されたフクロウのイメージで専用スキンを描きます。フローティングボールと夜話アバターの両方に適用されます。",
+    customOwlPlaceholder: "例：染付の模様、淡い藍色",
     customOwlGenerate: "スキンを生成",
     customOwlGenerating: "描画中…",
     customOwlMemberHint: "DIY スキンはメンバー限定です。生成ごとに 20 クレジットを消費します。",
     customOwlEmptyHint: "まず欲しいスタイルを教えてください。",
     customOwlFailed: "生成に失敗しました。後でもう一度お試しください。",
     aboutTitle: "Vesti について",
-    aboutDesc: "ローカル優先の AI 会話収集・整理・インサイトツールです。Codex、Cursor、Kimi Code、Claude Code に対応しています。",
+    aboutDesc: "ローカル優先の AI 会話キャプチャ・整理・インサイトツールです。Codex、Cursor、Kimi Code、Claude Code に対応しています。",
     aboutWebsite: "公式サイト",
     aboutPrivacy: "プライバシーポリシー",
-    settingsDir: "設定フォルダー",
-    contentDir: "コンテンツフォルダー",
-    openSettingsDir: "設定フォルダーを開く",
+    updateTitle: "ソフトウェア更新",
+    updateCurrent: "現在のバージョン v{version}",
+    updateCheck: "アップデートを確認",
+    updateChecking: "確認中…",
+    updateUpToDate: "最新バージョンです",
+    updateNeverChecked: "まだ確認していません",
+    updateAvailable: "新しいバージョン v{version} があります",
+    updateDownload: "アップデートをダウンロード",
+    updateDownloading: "ダウンロード中 {percent}%",
+    updateDownloaded: "ダウンロード済み — 再起動してインストール",
+    updateRestartInstall: "再起動してインストール",
+    updateFailed: "確認に失敗しました。後でもう一度お試しください",
+    updateDisabled: "開発ビルドでは自動更新は無効です",
+    settingsDir: "設定フォルダ",
+    contentDir: "コンテンツフォルダ",
+    openSettingsDir: "設定フォルダを開く",
     restartApp: "Vesti を再起動",
     saveAndTest: "保存してモデルをテスト",
     save: "設定を保存",
@@ -705,7 +763,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     saved: "設定を保存しました。",
     savedRestart: "設定を保存しました。データ保存先は再起動後に切り替わります。",
     mcpTitle: "エージェントに接続",
-    mcpDesc: "Vesti の記憶サーバー（vesti-mcp）を各エージェントの MCP 設定にワンクリックで書き込みます。登録後、エージェントはプロジェクトで新しいセッションを始めるときに状態カード・ブリーフ・最近のセッションを自動で取得でき、背景を説明し直す必要がありません。書き込み前に元の設定をバックアップし、既存の他の MCP サーバーには触れません。",
+    mcpDesc: "Vesti のメモリーサーバー（vesti-mcp）を各エージェントの MCP 設定にワンクリックで書き込みます。登録後、エージェントはプロジェクトで新しいセッションを始めるときに状態カード・ブリーフ・最近のセッションを自動で取得でき、背景を説明し直す必要がありません。書き込み前に元の設定をバックアップし、既存の他の MCP サーバーには触れません。",
     mcpDetected: "検出済み",
     mcpNotDetected: "未検出",
     mcpRegistered: "登録済み",
@@ -714,21 +772,21 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     mcpRemove: "削除",
     mcpWorking: "書き込み中…",
     mcpServerMissing: "vesti-mcp のビルド成果物が見つかりません。リポジトリのルートで pnpm mcp:build を先に実行してください。",
-    mcpBackupAt: "元の設定をバックアップ:",
+    mcpBackupAt: "元の設定をバックアップ：",
     mcpGuideOk: "セッション開始ガイド導入済み",
     mcpGuideOutdated: "セッション開始ガイドが古い — 再登録で更新",
-    mcpFailed: "書き込みに失敗:",
+    mcpFailed: "書き込みに失敗：",
   },
   ko: {
     loading: "설정을 불러오는 중…",
     generalTitle: "앱 동작",
     generalDesc: "Windows 로그인 시 Vesti가 시작되는 방식과 창을 닫은 뒤의 동작을 설정합니다.",
     launchAtLogin: "로그인할 때 Vesti 시작",
-    launchAtLoginDesc: "Windows에 로그인하면 수집 서비스를 자동으로 시작합니다.",
+    launchAtLoginDesc: "Windows에 로그인하면 캡처 서비스를 자동으로 시작합니다.",
     startMinimized: "시작할 때 창 숨기기",
     startMinimizedDesc: "트레이 아이콘만 표시하여 현재 작업을 방해하지 않습니다.",
     closeToTray: "창을 닫아도 트레이에서 계속 실행",
-    closeToTrayDesc: "창을 닫은 뒤에도 백그라운드 수집을 계속합니다. 트레이 메뉴에서 완전히 종료할 수 있습니다.",
+    closeToTrayDesc: "창을 닫은 뒤에도 백그라운드 캡처를 계속합니다. 트레이 메뉴에서 완전히 종료할 수 있습니다.",
     showCapsule: "데스크톱 플로팅 볼 표시",
     showCapsuleDesc: "작은 부엉이를 화면 가장자리에 두고 동기화하거나 메인 화면을 빠르게 엽니다.",
     capsuleTitle: "플로팅 볼",
@@ -737,13 +795,13 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     ambientBubbleDesc: "한가할 때 부엉이가 꿈 정리와 최근 대화에 대해 가볍게 말을 겁니다.",
     agentNotify: "에이전트 완료 알림",
     agentNotifyDesc: "Kimi Code, Claude Code 등 에이전트가 작업을 마치면 플로팅 볼이 알려줍니다.",
-    captureTitle: "수집 엔진",
+    captureTitle: "캡처 엔진",
     captureDesc: "활성화한 도구가 로컬에 저장한 대화 파일만 읽습니다. 소스를 꺼도 이미 보관된 데이터는 삭제되지 않습니다.",
-    watchOnStartup: "시작 후 실시간 수집",
+    watchOnStartup: "시작 후 실시간 캡처",
     watchOnStartupDesc: "새로 만들거나 변경한 대화 파일을 감시합니다. 트레이 메뉴에서 언제든 일시 중지할 수 있습니다.",
     syncNow: "지금 동기화",
     syncing: "동기화 중…",
-    liveCapture: "실시간 수집",
+    liveCapture: "실시간 캡처",
     detected: "감지됨",
     notDetected: "감지되지 않음",
     sessions: "개 대화",
@@ -755,10 +813,16 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     wslRedetect: "다시 감지",
     wslDetecting: "감지 중…",
     bridgeTitle: "VESTI 확장 프로그램 연결",
-    bridgeDesc: "브라우저 확장 프로그램은 로컬 루프백 서비스를 통해 웹 대화를 Vesti로 가져옵니다. 페어링 코드를 생성해 확장 프로그램에 입력하세요.",
+    bridgeDesc: "브라우저 확장 프로그램은 로컬 루프백 서비스로 웹 대화를 Vesti로 가져옵니다. 확장 프로그램 사이드 패널을 열면 자동으로 연결되며(최초 한 번 확인이 표시됩니다), 페어링 코드로 수동 연결할 수도 있습니다.",
     bridgeRunning: "서비스 실행 중",
     bridgeStopped: "서비스 중지됨",
     bridgeError: "포트 충돌로 확장 프로그램 연결을 사용할 수 없습니다",
+    bridgeAutoTitle: "자동 연결(권장)",
+    bridgeAutoDesc: "VESTI 브라우저 확장 프로그램을 설치했다면 사이드 패널을 여는 것만으로 자동 연결됩니다. 첫 연결 시 이 기기에서 한 번만 확인을 표시하고 이후에는 조작이 필요 없습니다. 페어링 창이 열린 상태일 때만 확장 프로그램이 연결할 수 있습니다.",
+    bridgeOpenWindow: "페어링 창 열기",
+    bridgeWindowOpen: "페어링 창 열림",
+    bridgeWindowClosed: "페어링 창이 닫혀 있습니다. 열어야 확장 프로그램이 자동 연결할 수 있습니다.",
+    bridgeManualTitle: "페어링 코드로 연결(대체 수단)",
     bridgeGenerate: "페어링 코드 생성",
     bridgeCodeHint: "이 코드를 브라우저 확장 프로그램에 입력",
     bridgeCodeExpired: "코드가 만료되었습니다. 새로 생성하세요.",
@@ -770,17 +834,17 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     bridgeDisconnect: "연결 해제",
     bridgeDisconnectConfirm: "이 클라이언트의 연결을 해제할까요? 계속 동기화하려면 확장 프로그램을 다시 페어링해야 합니다.",
     dataTitle: "데이터 및 개인정보",
-    dataDesc: "대화 데이터베이스, 정규화된 텍스트와 Agent 결과가 저장되는 위치입니다. 앱 설치 위치와 콘텐츠 저장 위치는 서로 독립적입니다. 저장 위치를 변경할 경우 기존 데이터는 이전되지 않고 원래 폴더에 그대로 남습니다.",
+    dataDesc: "대화 데이터베이스, 정규화된 텍스트와 에이전트 결과가 저장되는 위치입니다. 앱 설치 위치와 콘텐츠 저장 위치는 서로 독립적입니다. 저장 위치를 변경할 경우 기존 데이터는 이전되지 않고 원래 폴더에 그대로 남습니다.",
     dataDirectory: "데이터 폴더",
     chooseFolder: "폴더 선택",
     activeDir: "현재 사용 중:",
     restartNeeded: "데이터 폴더 변경은 앱을 다시 시작한 뒤 적용됩니다. 기존 데이터는 자동으로 이동하지 않습니다.",
     restartNow: "지금 다시 시작",
     openDataDir: "현재 데이터 폴더 열기",
-    clearAgent: "Agent 기록 지우기",
-    clearAgentConfirm: "Summary / Explore 결과를 모두 삭제할까요? 수집한 원본 대화는 삭제되지 않습니다.",
-    clearAgentDone: "Agent 기록을 지웠습니다.",
-    clearAgentNote: "Agent 결과를 지워도 원본 대화, SQLite 데이터베이스 또는 소스 도구의 파일에는 영향을 주지 않습니다.",
+    clearAgent: "에이전트 기록 지우기",
+    clearAgentConfirm: "Summary / Explore 결과를 모두 삭제할까요? 캡처된 원본 대화는 삭제되지 않습니다.",
+    clearAgentDone: "에이전트 기록을 지웠습니다.",
+    clearAgentNote: "에이전트 결과를 지워도 원본 대화, SQLite 데이터베이스 또는 소스 도구의 파일에는 영향을 주지 않습니다.",
     llmTitle: "모델 서비스",
     llmDesc: "브라우저 확장 프로그램과 동일하게 Vesti Demo Proxy를 사용하거나 OpenAI 호환 API 키를 직접 연결할 수 있습니다.",
     demoProxy: "Demo Proxy",
@@ -830,8 +894,20 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     organizeAccept: "수락",
     organizeIgnore: "무시",
     organizeAcceptAll: "모두 수락",
+    organizeTidy: "기존 주제 정리",
+    organizeTidyDesc: "AI가 주제 트리를 검토해 동의어 주제 병합과 이름 개선을 제안합니다. 확인한 뒤에만 적용됩니다.",
+    organizeTidyRunning: "검토 중…",
+    organizeTidyEmpty: "검토 완료: 주제 트리를 정리할 필요가 없습니다.",
+    organizeTidyFailed: "정리 검토에 실패했습니다. 잠시 후 다시 시도하세요.",
+    organizeTidySuggestions: "정리 제안(확인 후 적용)",
+    organizeTidyMerge: "병합",
+    organizeTidyRename: "이름 변경",
+    organizeTidyApply: "정리 적용",
+    organizeTidyApplying: "적용 중…",
+    organizeTidyCancel: "취소",
+    organizeTidyDone: "정리를 적용했습니다: {merged}개 그룹 병합, {renamed}개 주제 이름 변경.",
     dailyTitle: "일일 로그",
-    dailyDesc: "매일 정해진 시간에 그날의 보고서를 생성합니다. 앱 시작 시 놓친 전날 보고서를 보완하며, 모델이 없으면 로컬 템플릿을 사용합니다.",
+    dailyDesc: "매일 정해진 시간에 그날의 보고서를 생성합니다. 앱 시작 시 놓친 전날 보고서를 함께 생성하며, 모델이 없으면 로컬 템플릿을 사용합니다.",
     dailyTime: "매일 생성 시간",
     dailyTimeDesc: "기본값은 21:30이며 활동이 없는 날은 건너뜁니다.",
     upstreamTitle: "외부 내보내기",
@@ -849,7 +925,7 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     notionTokenSaved: "(안전하게 저장됨, 비워 두면 유지)",
     deleteNotionToken: "저장된 Token 삭제",
     notionParent: "대상 Page ID / Database ID",
-    notionParentHint: "Notion 대상 페이지의 ‘··· → 연결’에서도 이 Integration을 허용하세요.",
+    notionParentHint: "Notion 대상 페이지의 「··· → 연결」에서도 이 Integration을 허용하세요.",
     notionParentTypePage: "확인됨: 페이지",
     notionParentTypeDatabase: "확인됨: 데이터베이스",
     notionVerify: "저장하고 연결 확인",
@@ -890,9 +966,22 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
     customOwlEmptyHint: "먼저 원하는 스타일을 알려 주세요.",
     customOwlFailed: "생성에 실패했습니다. 잠시 후 다시 시도해 주세요.",
     aboutTitle: "Vesti 정보",
-    aboutDesc: "로컬 우선 AI 대화 수집, 보관 및 인사이트 도구입니다. Codex, Cursor, Kimi Code와 Claude Code를 지원합니다.",
+    aboutDesc: "로컬 우선 AI 대화 캡처, 보관 및 인사이트 도구입니다. Codex, Cursor, Kimi Code와 Claude Code를 지원합니다.",
     aboutWebsite: "공식 웹사이트",
     aboutPrivacy: "개인정보 처리방침",
+    updateTitle: "소프트웨어 업데이트",
+    updateCurrent: "현재 버전 v{version}",
+    updateCheck: "업데이트 확인",
+    updateChecking: "확인 중…",
+    updateUpToDate: "최신 버전입니다",
+    updateNeverChecked: "아직 확인하지 않았습니다",
+    updateAvailable: "새 버전 v{version}을(를) 사용할 수 있습니다",
+    updateDownload: "업데이트 다운로드",
+    updateDownloading: "다운로드 중 {percent}%",
+    updateDownloaded: "다운로드 완료 — 재시작하면 설치됩니다",
+    updateRestartInstall: "재시작하여 설치",
+    updateFailed: "확인에 실패했습니다. 잠시 후 다시 시도하세요",
+    updateDisabled: "개발 빌드에서는 자동 업데이트가 비활성화됩니다",
     settingsDir: "설정 폴더",
     contentDir: "콘텐츠 폴더",
     openSettingsDir: "설정 폴더 열기",
@@ -922,6 +1011,26 @@ const COPY: Record<SupportedLocale, Record<string, string>> = {
 function errorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/, "");
+}
+
+/** About 卡片「软件更新」区块的状态文案(版本号/百分比由状态插值)。 */
+function updateStatusText(copy: Record<string, string>, update: UpdateStatusView | null): string {
+  if (!update) return copy.updateNeverChecked;
+  if (!update.enabled) return copy.updateDisabled;
+  switch (update.phase) {
+    case "checking":
+      return copy.updateChecking;
+    case "available":
+      return copy.updateAvailable.replace("{version}", update.latestVersion ?? "");
+    case "downloading":
+      return copy.updateDownloading.replace("{percent}", String(Math.round(update.percent ?? 0)));
+    case "downloaded":
+      return copy.updateDownloaded;
+    case "error":
+      return copy.updateFailed;
+    default:
+      return update.checkedAt ? copy.updateUpToDate : copy.updateNeverChecked;
+  }
 }
 
 function toDraft(settings: AppSettingsView): SettingsDraft {
@@ -1196,6 +1305,53 @@ export function SettingsPage({
   const [mcpTargets, setMcpTargets] = useState<AgentMcpTargetStatus[] | null>(null);
   const [mcpBusy, setMcpBusy] = useState<AgentMcpTargetId | null>(null);
   const [mcpNote, setMcpNote] = useState("");
+  // 自动更新状态(About 卡片):主进程状态机镜像,事件实时推送。
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatusView | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
+
+  useEffect(() => {
+    const api = window.vesti;
+    if (!api?.getUpdateStatus) return;
+    let cancelled = false;
+    void api.getUpdateStatus()
+      .then((status) => {
+        if (!cancelled) setUpdateStatus(status);
+      })
+      .catch(() => undefined);
+    const off = api.onUpdateStatusChanged(setUpdateStatus);
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, []);
+
+  const handleCheckUpdate = useCallback(async () => {
+    if (updateBusy || !window.vesti?.checkForUpdate) return;
+    setUpdateBusy(true);
+    try {
+      setUpdateStatus(await window.vesti.checkForUpdate());
+    } catch {
+      // 主进程已转入 error 状态并广播;这里无需额外提示。
+    } finally {
+      setUpdateBusy(false);
+    }
+  }, [updateBusy]);
+
+  const handleDownloadUpdate = useCallback(async () => {
+    if (updateBusy || !window.vesti?.downloadUpdate) return;
+    setUpdateBusy(true);
+    try {
+      setUpdateStatus(await window.vesti.downloadUpdate());
+    } catch {
+      // 同上:失败由状态机广播。
+    } finally {
+      setUpdateBusy(false);
+    }
+  }, [updateBusy]);
+
+  const handleQuitAndInstall = useCallback(() => {
+    void window.vesti?.quitAndInstallUpdate?.().catch(() => undefined);
+  }, []);
 
   const loadMcpTargets = useCallback(async () => {
     setMcpTargets(await window.vesti.getAgentMcpStatus().catch(() => null));
@@ -2643,6 +2799,56 @@ export function SettingsPage({
               <dd className="min-w-0 flex-1 truncate text-text-secondary">{settings.activeDataDirectory}</dd>
             </div>
           </dl>
+          <div className="mb-4 rounded-xl border border-border-subtle bg-bg-secondary/50 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-[13px] font-sans font-medium text-text-primary">{copy.updateTitle}</div>
+                <div className="mt-0.5 text-[12px] font-sans text-text-tertiary">
+                  {copy.updateCurrent.replace("{version}", settings.appVersion)}
+                  {" · "}
+                  {updateStatusText(copy, updateStatus)}
+                </div>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                {updateStatus?.phase === "available" ? (
+                  <button
+                    type="button"
+                    className={buttonPrimary}
+                    disabled={updateBusy}
+                    onClick={() => void handleDownloadUpdate()}
+                  >
+                    {copy.updateDownload}
+                  </button>
+                ) : updateStatus?.phase === "downloaded" ? (
+                  <button type="button" className={buttonPrimary} onClick={handleQuitAndInstall}>
+                    {copy.updateRestartInstall}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className={buttonSecondary}
+                    disabled={
+                      updateBusy
+                      || !updateStatus?.enabled
+                      || updateStatus.phase === "checking"
+                      || updateStatus.phase === "downloading"
+                    }
+                    onClick={() => void handleCheckUpdate()}
+                  >
+                    {updateStatus?.phase === "checking" ? copy.updateChecking : copy.updateCheck}
+                  </button>
+                )}
+              </div>
+            </div>
+            {updateStatus?.phase === "downloading" ? (
+              <div className="mt-2.5 h-1.5 overflow-hidden rounded-full bg-bg-tertiary">
+                <div
+                  className="h-full rounded-full bg-accent-primary transition-[width] [transition-duration:200ms]"
+                  style={{ width: `${Math.round(updateStatus.percent ?? 0)}%` }}
+                />
+              </div>
+            ) : null}
+          </div>
           <div className="flex flex-wrap gap-2">
             <button type="button" className={buttonSecondary} onClick={() => void window.vesti.openExternal("https://vesti.world")}>
               {copy.aboutWebsite}

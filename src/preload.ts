@@ -6,6 +6,7 @@ import {
   type CapsuleState,
   type ExtensionImportRequestPayload,
   type ExtensionImportResultPayload,
+  type UpdateStatusView,
   type VestiCapsuleApi,
   type VestiCreditApi,
   type VestiDesktopApi,
@@ -75,6 +76,16 @@ const api: VestiDesktopApi = {
   openExternal: url => ipcRenderer.invoke(IPC.openExternal, url),
   clearAgentResults: () => ipcRenderer.invoke(IPC.clearAgentResults),
   restartApp: () => ipcRenderer.invoke(IPC.restart),
+  // ---- 自动更新 ----
+  getUpdateStatus: () => ipcRenderer.invoke(IPC.updateStatus),
+  checkForUpdate: () => ipcRenderer.invoke(IPC.updateCheck),
+  downloadUpdate: () => ipcRenderer.invoke(IPC.updateDownload),
+  quitAndInstallUpdate: () => ipcRenderer.invoke(IPC.updateQuitAndInstall),
+  onUpdateStatusChanged: listener => {
+    const wrapped = (_event: unknown, status: UpdateStatusView) => listener(status);
+    ipcRenderer.on(IPC.updateStatusChanged, wrapped);
+    return () => ipcRenderer.removeListener(IPC.updateStatusChanged, wrapped);
+  },
   testLlm: () => ipcRenderer.invoke(IPC.llmTest),
   embeddingStatus: () => ipcRenderer.invoke(IPC.embeddingStatus),
   getThinkingMapSemantics: (sessionIds, totalConversationCount) =>
