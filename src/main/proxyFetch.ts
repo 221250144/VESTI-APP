@@ -76,11 +76,19 @@ async function attemptFetch(
     timeoutMs,
   );
   try {
-    return await fetchImpl(requestEndpoint, {
+    const response = await fetchImpl(requestEndpoint, {
       method: 'POST',
       headers,
       body,
       signal: controller.signal,
+    });
+    // These endpoints are non-streaming JSON. Keep cancellation/deadlines
+    // attached until the body is complete, not merely until headers arrive.
+    const payload = response.body ? await response.arrayBuffer() : null;
+    return new Response(payload, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
     });
   } finally {
     clearTimeout(timer);

@@ -151,6 +151,7 @@ export class EmbeddingService {
   }
 
   private async embedQueued(texts: string[]): Promise<EmbeddingBatchResult> {
+    const generation = this.settingsGeneration;
     const strings = this.strings();
     if (texts.length === 0) {
       throw new EmbeddingRequestError(strings.emptyInput);
@@ -180,9 +181,13 @@ export class EmbeddingService {
         metadata = batch.metadata;
         vectors.push(...batch.vectors);
       }
-      this.status = { available: true };
-      this.probed = true;
-      if (keys) {
+      // Settings may change while the endpoint request is in flight. Return
+      // its result to the original caller without reviving stale shared state.
+      if (generation === this.settingsGeneration) {
+        this.status = { available: true };
+        this.probed = true;
+      }
+      if (keys && generation === this.settingsGeneration) {
         keys.forEach((key, index) => {
           const vector = vectors[index];
           if (vector) this.cacheSet(key, { vector, metadata: metadata! });
@@ -190,11 +195,13 @@ export class EmbeddingService {
       }
       return { vectors, metadata: metadata! };
     } catch (error) {
-      this.status = {
-        available: false,
-        reason: error instanceof Error ? error.message : strings.requestFailed,
-      };
-      this.probed = true;
+      if (generation === this.settingsGeneration) {
+        this.status = {
+          available: false,
+          reason: error instanceof Error ? error.message : strings.requestFailed,
+        };
+        this.probed = true;
+      }
       throw error;
     }
   }
@@ -295,8 +302,16 @@ export class EmbeddingService {
     }
 
     const ordered = [...payload.data].sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+    // Some compatible providers omit indices entirely and preserve order.
+    // If any index is supplied, require an exact permutation of the batch;
+    // duplicates or missing indices would silently attach vectors to wrong texts.
+    if (ordered.some(item => item.index !== undefined)
+      && ordered.some((item, index) => item.index !== index)) {
+      throw new EmbeddingRequestError(strings.badResponse);
+    }
     const vectors = ordered.map(item => {
-      if (!Array.isArray(item.embedding) || !item.embedding.every(value => typeof value === 'number')) {
+      if (!Array.isArray(item.embedding) || !item.embedding.every(value =>
+        typeof value === 'number' && Number.isFinite(value) && Number.isFinite(Math.fround(value)))) {
         throw new EmbeddingRequestError(strings.badResponse);
       }
       return Float32Array.from(item.embedding as number[]);

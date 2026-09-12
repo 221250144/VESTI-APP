@@ -2,6 +2,9 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+// This suite exercises the ledger with injected network functions. Importing
+// settings constants must not require a downloaded Electron executable.
+vi.mock('electron', () => ({ safeStorage: {}, net: { fetch: vi.fn() } }));
 import {
   CREDITS_FILE_NAME,
   CreditError,
